@@ -1,0 +1,46 @@
+[Unit]
+Description=Sentinel - unified camera/music/monitoring service
+Documentation=file:/opt/sentinel/README.md
+After=network-online.target sound.target bluetooth.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=sentinel
+Group=sentinel
+# video: cameras / audio: ALSA / bluetooth: BlueZ / plugdev: some USB devices
+SupplementaryGroups=video audio bluetooth plugdev
+
+WorkingDirectory=/opt/sentinel
+Environment=PYTHONUNBUFFERED=1
+Environment=PYTHONDONTWRITEBYTECODE=1
+Environment=SENTINEL_STORAGE=/mnt/VIDEOSD
+ExecStart=/opt/sentinel/.venv/bin/python -m sentinel.main
+
+# Self-heal: restart no matter how it exits.
+Restart=always
+RestartSec=5
+StartLimitIntervalSec=0
+
+TimeoutStopSec=20
+KillMode=mixed
+KillSignal=SIGTERM
+
+# --- Least privilege ---
+# Never runs as root. The only root action (reboot) is granted via sudoers.
+NoNewPrivileges=false
+PrivateTmp=false
+ProtectHome=false
+ProtectSystem=false
+
+# --- Resource caps (protect the Pi 3B+'s 1GB RAM) ---
+MemoryMax=700M
+MemoryHigh=600M
+OOMPolicy=continue
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=sentinel
+
+[Install]
+WantedBy=multi-user.target
