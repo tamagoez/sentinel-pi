@@ -8,7 +8,9 @@ Web 端末を 1 つのサービスにまとめ、ポート 8080 で完結させ�
 
 git clone してから `setup.sh` を実行します。スクリプトが判断できる部分は自動で
 進み、人の判断が要る 6 か所 (H1〜H6) で止まって尋ねる、半自動の導入です。
-詳細は `SETUP.md` を参照してください。
+詳細は `SETUP.ja.md` (日本語) / `SETUP.md` (English) を参照してください。
+Windows から SD カードを準備する場合、`windows/Configure-DietPi.ps1` で
+`dietpi.txt` の事前編集を自動化できます。
 
 ```bash
 # DietPi の初回設定が終わった直後の状態から
