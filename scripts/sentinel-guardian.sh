@@ -14,7 +14,16 @@
 #  diagnostics bundle, which includes a journalctl excerpt.)
 set -uo pipefail
 
-AGH_YAML="${AGH_YAML:-/mnt/dietpi_userdata/AdGuardHome.yaml}"
+# DietPi installs AdGuard Home under /mnt/dietpi_userdata/adguardhome/.
+# The older, flat path is kept as a fallback for hand-made installs.
+if [[ -z "${AGH_YAML:-}" ]]; then
+  for cand in /mnt/dietpi_userdata/adguardhome/AdGuardHome.yaml \
+              /mnt/dietpi_userdata/AdGuardHome.yaml \
+              /opt/AdGuardHome/AdGuardHome.yaml; do
+    [[ -f "$cand" ]] && { AGH_YAML="$cand"; break; }
+  done
+  AGH_YAML="${AGH_YAML:-/mnt/dietpi_userdata/adguardhome/AdGuardHome.yaml}"
+fi
 AGH_PORT=8083
 LOG_TAG=sentinel-guardian
 STATE_DIR=/run/sentinel-guardian

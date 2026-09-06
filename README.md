@@ -6,20 +6,37 @@ Web 端末を 1 つのサービスにまとめ、ポート 8080 で完結させ�
 
 ## 導入
 
-構成を理解している場合、手順は次のとおりです(詳細は `SETUP.md`)。
+git clone してから `setup.sh` を実行します。スクリプトが判断できる部分は自動で
+進み、人の判断が要る 6 か所 (H1〜H6) で止まって尋ねる、半自動の導入です。
+詳細は `SETUP.md` を参照してください。
 
 ```bash
-# 1. dietpi-drive_manager で外部ストレージを /mnt/VIDEOSD にマウント (手動)
-# 2. あらかじめそのドライブに置いておいた sentinel フォルダをローカルへコピー
-cp -r /mnt/VIDEOSD/sentinel ~/sentinel
-cd ~/sentinel && chmod +x *.sh scripts/*.sh
+# DietPi の初回設定が終わった直後の状態から
+apt-get update && apt-get install -y git     # または dietpi-software install 17
+git clone https://github.com/tamagoez/sentinel-pi.git ~/sentinel-pi
+cd ~/sentinel-pi
+sudo ./setup.sh          # H1・H2 → 前提ソフト導入 → H3 (再起動)
 
-# 3. 全自動導入 (前提ソフト導入 → 自動再起動 → 本体導入、を無人で実行)
-sudo ./deploy.sh
+# 再起動後、同じコマンドで続きから再開します
+sudo ./setup.sh          # H4・H5 → 本体導入 → H6
 ```
 
-個別に制御したい場合は `sudo ./bootstrap.sh` → 再起動 → `sudo ./install.sh` を
-順に実行してください。`deploy.sh` はこの 2 つを繋ぐだけの無人実行ラッパーです。
+| 印 | 人が介入する内容 |
+|---|---|
+| H1 | IP アドレスの確認 (固定アドレス推奨) |
+| H2 | WiFi ホットスポットの SSID とパスフレーズ (導入しない選択も可) |
+| H3 | 再起動 (Bluetooth・音声・SWAP の変更を反映するため) |
+| H4 | `dietpi-drive_manager` で外部ストレージを `/mnt/VIDEOSD` にマウント |
+| H5 | AdGuard Home へ 1 度ログイン (この後は localhost 限定になります) |
+| H6 | Web UI でパスワード・Discord Webhook・AdGuard パスワードを設定 |
+
+進捗は `/var/lib/sentinel/setup-stage` に記録されるため、途中で中断しても
+同じコマンドで再開できます。個別に動かしたい場合は
+`sudo ./bootstrap.sh` → 再起動 → ドライブのマウント → `sudo ./install.sh`
+の順で、`setup.sh` はこれらを繋いで人の確認を挟むだけのものです。
+
+更新するときは `git pull` のあと `sudo ./setup.sh --update` を実行します
+(設定とデータは保持されます)。
 
 なお、DietPi の初回起動前に `dietpi.txt` の言語設定を英語 (`en_US.UTF-8` /
 `us`) にしておくことを強く推奨します。物理コンソールや素のシリアル端末では
@@ -29,11 +46,8 @@ sudo ./deploy.sh
 前提として、DietPi-Software から AdGuard Home・WiFi Hotspot・FFmpeg・yt-dlp が
 導入されます (`bootstrap.sh` が ID 5, 7, 17, 60, 126, 130, 182, 195 を導入)。
 
-導入後に `http://<PiのIP>:8080` を開き、設定画面で次を入力してください。
-
-- **Web UI のパスワード** — 既定は未設定です。必ず設定してください
-- **Discord Webhook URL** — 通知に使います
-- **AdGuard Home のパスワード** — DietPi の既定は `admin` / グローバルパスワード
+AdGuard Home は DietPi が設定済みの状態で入るため、初期設定ウィザードはあり
+ません。利用者は `admin` と DietPi のグローバルパスワードでログインできます。
 
 ## 機能
 
@@ -129,6 +143,7 @@ Web UI では数字キーでページを切り替えられます。
 ## ファイル配置
 
 ```
+~/sentinel-pi/                  git clone した作業ツリー (setup.sh はここから)
 /opt/sentinel/                  アプリ本体
 /opt/sentinel/.venv/            Python 環境
 /mnt/VIDEOSD/sentinel/          データ (設定・音楽・録画・記録)
@@ -149,7 +164,7 @@ systemctl status sentinel          # 状態
 journalctl -u sentinel -f          # ログを追う
 systemctl restart sentinel         # 再起動
 sentinel-diagnose                  # システム+アプリの統合診断バンドルを作成
-sudo ./install.sh                  # 更新 (何度実行しても安全です)
+git pull && sudo ./setup.sh --update  # 更新 (何度実行しても安全です)
 ```
 
 サービスは `Restart=always` で、どんな理由で落ちても 5 秒後に復帰します。

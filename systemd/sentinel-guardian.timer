@@ -1,0 +1,13 @@
+[Unit]
+Description=Run Sentinel Guardian periodically
+
+[Timer]
+# First run 45s after boot (after hostapd/dnsmasq have touched iptables).
+OnBootSec=45s
+# Then every 2 minutes: any drift is corrected within 2 minutes.
+OnUnitActiveSec=2min
+AccuracySec=10s
+Persistent=false
+
+[Install]
+WantedBy=timers.target
