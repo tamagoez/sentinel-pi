@@ -135,6 +135,10 @@ sudo ./setup.sh
   し、マウント先を正確に `/mnt/VIDEOSD` に設定してください。ツールが
   `/etc/fstab` に登録するので、再起動後も自動でマウントされます。ここを
   断って SD カードにデータを置くこともできますが、カードの寿命を縮めます。
+  一番簡単なのは ext4 ですが、exFAT や NTFS でも構いません。これらは
+  Unix の所有権を持たないため `chown` だけでは直せませんが、`install.sh`
+  と Guardian がマウントの `uid=`/`gid=` オプションを自動で修正するので、
+  `sentinel` ユーザーが問題なく書き込めます。
 - **H5 — AdGuard Home。** DietPi が設定済みの状態で導入するため、**初期設定
   ウィザードはありません**。導入した時点ですでに `0.0.0.0:8083` で待ち受け
   ており、ユーザーは `admin`、パスワードは DietPi のグローバルソフトウェア
@@ -196,6 +200,7 @@ WiFi ホットスポットも起動後にこれを触ることがあります。
 | 音声出力 (AUX) | カーネル更新 | ALSA `numid=3` をリセット |
 | Bluetooth の discoverable/pairable | bluetoothd の再起動 | `bluetoothctl` で再度有効化 |
 | サービスの稼働 | 何らかのクラッシュ | 再度 enable して起動 |
+| ストレージの所有権 | ドライブの再マウント、dietpi-drive_manager による exFAT/NTFS の設定リセット | `/etc/fstab` の `uid=`/`gid=` を直す (ext4 なら `chown`)、再マウント |
 | ホットスポットの DNS 転送先 | ホットスポットの再設定 | AdGuard へ向け直す |
 | ディスク使用量 | 蓄積 | 92% で警告し、診断バンドルを 1 つ保持 |
 | yt-dlp のバージョン | サイト側の変更 | 週 1 回の更新を試行 |
@@ -216,6 +221,7 @@ sudo ./setup.sh --update      # sudo ./install.sh と同等
 | 症状 | 確認方法 |
 |---|---|
 | Web UI が開かない | `journalctl -u sentinel -n 60 --no-pager` |
+| `PermissionError: ... config.json.tmp` で再起動を繰り返す | `sudo /opt/sentinel/scripts/sentinel-fix-storage-owner.sh /mnt/VIDEOSD/sentinel /mnt/VIDEOSD sentinel` (Guardian も 2 分ごとに自動で再試行します。下の「再起動をまたいでも設定が保たれる仕組み」を参照) |
 | カメラが見えない | `ls /dev/v4l/by-id/`、`dmesg \| tail -30` |
 | 音が途切れる | 素の再生を試す: `mpg123 <file>`。設定の mpg123 バッファを上げる。PulseAudio が動いていれば止める |
 | 音が全く出ない | `aplay -l`。`/boot/dietpi/func/dietpi-set_hardware soundcard rpi-bcm2835-3.5mm` を再実行して再起動 |

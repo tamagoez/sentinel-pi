@@ -101,8 +101,15 @@ if [[ "$MODE" == update ]]; then
   exit 0
 fi
 
-command -v dietpi-software >/dev/null || [[ -x /boot/dietpi/dietpi-software ]] || \
-  die "This script targets DietPi (dietpi-software not found)."
+# DietPi's own commands normally resolve via ~/.bashrc on an interactive
+# login shell, but a non-login "sudo ./setup.sh" invocation can start with
+# a stripped-down PATH that doesn't include them - which then looks
+# exactly like "this isn't DietPi" even though it is. Widen PATH first, so
+# bootstrap.sh and dietpi-drive_manager (H4) resolve the same way here.
+export PATH="/boot/dietpi:/usr/local/bin:$PATH"
+
+command -v dietpi-software >/dev/null || [[ -x /boot/dietpi/dietpi-software ]] || [[ -d /boot/dietpi ]] || \
+  die "This script targets DietPi (/boot/dietpi not found)."
 
 STAGE=$(stage_get)
 

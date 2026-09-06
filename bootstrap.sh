@@ -24,7 +24,16 @@ w()  { printf '  [!!] %s\n' "$*"; }
 die(){ printf '[FAIL] %s\n' "$*" >&2; exit 1; }
 
 [[ $EUID -eq 0 ]] || die "run as root (sudo ./bootstrap.sh)"
-command -v dietpi-software >/dev/null || die "this must run on DietPi"
+
+# DietPi's own commands normally resolve via ~/.bashrc on an interactive
+# login shell, but a non-login "sudo ./bootstrap.sh" invocation can start
+# with a stripped-down PATH that doesn't include them - which then looks
+# exactly like "this isn't DietPi" even though it is. Widen PATH first, so
+# the check right below reflects whether DietPi is actually here.
+export PATH="/boot/dietpi:/usr/local/bin:$PATH"
+
+command -v dietpi-software >/dev/null || [[ -x /boot/dietpi/dietpi-software ]] || [[ -d /boot/dietpi ]] || \
+  die "this must run on DietPi (/boot/dietpi not found)"
 
 DS=/boot/dietpi/dietpi-software
 [[ -x "$DS" ]] || DS=$(command -v dietpi-software)
@@ -48,24 +57,49 @@ fi
 # ---------------------------------------------------------------- 2. Base
 c "STEP 2/7  Install base packages"
 # 5=ALSA  7=FFmpeg  17=Git  130=Python 3 pip  195=yt-dlp
-# ALSA first: later audio steps assume a sound card already exists.
-"$DS" install 5 7 17 130 195 || w "Some base packages failed to install; check manually."
-ok "ALSA / FFmpeg / Git / Python3-pip / yt-dlp"
+# Checked by the artifact each ID actually installs, not dietpi-software's
+# own bookkeeping, so a re-run only calls dietpi-software for what is
+# genuinely still missing (faster, and one less thing that can go wrong on
+# something already working).
+NEED2=()
+dpkg -s alsa-utils >/dev/null 2>&1 || NEED2+=(5)
+command -v ffmpeg  >/dev/null      || NEED2+=(7)
+command -v git      >/dev/null     || NEED2+=(17)
+command -v pip3     >/dev/null     || NEED2+=(130)
+command -v yt-dlp   >/dev/null     || NEED2+=(195)
+if (( ${#NEED2[@]} )); then
+  "$DS" install "${NEED2[@]}" && ok "ALSA / FFmpeg / Git / Python3-pip / yt-dlp" \
+    || w "Some base packages failed to install; check manually."
+else
+  ok "ALSA / FFmpeg / Git / Python3-pip / yt-dlp already installed; skipped"
+fi
 
 # ---------------------------------------------------------------- 3. DNS
 c "STEP 3/7  Install AdGuard Home + Unbound"
 # 126=AdGuard Home  182=Unbound
-# Installing both in one call makes DietPi wire them together automatically.
-"$DS" install 126 182 || w "AdGuard/Unbound install failed."
-ok "AdGuard Home (port 8083) / Unbound (port 5335)"
+# Installing both in one call makes DietPi wire them together automatically,
+# so re-run it if EITHER is missing rather than checking them separately.
+NEED3=()
+[[ -x /mnt/dietpi_userdata/adguardhome/AdGuardHome ]] || NEED3+=(126)
+{ command -v unbound >/dev/null || dpkg -s unbound >/dev/null 2>&1; } || NEED3+=(182)
+if (( ${#NEED3[@]} )); then
+  "$DS" install 126 182 && ok "AdGuard Home (port 8083) / Unbound (port 5335)" \
+    || w "AdGuard/Unbound install failed."
+else
+  ok "AdGuard Home / Unbound already installed; skipped"
+fi
 
 # ---------------------------------------------------------------- 4. Hotspot
 c "STEP 4/7  Install WiFi Hotspot"
 # 60=WiFi Hotspot (hostapd). Installed after AdGuard so its DHCP can later
 # be pointed at AdGuard for DNS logging.
 if [[ "${SKIP_HOTSPOT:-0}" != "1" ]]; then
-  "$DS" install 60 || w "Hotspot install failed."
-  ok "WiFi Hotspot (default subnet 192.168.42.0/24)"
+  if command -v hostapd >/dev/null; then
+    ok "WiFi Hotspot already installed; skipped"
+  else
+    "$DS" install 60 && ok "WiFi Hotspot (default subnet 192.168.42.0/24)" \
+      || w "Hotspot install failed."
+  fi
 else
   w "SKIP_HOTSPOT=1 set; skipped."
 fi
@@ -85,11 +119,16 @@ fi
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -qq
 # bluez-alsa-utils: the A2DP sink itself / bluez-tools: the persistent bt-agent
+# exfatprogs/ntfs-3g: dietpi-drive_manager can mount exFAT/NTFS drives, but
+# without these packages that mount can fail outright. Even with them,
+# such drives have no real Unix ownership - install.sh and Guardian handle
+# that separately by fixing the mount's uid=/gid= options.
 apt-get install -y --no-install-recommends \
   bluez bluez-alsa-utils bluez-tools \
   mpg123 v4l-utils python3-opencv python3-venv \
-  fonts-dejavu-core fonts-noto-cjk iptables >/dev/null 2>&1 \
-  && ok "Bluetooth-audio and camera packages installed" \
+  fonts-dejavu-core fonts-noto-cjk iptables \
+  exfatprogs ntfs-3g >/dev/null 2>&1 \
+  && ok "Bluetooth-audio, camera and exFAT/NTFS packages installed" \
   || w "Some packages failed to install."
 
 # ---------------------------------------------------------------- 6. Audio

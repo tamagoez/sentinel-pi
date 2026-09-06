@@ -184,7 +184,29 @@ check_hotspot_dns() {
   fi
 }
 
-# ------------------------------------------------------------------ 8. Storage
+# ------------------------------------------------------------------ 8. Storage ownership
+# A drive re-mounted by hand (dietpi-drive_manager run again, a swapped
+# card, a reboot before the fstab fix below took effect) can silently
+# revert to being unwritable by the sentinel user - especially on
+# exFAT/NTFS, which have no real Unix ownership of their own and need
+# uid=/gid= mount options rather than chown. sentinel-fix-storage-owner.sh
+# does nothing (no output, cheap) once this is already fine; it only
+# escalates - rewriting /etc/fstab and remounting, or falling back to
+# chown - when the quick write-test below actually fails.
+check_storage_owner() {
+  local data="${SENTINEL_DATA:-/mnt/VIDEOSD/sentinel}"
+  local mnt="${SENTINEL_STORAGE:-/mnt/VIDEOSD}"
+  local script="/opt/sentinel/scripts/sentinel-fix-storage-owner.sh"
+  [[ -x "$script" ]] || return 0
+  local out
+  if out=$("$script" "$data" "$mnt" sentinel 2>&1); then
+    [[ -n "$out" ]] && fixed "$out"
+  else
+    warn "sentinel still cannot write to $data: $out"
+  fi
+}
+
+# ------------------------------------------------------------------ 9. Storage space
 # Full storage would stall every feature, so warn early and keep one
 # diagnostics bundle on record for later investigation.
 check_storage() {
@@ -204,7 +226,7 @@ check_storage() {
   fi
 }
 
-# ------------------------------------------------------------------ 9. yt-dlp
+# ------------------------------------------------------------------ 10. yt-dlp
 # Try an update once a week; site changes break extraction otherwise.
 check_ytdlp() {
   local stamp="$STATE_DIR/ytdlp-updated"
@@ -227,6 +249,7 @@ check_audio
 check_bluetooth
 check_services
 check_hotspot_dns
+check_storage_owner
 check_storage
 check_ytdlp
 
