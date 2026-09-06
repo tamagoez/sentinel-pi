@@ -94,14 +94,22 @@ apt-get install -y --no-install-recommends \
 
 # ---------------------------------------------------------------- 6. Audio
 c "STEP 6/7  Route audio to the 3.5mm jack (AUX)"
-BOOTCFG=$(ls /boot/firmware/config.txt /boot/config.txt 2>/dev/null | head -1 || true)
-if [[ -n "$BOOTCFG" ]]; then
-  grep -qE '^dtparam=audio=on' "$BOOTCFG" || echo 'dtparam=audio=on' >> "$BOOTCFG"
-  ok "dtparam=audio=on set in config.txt"
-fi
+# "rpi-bcm2835-3.5mm" is the exact name dietpi-set_hardware expects; any
+# other string is treated as "unknown card" and silently resets to default.
+# The helper also sets dtparam=audio=on and snd_bcm2835.enable_hdmi=0 for us,
+# so config.txt is only touched by hand if the helper is missing.
+AUDIO_DONE=0
 if [[ -x "$SETHW" ]]; then
-  "$SETHW" soundcard bcm2835-3.5mm >/dev/null 2>&1 && ok "Sound card set to 3.5mm" \
+  "$SETHW" soundcard rpi-bcm2835-3.5mm >/dev/null 2>&1 \
+    && { AUDIO_DONE=1; ok "Sound card set to rpi-bcm2835-3.5mm"; } \
     || w "Sound card selection failed; check dietpi-config -> Audio Options."
+fi
+if (( ! AUDIO_DONE )); then
+  BOOTCFG=$(ls /boot/firmware/config.txt /boot/config.txt 2>/dev/null | head -1 || true)
+  if [[ -n "$BOOTCFG" ]]; then
+    grep -qE '^dtparam=audio=on' "$BOOTCFG" || echo 'dtparam=audio=on' >> "$BOOTCFG"
+    ok "dtparam=audio=on written to $BOOTCFG (fallback)"
+  fi
 fi
 
 # ---------------------------------------------------------------- 7. Resources
@@ -121,28 +129,24 @@ cat <<'EOS'
 
 == Prerequisites done ==
 
-Next steps:
+A reboot is required now: Bluetooth, the audio route and the SWAP change
+only take effect after a restart.
 
-  1. Reboot now (required for Bluetooth/audio changes to take effect):
+If you started from setup.sh, go back to it - it asks for the reboot and
+then continues with the storage, AdGuard and install steps:
 
-       reboot
+    reboot
+    # after logging back in
+    cd ~/sentinel-pi && sudo ./setup.sh
 
-  2. After reboot, mount your external drive:
+If you are driving the steps yourself, the remaining ones are:
 
-       dietpi-drive_manager
-       # confirm it lands on /mnt/VIDEOSD
-
-  3. Finish the AdGuard Home setup wizard:
-
-       http://<this-Pi-IP>:8083   (user: admin)
-       # still reachable from outside at this point; install.sh locks it down
-
-  4. Copy the Sentinel project off the drive and install it:
-
-       cp -r /mnt/VIDEOSD/sentinel ~/sentinel
-       cd ~/sentinel && sudo ./install.sh
-
-     (or run sudo ./deploy.sh once, before any of this, to do everything
-      unattended including the reboot — see SETUP.md)
+    1. reboot
+    2. dietpi-drive_manager   -> mount the external drive on /mnt/VIDEOSD
+    3. http://<this-Pi-IP>:8083  -> log in to AdGuard Home (user: admin,
+       password: the DietPi global software password) and confirm that
+       query logging is on. It is still reachable directly at this point;
+       install.sh locks it to localhost.
+    4. sudo ./install.sh
 
 EOS

@@ -1,0 +1,9 @@
+[Unit]
+Description=Sentinel Guardian - reconcile system state to the desired state
+
+[Service]
+Type=oneshot
+ExecStart=/opt/sentinel/scripts/sentinel-guardian.sh
+Environment=SENTINEL_DATA=/mnt/VIDEOSD/sentinel
+TimeoutStartSec=360
+SuccessExitStatus=0

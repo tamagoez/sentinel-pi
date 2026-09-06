@@ -59,24 +59,44 @@ Web 端末で root になる場合は、利用者が端末内で `su -` を実�
 
 ### 6. シェルスクリプトの出力は英語で統一する
 
-`bootstrap.sh` / `install.sh` / `deploy.sh` / `scripts/*.sh` の echo・comment・
+`setup.sh` / `bootstrap.sh` / `install.sh` / `scripts/*.sh` の echo・comment・
 systemd unit の `Description=` は**すべて英語**です。物理コンソールや素の
 シリアル端末では日本語グリフが描画できないため、これらのスクリプトに
 日本語を混ぜないでください。Python 側 (`sentinel/*.py`、Web UI) はブラウザ
 描画のため対象外で、従来どおり日本語のままで構いません。
 
-`install.sh` と `deploy.sh` は起動時に `sentinel/main.py` の存在を確認する
-堅牢なパス解決を行っています (`RAW_DIR` → `SRC` の判定ロジック)。プロジェクト
-フォルダの一部だけをコピーした、または内側の `sentinel/` パッケージフォルダの
-中から実行した、といった典型的なミスを検出し、`cp` の生の失敗ではなく
-分かりやすいエラーメッセージで止めるためです。同じパターンを新しいスクリプト
-にも踏襲してください。
+`setup.sh` と `install.sh` は起動時に `sentinel/main.py` の存在を確認する
+堅牢なパス解決を行っています (`RAW_DIR` → `SRC` の判定ロジック)。clone が
+不完全だった、または内側の `sentinel/` パッケージフォルダの中から実行した、
+といった典型的なミスを検出し、`cp` の生の失敗ではなく分かりやすいエラー
+メッセージで止めるためです。同じパターンを新しいスクリプトにも踏襲して
+ください。
+
+### 7. 導入は git clone からの半自動 (setup.sh)
+
+SD カードや外部ドライブからのコピーではなく、`git clone` した作業ツリーで
+`setup.sh` を実行する形に統一しています。`setup.sh` 自体は判断を持たず、
+
+1. 人の判断が要る 6 か所 (H1〜H6) で止まって尋ねる
+2. その前後で `bootstrap.sh` と `install.sh` を呼ぶ
+3. 進捗を `/var/lib/sentinel/setup-stage` に記録し、再起動を挟んでも
+   同じコマンドで再開できるようにする
+
+ことだけを行います。無人で完走させる仕組み (旧 `deploy.sh` の
+systemd 再開ユニット) は廃止しました。ドライブのマウント先、ホットスポットの
+パスフレーズ、AdGuard の初回ログインは、いずれも人が確認しないと誤りに
+気付けないためです。導入手順そのものを変える場合は `SETUP.md` の表と
+`setup.sh` のヘッダコメント (H1〜H6) を必ず同時に更新してください。
 
 ## モジュール構成
 
 各モジュールは疎結合で、`core/state.py` の `MODE` を購読するだけです。
 
 ```
+setup.sh            導入の司会。人の判断が要る箇所で止まり、下の 2 つを呼ぶ
+bootstrap.sh        前提ソフト (DietPi-Software / APT / 音声 / Bluetooth)
+install.sh          アプリ本体の配置と systemd 登録。更新時もこれを実行
+
 core/config.py      設定の唯一の保管場所。型と範囲を強制する
 core/state.py       モード状態機械。「今どのモードか」の唯一の決定者
 core/supervisor.py  タスク監督。例外で落ちても指数バックオフで再起動する

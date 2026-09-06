@@ -1,8 +1,13 @@
 #!/usr/bin/env bash
 # Sentinel installer
 #
-#   Prerequisite: bootstrap.sh has run, and the box has rebooted once.
+#   Prerequisite: bootstrap.sh has run and the box has rebooted once, and
+#   the external drive is mounted (dietpi-drive_manager -> /mnt/VIDEOSD).
 #   Run: sudo ./install.sh
+#
+#   Normally you do not call this directly: setup.sh walks through the whole
+#   installation and calls it at the right moment. Calling it on its own is
+#   the update path:  git pull && sudo ./install.sh
 #
 # Idempotent — safe to run again after every update.
 #
@@ -26,9 +31,9 @@ die(){ printf '[FAIL] %s\n' "$*" >&2; exit 1; }
 # ---------------------------------------------------------------- 0. Locate
 # Resolve the project root robustly and verify it actually contains the
 # Python package (sentinel/main.py), not just the top-level scripts.
-# This turns a confusing 'cp: cannot stat ...' failure (seen when only
-# part of the tree was copied, or the script was run from the wrong
-# directory) into a clear, actionable error up front.
+# This turns a confusing 'cp: cannot stat ...' failure (seen when the clone
+# is incomplete, or the script was run from the wrong directory) into a
+# clear, actionable error up front.
 RAW_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 if [[ -f "$RAW_DIR/sentinel/main.py" ]]; then
   SRC="$RAW_DIR"
@@ -37,9 +42,10 @@ elif [[ -f "$RAW_DIR/main.py" && -f "$RAW_DIR/../install.sh" ]]; then
   SRC="$(cd "$RAW_DIR/.." && pwd)"
 else
   die "Cannot find sentinel/main.py under $RAW_DIR.
-       Make sure you copied the WHOLE project folder (it contains an inner
-       'sentinel' folder, which is the Python package — copy the outer
-       folder, don't cd into the inner one and copy from there)."
+       Run this from the top of the git clone, not from inside the inner
+       'sentinel' package folder:
+         git clone https://github.com/tamagoez/sentinel-pi.git ~/sentinel-pi
+         cd ~/sentinel-pi && sudo ./install.sh"
 fi
 
 # ---------------------------------------------------------------- 1. Preflight
@@ -102,9 +108,9 @@ cp -r "$SRC/sentinel" "$APP_DIR/"
 cp -f "$SRC/scripts/"*.sh "$APP_DIR/scripts/"
 chmod +x "$APP_DIR/scripts/"*.sh
 ln -sf "$APP_DIR/scripts/sentinel-diagnose.sh" /usr/local/bin/sentinel-diagnose
-cp -f "$SRC"/install.sh "$APP_DIR/" 2>/dev/null || true
-cp -f "$SRC"/bootstrap.sh "$APP_DIR/" 2>/dev/null || true
-cp -f "$SRC"/deploy.sh "$APP_DIR/" 2>/dev/null || true
+for f in setup.sh bootstrap.sh install.sh; do
+  cp -f "$SRC/$f" "$APP_DIR/" 2>/dev/null || true
+done
 cp -f "$SRC"/*.md "$APP_DIR/" 2>/dev/null || true
 ok "Files copied to $APP_DIR; sentinel-diagnose linked into PATH"
 
@@ -219,7 +225,10 @@ sed -e "s|^User=.*|User=$SVC_USER|" \
     -e "s|^Environment=SENTINEL_STORAGE=.*|Environment=SENTINEL_STORAGE=$STORAGE|" \
     "$SRC/systemd/sentinel.service" > /etc/systemd/system/sentinel.service
 
-for stale in sentinel-firewall.service sentinel-bt-discoverable.service; do
+# sentinel-deploy-resume was the resume unit of the old deploy.sh; a run
+# interrupted back then can still leave it enabled.
+for stale in sentinel-firewall.service sentinel-bt-discoverable.service \
+             sentinel-deploy-resume.service; do
   if systemctl list-unit-files 2>/dev/null | grep -q "^$stale"; then
     systemctl disable --now "$stale" 2>/dev/null || true
     rm -f "/etc/systemd/system/$stale"

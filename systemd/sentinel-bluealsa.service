@@ -1,0 +1,14 @@
+[Unit]
+Description=BlueALSA - A2DP sink (receive Bluetooth audio)
+Requires=bluetooth.service
+After=bluetooth.service
+
+[Service]
+Type=simple
+# a2dp-sink only. source/hfp are not used, saving CPU and RAM on the 3B+.
+ExecStart=/usr/bin/bluealsad -p a2dp-sink
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

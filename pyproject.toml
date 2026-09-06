@@ -1,0 +1,17 @@
+[project]
+name = "sentinel"
+version = "1.0.0"
+description = "Raspberry Pi 3B+ 向け統合監視・再生・管理システム"
+requires-python = ">=3.9"
+dependencies = [
+    "fastapi>=0.110",
+    "uvicorn[standard]>=0.27",
+    "websockets>=12",
+    "yt-dlp",
+]
+
+[project.scripts]
+sentinel = "sentinel.main:main"
+
+[tool.setuptools.packages.find]
+include = ["sentinel*"]

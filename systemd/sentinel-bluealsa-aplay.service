@@ -1,0 +1,16 @@
+[Unit]
+Description=BlueALSA playback bridge (received audio -> ALSA)
+Requires=sentinel-bluealsa.service
+After=sentinel-bluealsa.service
+
+[Service]
+Type=simple
+ExecStartPre=/bin/sleep 3
+# 00:00:00:00:00:00 means "accept any paired device".
+ExecStart=/usr/bin/bluealsa-aplay --pcm=default 00:00:00:00:00:00
+Restart=always
+RestartSec=5
+Nice=-5
+
+[Install]
+WantedBy=multi-user.target

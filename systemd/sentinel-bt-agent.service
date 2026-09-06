@@ -1,0 +1,21 @@
+[Unit]
+Description=Bluetooth pairing agent (persistent)
+# Previously a one-shot bluetoothctl invocation was used, so the agent
+# disappeared as soon as that process exited and new pairing requests
+# were rejected. Running bt-agent as a persistent service fixes this.
+Requires=bluetooth.service
+After=bluetooth.service
+
+[Service]
+Type=simple
+ExecStartPre=/bin/sleep 3
+ExecStartPre=-/usr/bin/bluetoothctl power on
+ExecStartPre=-/usr/bin/bluetoothctl discoverable on
+ExecStartPre=-/usr/bin/bluetoothctl pairable on
+# NoInputNoOutput: accept incoming pairing requests without a PIN prompt.
+ExecStart=/usr/bin/bt-agent --capability=NoInputNoOutput
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
