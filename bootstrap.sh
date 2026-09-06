@@ -15,13 +15,18 @@
 #   6. Fix audio output to the 3.5mm jack.
 #   7. Disable SWAP (protects the SD card; 2 cameras fit in 1GB RAM).
 #
-# Reboot after this script finishes — Bluetooth and audio changes require it.
+# A reboot is only needed the first time, when Bluetooth/audio/SWAP
+# actually change - this script tracks that and says so at the end, so
+# it stays truthful when re-run later (update.sh calls it on every
+# update: it must not claim a reboot is needed when nothing changed).
 set -uo pipefail
 
 c()  { printf '\n\033[1;36m== %s ==\033[0m\n' "$*"; }
 ok() { printf '  [OK] %s\n' "$*"; }
 w()  { printf '  [!!] %s\n' "$*"; }
 die(){ printf '[FAIL] %s\n' "$*" >&2; exit 1; }
+
+NEEDS_REBOOT=0
 
 [[ $EUID -eq 0 ]] || die "run as root (sudo ./bootstrap.sh)"
 
@@ -45,7 +50,7 @@ c "STEP 1/7  Force English UTF-8 locale"
 CUR_LANG=$(grep -m1 '^LANG=' /etc/default/locale 2>/dev/null | cut -d= -f2)
 if [[ "$CUR_LANG" != "en_US.UTF-8" && "$CUR_LANG" != "en_GB.UTF-8" && "$CUR_LANG" != "C.UTF-8" ]]; then
   if [[ -x "$SETSW" ]]; then
-    "$SETSW" locale en_US.UTF-8 && ok "Locale set to en_US.UTF-8 (was: ${CUR_LANG:-unset})" \
+    "$SETSW" locale en_US.UTF-8 && { ok "Locale set to en_US.UTF-8 (was: ${CUR_LANG:-unset})"; NEEDS_REBOOT=1; } \
       || w "Locale change failed; run 'dietpi-config' -> Language/Regional Options manually."
   else
     w "$SETSW not found; set the locale manually via dietpi-config."
@@ -126,9 +131,15 @@ c "STEP 5/7  Enable Bluetooth"
 # Bluetooth is a dietpi-config item, not a dietpi-software package,
 # so we call the internal hardware-setup function directly.
 # GUI equivalent: dietpi-config -> 4 Advanced Options -> Bluetooth.
+BT_WAS_READY=0
+systemctl is-active --quiet bluetooth 2>/dev/null && BT_WAS_READY=1
 if [[ -x "$SETHW" ]]; then
-  "$SETHW" bluetooth enable && ok "Bluetooth enabled" \
-    || w "Enable failed; check dietpi-config -> Advanced Options -> Bluetooth."
+  if "$SETHW" bluetooth enable; then
+    ok "Bluetooth enabled"
+    (( BT_WAS_READY )) || NEEDS_REBOOT=1
+  else
+    w "Enable failed; check dietpi-config -> Advanced Options -> Bluetooth."
+  fi
 else
   w "$SETHW not found; enable Bluetooth manually via dietpi-config."
 fi
@@ -154,12 +165,15 @@ c "STEP 6/7  Route audio to the 3.5mm jack (AUX)"
 # other string is treated as "unknown card" and silently resets to default.
 # The helper also sets dtparam=audio=on and snd_bcm2835.enable_hdmi=0 for us,
 # so config.txt is only touched by hand if the helper is missing.
+AUDIO_WAS_READY=0
+aplay -l 2>/dev/null | grep -qi 'bcm2835\|headphones' && AUDIO_WAS_READY=1
 AUDIO_DONE=0
 if [[ -x "$SETHW" ]]; then
   "$SETHW" soundcard rpi-bcm2835-3.5mm >/dev/null 2>&1 \
     && { AUDIO_DONE=1; ok "Sound card set to rpi-bcm2835-3.5mm"; } \
     || w "Sound card selection failed; check dietpi-config -> Audio Options."
 fi
+(( AUDIO_DONE )) && (( ! AUDIO_WAS_READY )) && NEEDS_REBOOT=1
 if (( ! AUDIO_DONE )); then
   BOOTCFG=$(ls /boot/firmware/config.txt /boot/config.txt 2>/dev/null | head -1 || true)
   if [[ -n "$BOOTCFG" ]]; then
@@ -172,21 +186,28 @@ fi
 c "STEP 7/7  Reduce resource usage"
 # Disable SWAP: fewer SD card writes, longer card life.
 # 2 cameras + music fit comfortably in 1GB RAM without it.
+SWAP_WAS_ON=0
+swapon --show 2>/dev/null | grep -q . && SWAP_WAS_ON=1
 if grep -qE '^AUTO_SETUP_SWAPFILE_SIZE=' /boot/dietpi.txt 2>/dev/null; then
   sed -i 's/^AUTO_SETUP_SWAPFILE_SIZE=.*/AUTO_SETUP_SWAPFILE_SIZE=0/' /boot/dietpi.txt
 fi
-/boot/dietpi/func/dietpi-set_swapfile 0 >/dev/null 2>&1 && ok "SWAP disabled" \
-  || w "SWAP disable failed; check via dietpi-config."
+if /boot/dietpi/func/dietpi-set_swapfile 0 >/dev/null 2>&1; then
+  ok "SWAP disabled"
+  (( SWAP_WAS_ON )) && NEEDS_REBOOT=1
+else
+  w "SWAP disable failed; check via dietpi-config."
+fi
 
 systemctl is-active --quiet dietpi-ramlog 2>/dev/null && ok "DietPi-RAMlog active" \
   || w "DietPi-RAMlog inactive; consider 'dietpi-software install 103'."
 
-cat <<'EOS'
+if (( NEEDS_REBOOT )); then
+  cat <<'EOS'
 
 == Prerequisites done ==
 
-A reboot is required now: Bluetooth, the audio route and the SWAP change
-only take effect after a restart.
+A reboot is required now: Bluetooth, the audio route or the SWAP setting
+actually changed just now, and none of those take effect until a restart.
 
 If you started from setup.sh, go back to it - it asks for the reboot and
 then continues with the storage, AdGuard and install steps:
@@ -206,3 +227,17 @@ If you are driving the steps yourself, the remaining ones are:
     4. sudo ./install.sh
 
 EOS
+else
+  cat <<'EOS'
+
+== Prerequisites done ==
+
+Nothing that needs a reboot changed this run (Bluetooth/audio/SWAP were
+already in place). No reboot needed - continue with:
+
+    sudo ./install.sh
+
+or, from a git clone, sudo ./update.sh / sudo ./setup.sh --update.
+
+EOS
+fi

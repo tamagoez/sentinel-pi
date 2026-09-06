@@ -209,9 +209,16 @@ WiFi ホットスポットも起動後にこれを触ることがあります。
 
 ```bash
 cd ~/sentinel-pi
-git pull
-sudo ./setup.sh --update      # sudo ./install.sh と同等
+sudo ./update.sh
 ```
+
+`update.sh` は `git pull` 自体を行い、その後 `bootstrap.sh` と `install.sh`
+を再実行します。どちらも冪等 (いつ再実行しても安全) なため、これは単なる
+再配置ではなく「最新化して、判明している修正をすべて適用する」ための
+1 コマンドです。`sudo ./setup.sh --update` は同じ処理へのエイリアスとして
+残しています (以前の `setup.sh --update` は `install.sh` しか実行しておらず、
+`bootstrap.sh` 側にしかない修正 — 例えば ffmpeg の drawtext 確認 — が更新時に
+静かにスキップされていました。今はそうなりません)。
 
 設定とデータは保持されます。最初からガイド付きで通しでやり直したい場合は
 `sudo ./setup.sh --reset` で進捗を忘れさせられます。

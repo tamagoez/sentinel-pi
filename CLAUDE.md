@@ -59,7 +59,7 @@ Web 端末で root になる場合は、利用者が端末内で `su -` を実�
 
 ### 6. シェルスクリプトの出力は英語で統一する
 
-`setup.sh` / `bootstrap.sh` / `install.sh` / `scripts/*.sh` / 
+`setup.sh` / `update.sh` / `bootstrap.sh` / `install.sh` / `scripts/*.sh` / 
 `windows/Configure-DietPi.ps1` の echo・comment・systemd unit の
 `Description=` は**すべて英語**です。物理コンソールや素のシリアル端末では
 日本語グリフが描画できないため、これらのスクリプトに日本語を混ぜないで
@@ -68,7 +68,7 @@ Web 端末で root になる場合は、利用者が端末内で `su -` を実�
 (`sentinel/*.py`、Web UI) はブラウザ描画のため対象外で、従来どおり日本語の
 ままで構いません。
 
-`setup.sh` と `install.sh` は起動時に `sentinel/main.py` の存在を確認する
+`setup.sh` / `update.sh` / `install.sh` は起動時に `sentinel/main.py` の存在を確認する
 堅牢なパス解決を行っています (`RAW_DIR` → `SRC` の判定ロジック)。clone が
 不完全だった、または内側の `sentinel/` パッケージフォルダの中から実行した、
 といった典型的なミスを検出し、`cp` の生の失敗ではなく分かりやすいエラー
@@ -94,6 +94,25 @@ systemd 再開ユニット) は廃止しました。ドライブのマウント�
 です。フェーズ 0 (`dietpi.txt` の事前編集) を自動化する
 `windows/Configure-DietPi.ps1` も、対応するキーを変える場合は同時に更新して
 ください。
+
+**更新は `update.sh`** が担当します。かつて `setup.sh --update` は
+`install.sh` しか呼んでいませんでした。しかし ffmpeg の drawtext 確認
+(項目 10) のように `bootstrap.sh` 側にしか無い修正もあり、それらが更新時に
+静かにスキップされる事例が実際に起きました。`update.sh` は
+`git pull` → `bootstrap.sh` → `install.sh` の順で実行します
+(`setup.sh --update` は `update.sh` への単なるエイリアスです)。
+`bootstrap.sh`・`install.sh` の各ステップは冪等 (すでに満たされていれば
+何もしない) なので、毎回フルで再実行しても安全です。**新しい自動修復を
+追加するときは、`bootstrap.sh` と `install.sh` のどちらであっても
+`update.sh` の再実行だけで確実に反映されることを忘れないでください** —
+どちらか片方にしか置かないと、また同じ「更新しても直らない」に戻ります。
+
+`bootstrap.sh` の末尾のメッセージ (「再起動が必要」) は `NEEDS_REBOOT`
+フラグで実際に何か変わったときだけ表示します。`update.sh` は毎回
+`bootstrap.sh` を呼ぶため、ロケール・Bluetooth・音声・SWAP がすでに
+正しい状態なら「再起動不要」と正直に案内しなければならず、これを
+やらないと `update.sh` を実行するたびに「再起動が必要」という嘘の案内が
+出続けることになります。
 
 ### 8. 外部ストレージの所有権は chown だけに頼らない
 
@@ -170,9 +189,10 @@ ffmpeg パッケージは一時期 (trixie/sid の 7:6.1-4) harfbuzz を有効�
 各モジュールは疎結合で、`core/state.py` の `MODE` を購読するだけです。
 
 ```
-setup.sh            導入の司会。人の判断が要る箇所で止まり、下の 2 つを呼ぶ
-bootstrap.sh        前提ソフト (DietPi-Software / APT / 音声 / Bluetooth)
-install.sh          アプリ本体の配置と systemd 登録。更新時もこれを実行
+setup.sh            初回導入の司会。人の判断が要る箇所で止まり、下の 2 つを呼ぶ
+update.sh           更新の司会。git pull → bootstrap.sh → install.sh
+bootstrap.sh        前提ソフト (DietPi-Software / APT / 音声 / Bluetooth)。冪等
+install.sh          アプリ本体の配置と systemd 登録。冪等、更新時もこれを実行
 scripts/sentinel-fix-storage-owner.sh
                     外部ストレージへの書き込み権限を確認し、必要なら
                     fstab のマウントオプションか chown で直す (install.sh

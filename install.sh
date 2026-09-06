@@ -108,7 +108,7 @@ cp -r "$SRC/sentinel" "$APP_DIR/"
 cp -f "$SRC/scripts/"*.sh "$APP_DIR/scripts/"
 chmod +x "$APP_DIR/scripts/"*.sh
 ln -sf "$APP_DIR/scripts/sentinel-diagnose.sh" /usr/local/bin/sentinel-diagnose
-for f in setup.sh bootstrap.sh install.sh; do
+for f in setup.sh update.sh bootstrap.sh install.sh; do
   cp -f "$SRC/$f" "$APP_DIR/" 2>/dev/null || true
 done
 cp -f "$SRC"/*.md "$APP_DIR/" 2>/dev/null || true

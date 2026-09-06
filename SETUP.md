@@ -206,9 +206,17 @@ and repairs it:
 
 ```bash
 cd ~/sentinel-pi
-git pull
-sudo ./setup.sh --update      # equivalent to: sudo ./install.sh
+sudo ./update.sh
 ```
+
+`update.sh` does the `git pull` itself, then re-runs `bootstrap.sh` and
+`install.sh`. Both are idempotent - safe to re-run any time - so this is the
+one command for "make sure everything is current and every known fix is
+applied", not just a redeploy. `sudo ./setup.sh --update` is kept as an
+alias for the same thing. (An earlier version of `setup.sh --update` only
+ran `install.sh`, which meant fixes that live in `bootstrap.sh` - like
+`ffmpeg`'s drawtext check - were silently skipped on update; this no
+longer happens.)
 
 Config and data are preserved. `sudo ./setup.sh --reset` forgets the saved
 progress if you want to walk through the whole guided flow again.

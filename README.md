@@ -37,8 +37,9 @@ sudo ./setup.sh          # H4・H5 → 本体導入 → H6
 `sudo ./bootstrap.sh` → 再起動 → ドライブのマウント → `sudo ./install.sh`
 の順で、`setup.sh` はこれらを繋いで人の確認を挟むだけのものです。
 
-更新するときは `git pull` のあと `sudo ./setup.sh --update` を実行します
-(設定とデータは保持されます)。
+更新するときは `sudo ./update.sh` を実行します (`git pull` から
+`bootstrap.sh`・`install.sh` の再実行まで一括で行います。設定とデータは
+保持されます)。
 
 なお、DietPi の初回起動前に `dietpi.txt` の言語設定を英語 (`en_US.UTF-8` /
 `us`) にしておくことを強く推奨します。物理コンソールや素のシリアル端末では
@@ -166,7 +167,7 @@ systemctl status sentinel          # 状態
 journalctl -u sentinel -f          # ログを追う
 systemctl restart sentinel         # 再起動
 sentinel-diagnose                  # システム+アプリの統合診断バンドルを作成
-git pull && sudo ./setup.sh --update  # 更新 (何度実行しても安全です)
+sudo ./update.sh                   # 更新 (何度実行しても安全です)
 ```
 
 サービスは `Restart=always` で、どんな理由で落ちても 5 秒後に復帰します。
