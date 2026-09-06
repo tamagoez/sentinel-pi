@@ -226,6 +226,7 @@ sudo ./setup.sh --update      # sudo ./install.sh と同等
 | 音が途切れる | 素の再生を試す: `mpg123 <file>`。設定の mpg123 バッファを上げる。PulseAudio が動いていれば止める |
 | 音が全く出ない | `aplay -l`。`/boot/dietpi/func/dietpi-set_hardware soundcard rpi-bcm2835-3.5mm` を再実行して再起動 |
 | Bluetooth がペアリングできない | `systemctl status sentinel-bt-agent`。`bluetoothctl show` で `Discoverable: yes` になっているか |
+| `sentinel-bluealsa*` が `failed (start-limit-hit)` になっている | `sudo systemctl reset-failed sentinel-bluealsa.service sentinel-bluealsa-aplay.service && sudo systemctl restart sentinel-bluealsa.service sentinel-bluealsa-aplay.service` (Guardian も 2 分以内に自動で同じことをします) |
 | 8083 がまだ外から開ける | `systemctl start sentinel-guardian`。`journalctl -t sentinel-guardian -n 20` |
 | ネットワークログが空 | 設定タブの AdGuard パスワードが違う、または AdGuard 側でクエリログが無効 |
 | `setup.sh` が想定と違うフェーズから始まる | `sudo ./setup.sh --reset` |

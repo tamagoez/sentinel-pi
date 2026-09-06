@@ -223,6 +223,7 @@ progress if you want to walk through the whole guided flow again.
 | Audio stutters | test raw: `mpg123 <file>`; raise `mpg123 buffer` in settings; stop PulseAudio if present |
 | No sound at all | `aplay -l`; re-run `/boot/dietpi/func/dietpi-set_hardware soundcard rpi-bcm2835-3.5mm` and reboot |
 | Can't pair Bluetooth | `systemctl status sentinel-bt-agent`; `bluetoothctl show` should say `Discoverable: yes` |
+| A `sentinel-bluealsa*` unit shows `failed (start-limit-hit)` | `sudo systemctl reset-failed sentinel-bluealsa.service sentinel-bluealsa-aplay.service && sudo systemctl restart sentinel-bluealsa.service sentinel-bluealsa-aplay.service` (Guardian also does this automatically within 2 minutes) |
 | 8083 still reachable | `systemctl start sentinel-guardian`; `journalctl -t sentinel-guardian -n 20` |
 | Network log empty | AdGuard password wrong in the settings tab, or query logging off in AdGuard |
 | `setup.sh` starts from the wrong phase | `sudo ./setup.sh --reset` |

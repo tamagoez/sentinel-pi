@@ -3,6 +3,13 @@ Description=Sentinel - unified camera/music/monitoring service
 Documentation=file:/opt/sentinel/README.md
 After=network-online.target sound.target bluetooth.service
 Wants=network-online.target
+# Never give up retrying, no matter how many times it crashes in a row.
+# This belongs here, not in [Service]: modern systemd (v255, confirmed
+# with "systemd-analyze verify") silently ignores StartLimitIntervalSec/
+# StartLimitBurst under [Service] ("Unknown key name ... ignoring") -
+# they are [Unit]-level rate-limit settings, not service settings, even
+# though older systemd docs and examples often show them under [Service].
+StartLimitIntervalSec=0
 
 [Service]
 Type=simple
@@ -20,7 +27,6 @@ ExecStart=/opt/sentinel/.venv/bin/python -m sentinel.main
 # Self-heal: restart no matter how it exits.
 Restart=always
 RestartSec=5
-StartLimitIntervalSec=0
 
 TimeoutStopSec=20
 KillMode=mixed

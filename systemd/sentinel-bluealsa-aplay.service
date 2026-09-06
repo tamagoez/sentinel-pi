@@ -2,6 +2,13 @@
 Description=BlueALSA playback bridge (received audio -> ALSA)
 Requires=sentinel-bluealsa.service
 After=sentinel-bluealsa.service
+# Without this, a burst of restarts (e.g. install.sh re-run without a
+# reboot, bouncing bluetooth.service/sentinel-bluealsa.service under it)
+# can hit systemd's default 5-in-10s limit and leave this permanently
+# "failed" instead of retrying until sentinel-bluealsa.service is ready.
+# Must be in [Unit], not [Service] - modern systemd silently ignores it
+# there.
+StartLimitIntervalSec=0
 
 [Service]
 Type=simple
