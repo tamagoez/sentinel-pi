@@ -159,7 +159,24 @@ for old in /root/Music /home/*/Music; do
 done
 [[ -d "$STORAGE/camguard_data" ]] && \
   w "Old camguard data left at $STORAGE/camguard_data (clean up manually if desired)."
-chown -R "$SVC_USER:$SVC_USER" "$DATA"
+
+# Plain chown is not enough on exFAT/NTFS: those filesystems have no Unix
+# ownership of their own, so chown either errors ("Operation not
+# permitted") or silently no-ops, and dietpi-drive_manager does not add
+# the uid=/gid= mount options that would fix it (a known DietPi gap,
+# https://github.com/MichaIng/DietPi/issues/4680). This is why the
+# service can crash-loop on a PermissionError writing config.json even
+# right after a clean install. sentinel-fix-storage-owner.sh checks
+# whether $SVC_USER can actually write here and, only if not, fixes the
+# fstab mount options (FAT-family filesystems) or falls back to chown
+# (everything else) and remounts. Also re-run by Guardian every 2
+# minutes, so a drive re-mounted by hand later gets the same repair.
+if FIX_OUT=$("$SRC/scripts/sentinel-fix-storage-owner.sh" "$DATA" "$STORAGE" "$SVC_USER" 2>&1); then
+  [[ -n "$FIX_OUT" ]] && ok "$FIX_OUT" || ok "$SVC_USER can write to $DATA"
+else
+  w "$FIX_OUT"
+  w "$SVC_USER cannot write to $DATA; the service will fail to start until this is fixed."
+fi
 
 # ---------------------------------------------------------------- 5. Old services
 c "STEP 5/9  Disable legacy services"
@@ -213,10 +230,12 @@ fi
 c "STEP 7/9  Register Guardian (drift repair)"
 install -m644 "$SRC/systemd/sentinel-guardian.service" /etc/systemd/system/
 install -m644 "$SRC/systemd/sentinel-guardian.timer" /etc/systemd/system/
-sed -i "s|^Environment=SENTINEL_DATA=.*|Environment=SENTINEL_DATA=$DATA|" \
+sed -i -e "s|^Environment=SENTINEL_DATA=.*|Environment=SENTINEL_DATA=$DATA|" \
+       -e "s|^Environment=SENTINEL_STORAGE=.*|Environment=SENTINEL_STORAGE=$STORAGE|" \
   /etc/systemd/system/sentinel-guardian.service
 ok "Runs every 2 minutes; repairs AdGuard bind / iptables / audio output /"
-echo "     Bluetooth state / service uptime / hotspot DNS / disk space / yt-dlp"
+echo "     Bluetooth state / storage ownership / service uptime / hotspot DNS /"
+echo "     disk space / yt-dlp"
 
 # ---------------------------------------------------------------- 8. Main service
 c "STEP 8/9  Register Sentinel service"

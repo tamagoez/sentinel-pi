@@ -132,7 +132,11 @@ sudo ./setup.sh
   `setup.sh` opens `dietpi-drive_manager` for you. Mount your drive there and
   set the mount point to exactly `/mnt/VIDEOSD`; the tool writes the
   `/etc/fstab` entry so it comes back after a reboot. You may decline and let
-  everything live on the SD card, but that wears the card out.
+  everything live on the SD card, but that wears the card out. ext4 is the
+  simplest choice; exFAT and NTFS work too - `install.sh` and Guardian fix
+  the mount's `uid=`/`gid=` options automatically so the `sentinel` user can
+  write there, since those filesystems have no Unix ownership of their own
+  and plain `chown` cannot fix them.
 - **H5 — AdGuard Home.** DietPi pre-configures it, so **there is no setup
   wizard**: it already listens on `0.0.0.0:8083` with the user `admin`, the
   DietPi global software password, and query logging enabled. Open
@@ -193,6 +197,7 @@ and repairs it:
 | Audio output (AUX) | kernel update | reset ALSA `numid=3` |
 | Bluetooth discoverable/pairable | bluetoothd restart | re-enable via `bluetoothctl` |
 | Service uptime | any crash | re-enable and start |
+| Storage ownership | drive re-mounted, exFAT/NTFS reset by dietpi-drive_manager | fix `/etc/fstab` `uid=`/`gid=` (or `chown` on ext4), remount |
 | Hotspot DNS target | hotspot reconfigured | point back at AdGuard |
 | Disk space | accumulation | warn at 92%, keep one diagnostics bundle |
 | yt-dlp version | site changes | try an update weekly |
@@ -213,6 +218,7 @@ progress if you want to walk through the whole guided flow again.
 | Symptom | Check |
 |---|---|
 | Web UI won't load | `journalctl -u sentinel -n 60 --no-pager` |
+| Service restart-loops with `PermissionError: ... config.json.tmp` | `sudo /opt/sentinel/scripts/sentinel-fix-storage-owner.sh /mnt/VIDEOSD/sentinel /mnt/VIDEOSD sentinel` (Guardian also retries this every 2 minutes; see "Why it stays fixed" below) |
 | No cameras | `ls /dev/v4l/by-id/`, `dmesg \| tail -30` |
 | Audio stutters | test raw: `mpg123 <file>`; raise `mpg123 buffer` in settings; stop PulseAudio if present |
 | No sound at all | `aplay -l`; re-run `/boot/dietpi/func/dietpi-set_hardware soundcard rpi-bcm2835-3.5mm` and reboot |

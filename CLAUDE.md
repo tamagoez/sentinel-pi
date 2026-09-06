@@ -95,6 +95,31 @@ systemd 再開ユニット) は廃止しました。ドライブのマウント�
 `windows/Configure-DietPi.ps1` も、対応するキーを変える場合は同時に更新して
 ください。
 
+### 8. 外部ストレージの所有権は chown だけに頼らない
+
+exFAT・NTFS・vfat は Unix の所有権を持たず、カーネル/FUSE ドライバがマウント
+オプションの uid=/gid=/umask= を全プロセスに一律で返すだけです。そのため
+`chown` は root からでも失敗する (`Operation not permitted`) か、エラーなく
+成功した「ふり」をして実際には何も変わらないかのどちらかになります。
+`dietpi-drive_manager` はこれらの形式をマウントするとき uid=/gid= を
+`/etc/fstab` に付けないため ([DietPi #4680](https://github.com/MichaIng/DietPi/issues/4680))、
+`sentinel` ユーザーが `/mnt/VIDEOSD/sentinel/config.json.tmp` に書けず
+`PermissionError` でクラッシュループする、という事例が実際に起きています。
+
+`scripts/sentinel-fix-storage-owner.sh` がこれを解決します。まず
+`sentinel` ユーザーが書き込めるか実際に試し (安価なテストなので毎回実行して
+問題ありません)、書けなければファイルシステム種別を見て
+
+- exFAT/NTFS/vfat (`vfat`/`exfat`/`ntfs`/`ntfs3`/`fuseblk`) → `/etc/fstab`
+  の当該行に `uid=/gid=/umask=` を追記し、umount → mount で反映
+- それ以外 (ext4 など通常の Unix ファイルシステム) → 従来どおり `chown -R`
+
+のどちらかで直します。`install.sh` の STEP 4 で 1 回、`sentinel-guardian.sh`
+で 2 分ごとに呼ばれるため、`dietpi-drive_manager` を後から再実行してマウント
+設定が消えても自動で直ります。**このファイルを削除して単純な `chown -R` に
+戻さないでください**。ext4 の外部ドライブしか想定していなければ動きますが、
+exFAT/NTFS のドライブでは所有権が直らず今回と同じ症状に戻ります。
+
 ## モジュール構成
 
 各モジュールは疎結合で、`core/state.py` の `MODE` を購読するだけです。
@@ -103,6 +128,10 @@ systemd 再開ユニット) は廃止しました。ドライブのマウント�
 setup.sh            導入の司会。人の判断が要る箇所で止まり、下の 2 つを呼ぶ
 bootstrap.sh        前提ソフト (DietPi-Software / APT / 音声 / Bluetooth)
 install.sh          アプリ本体の配置と systemd 登録。更新時もこれを実行
+scripts/sentinel-fix-storage-owner.sh
+                    外部ストレージへの書き込み権限を確認し、必要なら
+                    fstab のマウントオプションか chown で直す (install.sh
+                    と Guardian の両方から呼ばれる)
 
 core/config.py      設定の唯一の保管場所。型と範囲を強制する
 core/state.py       モード状態機械。「今どのモードか」の唯一の決定者
