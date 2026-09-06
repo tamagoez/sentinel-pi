@@ -81,18 +81,45 @@ fix_fat_mount() {
 
   # Remount to apply. A full umount+mount (not "-o remount") is required:
   # FUSE-backed ntfs-3g/exfat-fuse mounts generally do not accept
-  # in-place uid/gid changes via remount.
+  # in-place uid/gid changes via remount. Stopping sentinel first should
+  # be enough to release its file handles, but retry a few times before
+  # giving up - a process can take a moment to actually exit, and other
+  # things (a shell cd'd into the mount, sentinel-diagnose, the web
+  # terminal) can also be holding it open transiently.
   svc_was_active=0
   if systemctl is-active --quiet sentinel 2>/dev/null; then
     svc_was_active=1
     systemctl stop sentinel 2>/dev/null || true
   fi
   remounted=0
-  if umount "$mnt" 2>/dev/null && mount "$mnt" 2>/dev/null; then
-    remounted=1
+  for _ in 1 2 3; do
+    if umount "$mnt" 2>/dev/null && mount "$mnt" 2>/dev/null; then
+      remounted=1
+      break
+    fi
+    sleep 1
+  done
+  if (( ! remounted )); then
+    # Last resort: detach now, finish unmounting once the last reference
+    # drops, and mount fresh. Safe here because nothing this script cares
+    # about writes to $mnt directly (only to $DATA underneath it) and
+    # sentinel has already been stopped above.
+    if umount -l "$mnt" 2>/dev/null && mount "$mnt" 2>/dev/null; then
+      remounted=1
+    fi
   fi
   (( svc_was_active )) && systemctl start sentinel 2>/dev/null || true
-  (( remounted )) || { echo "could not remount $mnt (busy?); a reboot will apply the new options" >&2; return 1; }
+  if (( ! remounted )); then
+    echo "could not remount $mnt (still busy after retries); a reboot will apply the new options" >&2
+    return 1
+  fi
+  # Not verified further here: a FUSE-backed mount (ntfs-3g, exfat-fuse)
+  # reports its *own* user_id=/group_id= in mount options - the FUSE
+  # daemon's caller, always root, not the uid= fstab option that actually
+  # controls file ownership as seen by other processes - so grepping
+  # mount options for "uid=$uid" here would be checking the wrong thing
+  # and can fail even when the fix worked. can_write() below is what
+  # actually matters and is filesystem-agnostic.
   return 0
 }
 
@@ -107,12 +134,15 @@ case "$fstype" in
       echo "fixed: applied mount options for $MNT ($fstype)"
       exit 0
     fi
+    # chown cannot do anything useful on these filesystems (see header
+    # comment) - stop here with a specific reason instead of trying it
+    # anyway and reporting a generic, misleading "still cannot write".
+    echo "$SVC_USER still cannot write to $DATA ($fstype mount options could not be fixed - see the message above)" >&2
+    exit 1
     ;;
 esac
 
-# Either a normal Unix filesystem, or the mount-options fix above didn't
-# fully resolve it (e.g. no fstab entry to rewrite) - chown is still the
-# right fallback there.
+# A normal Unix filesystem (ext4, btrfs, ...) - chown is the right tool.
 chown -R "$SVC_USER:$SVC_USER" "$DATA" 2>/dev/null || \
   echo "chown on $DATA reported an error" >&2
 

@@ -208,6 +208,7 @@ fi
 
 if [[ -f /etc/bluetooth/main.conf ]]; then
   cp -n /etc/bluetooth/main.conf /etc/bluetooth/main.conf.sentinel-backup 2>/dev/null || true
+  BEFORE_SUM=$(md5sum /etc/bluetooth/main.conf | awk '{print $1}')
   for kv in "DiscoverableTimeout=0" "PairableTimeout=0" "AlwaysPairable=true"; do
     k="${kv%%=*}"; v="${kv#*=}"
     if grep -qE "^\s*#?\s*$k\s*=" /etc/bluetooth/main.conf; then
@@ -222,8 +223,19 @@ if [[ -f /etc/bluetooth/main.conf ]]; then
   else
     sed -i '/^\[Policy\]/a AutoEnable = true' /etc/bluetooth/main.conf
   fi
-  systemctl restart bluetooth 2>/dev/null || true
-  ok "bluetoothd set to always-discoverable/pairable"
+  AFTER_SUM=$(md5sum /etc/bluetooth/main.conf | awk '{print $1}')
+  # Only bounce bluetoothd if something actually changed (or it isn't
+  # running at all). Restarting it unconditionally on every re-run of
+  # install.sh knocks BlueALSA's D-Bus connection out from under it,
+  # which - combined with STEP 8 restarting sentinel-bluealsa(-aplay) at
+  # the same time - can burn through enough rapid restarts to hit
+  # systemd's default start-limit and leave those units "failed".
+  if [[ "$BEFORE_SUM" != "$AFTER_SUM" ]] || ! systemctl is-active --quiet bluetooth; then
+    systemctl restart bluetooth 2>/dev/null || true
+    ok "bluetoothd set to always-discoverable/pairable (restarted)"
+  else
+    ok "bluetoothd already configured; left running"
+  fi
 fi
 
 # ---------------------------------------------------------------- 7. Guardian
@@ -261,6 +273,11 @@ UNITS=(sentinel.service sentinel-guardian.timer)
 command -v bt-agent >/dev/null && UNITS+=(sentinel-bt-agent.service)
 systemctl enable "${UNITS[@]}" >/dev/null 2>&1
 ok "Enabled: ${UNITS[*]}"
+# Clear any "failed (start-limit-hit)" left over from before this script
+# added StartLimitIntervalSec=0 to the Bluetooth units, or from any other
+# past burst of restarts - reset-failed is a no-op on a unit that isn't
+# in that state, so this is safe to run unconditionally.
+systemctl reset-failed "${UNITS[@]}" 2>/dev/null || true
 systemctl restart "${UNITS[@]}"
 
 # ---------------------------------------------------------------- 9. First run

@@ -160,6 +160,10 @@ check_services() {
     systemctl is-enabled --quiet "$u" 2>/dev/null || {
       systemctl enable "$u" >/dev/null 2>&1 && fixed "enabled $u"; }
     systemctl is-active --quiet "$u" || {
+      # A unit stuck "failed (start-limit-hit)" ignores a plain start
+      # ("start request repeated too quickly"); reset-failed clears that
+      # counter and is a harmless no-op otherwise.
+      systemctl reset-failed "$u" 2>/dev/null
       systemctl start "$u" >/dev/null 2>&1 && fixed "started $u"; }
   done
 }

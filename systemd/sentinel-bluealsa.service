@@ -2,6 +2,11 @@
 Description=BlueALSA - A2DP sink (receive Bluetooth audio)
 Requires=bluetooth.service
 After=bluetooth.service
+# Without this, a burst of restarts (e.g. install.sh re-run without a
+# reboot, bouncing bluetooth.service) can hit systemd's default 5-in-10s
+# limit and leave this permanently "failed" instead of retrying. Must be
+# in [Unit], not [Service] - modern systemd silently ignores it there.
+StartLimitIntervalSec=0
 
 [Service]
 Type=simple

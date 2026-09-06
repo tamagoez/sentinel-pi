@@ -74,6 +74,23 @@ else
   ok "ALSA / FFmpeg / Git / Python3-pip / yt-dlp already installed; skipped"
 fi
 
+# ffmpeg's drawtext filter (the daily archive's ticker overlay) needs
+# libharfbuzz as well as libfreetype since ffmpeg 6.1. Debian briefly
+# shipped ffmpeg 6.1 without harfbuzz enabled - fixed in 7:6.1-5
+# (https://bugs.debian.org/1056597) - so a base image whose apt cache
+# predates that fix, or was never updated, can still pull the broken
+# build. Try an upgrade before accepting that the ticker will be skipped.
+if command -v ffmpeg >/dev/null && ! ffmpeg -hide_banner -filters 2>/dev/null | grep -q ' drawtext '; then
+  export DEBIAN_FRONTEND=noninteractive
+  apt-get update -qq 2>/dev/null
+  apt-get install -y --only-upgrade ffmpeg >/dev/null 2>&1
+  if ffmpeg -hide_banner -filters 2>/dev/null | grep -q ' drawtext '; then
+    ok "ffmpeg upgraded; drawtext (ticker overlay) is now available"
+  else
+    w "ffmpeg still has no drawtext filter after an upgrade attempt; the daily ticker overlay will be skipped (harmless - see README)."
+  fi
+fi
+
 # ---------------------------------------------------------------- 3. DNS
 c "STEP 3/7  Install AdGuard Home + Unbound"
 # 126=AdGuard Home  182=Unbound

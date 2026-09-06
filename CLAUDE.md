@@ -120,6 +120,51 @@ exFAT・NTFS・vfat は Unix の所有権を持たず、カーネル/FUSE ドラ
 戻さないでください**。ext4 の外部ドライブしか想定していなければ動きますが、
 exFAT/NTFS のドライブでは所有権が直らず今回と同じ症状に戻ります。
 
+修正後の確認は `mount`/`findmnt` の出力ではなく実際の書き込みテスト
+(`can_write()`) だけで判断してください。ntfs-3g・exfat-fuse など FUSE 系
+ドライバは、カーネルに見える `user_id=`/`group_id=` (FUSE をマウントした
+呼び出し元、常に root) と、ファイルの所有者として実際に返す `uid=`/`gid=`
+オプションが別物です。`findmnt -no OPTIONS` で `uid=` を grep して検証しよう
+とすると、修正が効いているのに「効いていない」という誤検知になります
+(実際に踏んだ失敗です)。
+
+umount は 1 回失敗しただけで諦めないでください。`sentinel` を止めた直後でも
+ファイルディスクリプタの解放に一呼吸かかることがあるため、数回リトライし、
+最後は `umount -l` (lazy) にも倒しています。
+
+### 9. systemd の `StartLimitIntervalSec` は `[Unit]` に書く
+
+`[Service]` に書いても構文エラーにはならず黙って無視されます
+(`systemd-analyze verify` で `Unknown key name 'StartLimitIntervalSec' in
+section 'Service', ignoring.` と出ます)。`Restart=always` な常駐サービス
+(`sentinel.service` や Bluetooth 系ユニット) は既定の「10 秒に 5 回まで」を
+超えると `failed (start-limit-hit)` に固定され、`Restart=always` があっても
+二度と自動復帰しません。`sentinel-bluealsa*.service` が「初回は起動したのに
+`sudo ./install.sh` を再起動なしで再実行したら failed になった」という事例は
+これが原因でした (`install.sh` の STEP 6 が `bluetooth.service` を毎回無条件
+に再起動し、STEP 8 が `sentinel-bluealsa(-aplay).service` を連続して再起動
+することで、短時間に規定回数を超えていました)。新しい常駐サービスを追加する
+ときは `[Unit]` セクションに `StartLimitIntervalSec=0` を必ず書いてください。
+既に `failed (start-limit-hit)` になっているユニットは `systemctl start` を
+呼んでも `start request repeated too quickly` で無視されるため、
+`systemctl reset-failed <unit>` を先に呼ぶ必要があります
+(`install.sh` の STEP 8 と `sentinel-guardian.sh` の `check_services` は
+どちらもこれを行っています)。
+
+### 10. ffmpeg の drawtext フィルタが無いのは大抵 Debian 側のビルド問題
+
+ffmpeg 6.1 以降、`drawtext` フィルタには `libfreetype` だけでなく
+`libharfbuzz` も有効化してビルドされている必要があります。Debian の
+ffmpeg パッケージは一時期 (trixie/sid の 7:6.1-4) harfbuzz を有効にせず
+ビルドしていたため drawtext が丸ごと欠けていました
+([Debian #1056597](https://bugs.debian.org/1056597)、7:6.1-5 で修正済み)。
+`bootstrap.sh` は drawtext が無いことを検知すると `apt-get update` の後に
+`apt-get install --only-upgrade ffmpeg` を試みます。ベースイメージの apt
+キャッシュが古いまま (`apt-get update` が一度も走っていない) だとこの
+壊れたビルドを掴んだままになるため、これで直ることが多いです。それでも
+直らない場合はテロップ (drawtext) を省略するだけで処理は止めません
+(「意図的にしていないこと」参照)。
+
 ## モジュール構成
 
 各モジュールは疎結合で、`core/state.py` の `MODE` を購読するだけです。
