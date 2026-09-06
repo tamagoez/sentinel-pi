@@ -30,6 +30,16 @@ SVC_USER="${3:?usage: sentinel-fix-storage-owner.sh <data-dir> <mountpoint> <use
 
 mkdir -p "$DATA" 2>/dev/null || true
 
+# runuser (util-linux) is effectively always present, but if it's
+# somehow missing, fail loudly here rather than let every can_write()
+# call below silently return "command not found" (exit 127) forever,
+# which would misreport a perfectly fine mount as unwritable and loop on
+# fixes that can never help.
+command -v runuser >/dev/null || {
+  echo "runuser not found (part of util-linux) - cannot check $SVC_USER's write access" >&2
+  exit 1
+}
+
 can_write() {
   runuser -u "$SVC_USER" -- sh -c 'f="$1/.sentinel-write-test.$$"; : > "$f" 2>/dev/null && rm -f "$f" 2>/dev/null' _ "$DATA" 2>/dev/null
 }
@@ -46,8 +56,12 @@ fix_fat_mount() {
   gid=$(id -g "$SVC_USER") || return 1
   want="uid=$uid,gid=$gid,umask=002"
 
+  # Tolerate a trailing slash on the fstab side ("/mnt/VIDEOSD/") even
+  # though $mnt itself never has one - some tools write mount points
+  # that way, and a mismatch here used to mean "no fstab entry" (and a
+  # dead stop) even though one clearly existed.
   escaped_mnt=$(printf '%s' "$mnt" | sed 's/[.[\*^$()+?{|]/\\&/g')
-  fstab_line=$(grep -E "^[^#][^[:space:]]*[[:space:]]+${escaped_mnt}[[:space:]]" /etc/fstab 2>/dev/null || true)
+  fstab_line=$(grep -E "^[^#][^[:space:]]*[[:space:]]+${escaped_mnt}/?[[:space:]]" /etc/fstab 2>/dev/null || true)
 
   if [[ -z "$fstab_line" ]]; then
     echo "no /etc/fstab entry for $mnt; not touching it" >&2
@@ -59,8 +73,8 @@ fix_fat_mount() {
     :
   else
     cp -n /etc/fstab /etc/fstab.sentinel-backup 2>/dev/null || true
-    new_opts=$(awk -v mnt="$mnt" -v want="$want" 'BEGIN{OFS="\t"}
-      $0 !~ /^#/ && $2 == mnt {
+    new_opts=$(awk -v mnt="$mnt" -v mnt_slash="$mnt/" -v want="$want" 'BEGIN{OFS="\t"}
+      $0 !~ /^#/ && ($2 == mnt || $2 == mnt_slash) {
         n = split($4, existing, ",")
         keep = ""
         for (i = 1; i <= n; i++) {
@@ -143,11 +157,27 @@ case "$fstype" in
 esac
 
 # A normal Unix filesystem (ext4, btrfs, ...) - chown is the right tool.
+#
+# Also make sure the mount's own root directory ($MNT, e.g. /mnt/VIDEOSD
+# itself - not $DATA underneath it) grants traversal. A drive reused or
+# formatted elsewhere can keep restrictive root-directory permissions
+# (e.g. 0700 root:root) from wherever it came from; chown -R on $DATA
+# alone then fixes ownership of the sentinel/ subdirectory perfectly but
+# sentinel still can never reach it, since it isn't root's own account
+# and can't even list/enter $MNT to get there. This was found and
+# reproduced directly: a correctly-owned, correctly-permissioned $DATA
+# still failed can_write() with EACCES solely because of $MNT's own
+# mode, and the previous version of this script had nothing that would
+# ever detect or fix that. Only the execute (traverse) bit is added here
+# - nothing is made readable or writable that wasn't already meant to be
+# a shared storage mount.
+chmod o+x "$MNT" 2>/dev/null || true
+
 chown -R "$SVC_USER:$SVC_USER" "$DATA" 2>/dev/null || \
   echo "chown on $DATA reported an error" >&2
 
 if can_write; then
-  echo "fixed: chown -R $SVC_USER $DATA"
+  echo "fixed: chown -R $SVC_USER $DATA (and made $MNT traversable)"
   exit 0
 fi
 
