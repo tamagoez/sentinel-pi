@@ -59,11 +59,14 @@ Web 端末で root になる場合は、利用者が端末内で `su -` を実�
 
 ### 6. シェルスクリプトの出力は英語で統一する
 
-`setup.sh` / `bootstrap.sh` / `install.sh` / `scripts/*.sh` の echo・comment・
-systemd unit の `Description=` は**すべて英語**です。物理コンソールや素の
-シリアル端末では日本語グリフが描画できないため、これらのスクリプトに
-日本語を混ぜないでください。Python 側 (`sentinel/*.py`、Web UI) はブラウザ
-描画のため対象外で、従来どおり日本語のままで構いません。
+`setup.sh` / `bootstrap.sh` / `install.sh` / `scripts/*.sh` / 
+`windows/Configure-DietPi.ps1` の echo・comment・systemd unit の
+`Description=` は**すべて英語**です。物理コンソールや素のシリアル端末では
+日本語グリフが描画できないため、これらのスクリプトに日本語を混ぜないで
+ください。DietPi のロケール・タイムゾーン・キーボードなど、設定内容自体は
+日本語環境向けであっても、この原則は変わりません。Python 側
+(`sentinel/*.py`、Web UI) はブラウザ描画のため対象外で、従来どおり日本語の
+ままで構いません。
 
 `setup.sh` と `install.sh` は起動時に `sentinel/main.py` の存在を確認する
 堅牢なパス解決を行っています (`RAW_DIR` → `SRC` の判定ロジック)。clone が
@@ -85,8 +88,12 @@ SD カードや外部ドライブからのコピーではなく、`git clone` �
 ことだけを行います。無人で完走させる仕組み (旧 `deploy.sh` の
 systemd 再開ユニット) は廃止しました。ドライブのマウント先、ホットスポットの
 パスフレーズ、AdGuard の初回ログインは、いずれも人が確認しないと誤りに
-気付けないためです。導入手順そのものを変える場合は `SETUP.md` の表と
-`setup.sh` のヘッダコメント (H1〜H6) を必ず同時に更新してください。
+気付けないためです。導入手順そのものを変える場合は `SETUP.md` と
+`SETUP.ja.md` の表、`setup.sh` のヘッダコメント (H1〜H6) を必ず同時に更新
+してください。`SETUP.md` が正、`SETUP.ja.md` はその日本語訳という位置づけ
+です。フェーズ 0 (`dietpi.txt` の事前編集) を自動化する
+`windows/Configure-DietPi.ps1` も、対応するキーを変える場合は同時に更新して
+ください。
 
 ## モジュール構成
 

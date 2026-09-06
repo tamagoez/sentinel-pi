@@ -1,5 +1,7 @@
 # Setup — from a blank SD card to a running Sentinel
 
+日本語版: [SETUP.ja.md](SETUP.ja.md)
+
 Sentinel is installed from a git clone, and `setup.sh` walks you through it.
 It automates everything a script can decide and stops at the six points that
 need a person (marked **H1**–**H6** below).
@@ -56,6 +58,22 @@ below it are ignored otherwise and DHCP is used regardless.
 
 Nothing else needs to be copied onto the SD card or an external drive: the
 project comes from git in phase 2.
+
+**On Windows**, `windows/Configure-DietPi.ps1` automates this edit instead of
+copy/pasting the block above by hand:
+
+```powershell
+# from a PowerShell prompt, with the SD card's boot partition inserted
+.\windows\Configure-DietPi.ps1
+```
+
+It auto-detects the boot drive, applies the same defaults as the block
+above, takes a timestamped backup before writing, and only touches the keys
+it knows about. Pass parameters to change any value (`-StaticIP`,
+`-Timezone`, `-HotspotSsid`/`-HotspotPassphrase` to pre-set the WiFi hotspot
+so H2 has nothing left to ask, `-WhatIf` for a dry run) — see
+`Get-Help .\windows\Configure-DietPi.ps1 -Full` for all of them. Its own
+output is English too, for the same reason as everything else on this page.
 
 ## Phase 1 — first boot
 
