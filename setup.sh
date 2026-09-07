@@ -2,7 +2,7 @@
 # Sentinel setup - semi-automated installation on DietPi, run from a git clone.
 #
 #   sudo ./setup.sh            # run / resume the guided installation
-#   sudo ./setup.sh --update   # after "git pull": redeploy the app only
+#   sudo ./setup.sh --update   # alias for: sudo ./update.sh
 #   sudo ./setup.sh --reset    # forget the saved progress and start over
 #
 # "Semi-automated" means: everything a script can decide, the script does,
@@ -96,9 +96,8 @@ if [[ "$MODE" == reset ]]; then
 fi
 
 if [[ "$MODE" == update ]]; then
-  c "Update: redeploying the application only"
-  "$SRC/install.sh" || die "install.sh failed."
-  exit 0
+  [[ -f "$SRC/update.sh" ]] || die "update.sh is missing from $SRC."
+  exec "$SRC/update.sh"
 fi
 
 # DietPi's own commands normally resolve via ~/.bashrc on an interactive
@@ -210,7 +209,7 @@ fi
 #####################################################################
 if (( STAGE >= 2 )); then
   c "Setup already finished"
-  echo "  Redeploy after 'git pull' : sudo ./setup.sh --update"
+  echo "  Update (pulls + redeploys): sudo ./update.sh"
   echo "  Start over from scratch   : sudo ./setup.sh --reset"
   exit 0
 fi
@@ -309,7 +308,7 @@ cat <<EOS
 
      Later updates:
 
-       cd $SRC && git pull && sudo ./setup.sh --update
+       cd $SRC && sudo ./update.sh
 
 EOS
 ok "Setup complete."
