@@ -17,9 +17,11 @@
 
 from __future__ import annotations
 
+import glob
 import json
 import logging
 import os
+import subprocess
 import threading
 import time
 from pathlib import Path
@@ -154,10 +156,32 @@ class ModeManager:
         return new
 
 
+def sync_governor() -> None:
+    """起動直後に一度だけ呼ぶ。
+
+    _apply_governor() は ModeManager.evaluate() がモード「遷移」を検知した
+    ときにしか呼ばれない。起動直後は _mode の初期値が既に "normal" で、
+    最初の evaluate() も大抵 normal のままと判定するため遷移が起きず、
+    起動時点で実際にどのガバナが設定されているか (前回の eco 運用の
+    名残や DietPi 既定の ondemand など) は一度も確認・強制されない。
+    main.py の起動処理から一度呼ぶことでこの隙間を埋める。
+    """
+    _apply_governor(MODE.mode)
+
+
 def _apply_governor(mode: str) -> None:
-    """CPU ガバナを切り替える。権限がなければ黙って諦める (致命的ではない)。"""
-    target = config.get("eco_governor") if mode != NORMAL else config.get("normal_governor")
-    import glob
+    """CPU ガバナを切り替える。
+
+    sentinel は非 root ユーザーで動作するため (CLAUDE.md #4)、
+    scaling_governor への直接書き込みは PermissionError になる。以前は
+    それをここで黙って握り潰していたため、実機では eco モードに入っても
+    CPU ガバナが一度も切り替わっておらず、「eco でも負荷がほぼ変わらない」
+    という報告の直接の原因だった。sudoers で個別に許可した
+    scripts/sentinel-set-governor.sh を sudo 経由で呼ぶことで、実際に
+    書き込めるようにしている。それでも失敗する場合 (sudoers 未設定の
+    古い導入など) は引き続き致命的にはしない。
+    """
+    target = str(config.get("eco_governor") if mode != NORMAL else config.get("normal_governor"))
 
     paths = glob.glob(_GOVERNOR_GLOB)
     if not paths:
@@ -171,12 +195,16 @@ def _apply_governor(mode: str) -> None:
     if available and target not in available:
         log.warning("ガバナ %s は利用できません (利用可能: %s)", target, " ".join(available))
         return
-    for p in paths:
-        try:
-            with open(p, "w") as f:
-                f.write(str(target))
-        except (PermissionError, OSError):
-            return
+
+    script = config.APP_ROOT.parent / "scripts" / "sentinel-set-governor.sh"
+    try:
+        p = subprocess.run(["sudo", "-n", str(script), target],
+                           capture_output=True, text=True, timeout=5)
+        if p.returncode != 0:
+            log.warning("ガバナ %s への切り替えに失敗しました: %s", target,
+                       (p.stderr or p.stdout).strip())
+    except Exception as exc:
+        log.warning("ガバナ %s への切り替えに失敗しました: %s", target, exc)
 
 
 # ---------------- 永続スナップショット ----------------

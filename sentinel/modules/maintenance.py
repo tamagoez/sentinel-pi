@@ -75,10 +75,19 @@ def _can_render_text() -> bool:
 def _render_text_png(text: str, path: Path, *, font_size: int,
                      color: tuple[int, int, int, int],
                      canvas: tuple[int, int] | None = None,
+                     height: int | None = None,
                      bg: tuple[int, int, int, int] = (0, 0, 0, 0),
                      pad: int = 0) -> bool:
-    """テキストを PNG に描画する。canvas 指定時はその中央に、それ以外は
-    テキストぴったりのサイズ (+pad) で書き出す。"""
+    """テキストを PNG に描画する。canvas 指定時はその中央に、height のみ
+    指定時は横幅を文字列に合わせつつ縦だけ固定してその中央に、どちらも
+    無指定ならテキストぴったりのサイズ (+pad) で書き出す。
+
+    height を渡すと、フォントの実際の字形が計算上の高さより外側にはみ出す
+    場合でも、Pillow は画像のキャンバス外には一切描画しない (=そこで
+    自動的に切り取られる) ため、出力 PNG がこの高さを超えることはない。
+    ffmpeg の overlay に渡す帯 (drawbox) の高さぴったりに描画したい
+    ケース向け - 動画のフレーム自体からテキストがはみ出す事態を防ぐ。
+    """
     try:
         from PIL import Image, ImageDraw, ImageFont
     except Exception:
@@ -91,11 +100,17 @@ def _render_text_png(text: str, path: Path, *, font_size: int,
     probe = ImageDraw.Draw(Image.new("RGBA", (1, 1)))
     bbox = probe.textbbox((0, 0), text, font=font)
     tw, th = bbox[2] - bbox[0], bbox[3] - bbox[1]
-    size = canvas or (max(1, tw + pad * 2), max(1, th + pad * 2))
+    if canvas:
+        size = canvas
+    elif height is not None:
+        size = (max(1, tw + pad * 2), max(1, height))
+    else:
+        size = (max(1, tw + pad * 2), max(1, th + pad * 2))
     img = Image.new("RGBA", size, bg)
     draw = ImageDraw.Draw(img)
+    center_y = canvas is not None or height is not None
     x = (size[0] - tw) // 2 - bbox[0] if canvas else pad - bbox[0]
-    y = (size[1] - th) // 2 - bbox[1] if canvas else pad - bbox[1]
+    y = (size[1] - th) // 2 - bbox[1] if center_y else pad - bbox[1]
     draw.text((x, y), text, font=font, fill=color)
     img.save(path)
     return True
@@ -258,15 +273,23 @@ def _overlay_ticker(src: Path, out: Path, lines: list[str]) -> bool:
     # テロップ全体を横長の1枚の PNG に描画し、overlay で下から右へ流す
     # (drawbox と overlay はどちらも常に存在するコアフィルタで、drawtext
     # のようにビルドオプション次第で欠けることがない)。
+    #
+    # height=band_h で縦を帯の高さぴったりに固定する。Pillow はキャンバス
+    # の外には描画しない (=はみ出た分は自動的に切り取られる) ため、フォント
+    # の実際の字形が計算上の行の高さより大きい場合でも、出力 PNG が
+    # band_h を超えることはない。固定しなかった場合、フォント/文字種に
+    # よっては実測の高さが帯よりわずかに大きくなり、動画のフレーム自体の
+    # 下端からテロップがはみ出す不具合が実際に起きていた。
     ticker_png = out.with_suffix(".ticker.png")
     ok_png = _render_text_png("   ///   ".join(lines[:600]), ticker_png,
-                              font_size=18, color=(216, 216, 216, 255), pad=4)
+                              font_size=18, color=(216, 216, 216, 255),
+                              height=band_h, pad=4)
     if not ok_png:
         shutil.copy2(src, out)
         return True
 
     vf = (f"[0:v]drawbox=x=0:y=ih-{band_h}:w=iw:h={band_h}:color=0x000000@0.72:t=fill[band];"
-          f"[band][1:v]overlay=x='W-mod(t*90\\,W+w)':y='H-{band_h}+({band_h}-h)/2'")
+          f"[band][1:v]overlay=x='W-mod(t*90\\,W+w)':y=H-{band_h}")
     cmd = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
            "-i", str(src), "-i", str(ticker_png),
            "-filter_complex", vf] + _encoder_args() + [str(out)]

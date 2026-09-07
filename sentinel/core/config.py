@@ -61,7 +61,10 @@ DEFAULTS: dict[str, Any] = {
     "temp_critical_c": 80.0,              # これ以上で Critical
     "temp_recover_c": 68.0,               # Critical/強制 Eco からの復帰閾値
     "mode_override": "auto",              # auto | normal | eco
-    "eco_governor": "conservative",       # powersave | conservative | ondemand
+    "eco_governor": "powersave",           # powersave | conservative | ondemand
+                                           # powersave はクロックを最低固定にする。
+                                           # conservative は負荷次第で結局上まで
+                                           # 伸びうるため、eco の既定には向かない
     "normal_governor": "ondemand",
 
     # --- カメラ ---
@@ -104,8 +107,6 @@ DEFAULTS: dict[str, Any] = {
     # --- ネットワークログ ---
     "netlog_enabled": True,
     "adguard_url": "http://127.0.0.1:8083",
-    "adguard_user": "admin",
-    "adguard_password": "",
     "netlog_poll_seconds": 30.0,
     "netlog_retention_days": 14,
 
@@ -166,7 +167,7 @@ def all_values(hide_secrets: bool = True) -> dict[str, Any]:
             load()
         out = dict(_CACHE)
     if hide_secrets:
-        for k in ("password", "adguard_password", "discord_webhook"):
+        for k in ("password", "discord_webhook"):
             if out.get(k):
                 out[k] = "********"
     return out
@@ -237,7 +238,7 @@ def update(patch: dict[str, Any]) -> dict[str, Any]:
         for k, v in patch.items():
             if k not in DEFAULTS:
                 continue
-            if k in ("password", "adguard_password", "discord_webhook") and v == "********":
+            if k in ("password", "discord_webhook") and v == "********":
                 continue          # UI が伏字をそのまま返してきた場合は無視
             try:
                 coerced = _coerce(k, v)

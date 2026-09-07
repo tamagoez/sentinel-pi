@@ -78,7 +78,50 @@ check_adguard_bind() {
   fi
 }
 
-# ------------------------------------------------------------------ 2. Verify listen
+# ------------------------------------------------------------------ 2. AdGuard auth
+# Nobody is expected to log into AdGuard Home itself - Sentinel's own
+# query-log reader doesn't need credentials either, and the admin panel
+# is otherwise unreachable (see the firewall check below and
+# scripts/sentinel-adguard-8083.sh for the rare occasion someone wants
+# it directly). An empty "users:" list under the "http:" block disables
+# AdGuard Home's own login entirely, both for the web UI and its API -
+# this is what actually fixed the Sentinel dashboard's persistent
+# "HTTP 401: check your credentials" on the network page, which happened
+# whenever the AdGuard admin password Sentinel was configured with (or
+# left blank) didn't match AdGuard's real one.
+check_adguard_auth() {
+  [[ -f "$AGH_YAML" ]] || return 0
+  # Always run the rewrite below and compare before/after by checksum,
+  # rather than trying to first detect "already users: []" separately:
+  # the rewrite is a no-op (byte-for-byte) when it's already empty, so a
+  # second detection pass would just be duplicate, harder-to-get-right
+  # logic for the exact same question.
+  local before after
+  before=$(md5sum "$AGH_YAML" 2>/dev/null | awk '{print $1}')
+  awk '
+    /^http:/ { inblk=1; print; next }
+    /^[^[:space:]]/ { inblk=0; in_users=0 }
+    inblk && /^[[:space:]]{2}users:/ { print "  users: []"; in_users=1; next }
+    in_users {
+      # Still part of the old multi-line "users:" list: go-yaml prints
+      # sequence items at the SAME indent as their parent key
+      # ("  - name: admin", 2 spaces, not 4), with the fields of each
+      # entry indented further ("    password: ..."). Swallow both; stop only
+      # at the next real "http:" sibling key (2-space indent, no
+      # leading dash).
+      if ($0 ~ /^[[:space:]]{2}-/ || $0 ~ /^[[:space:]]{3,}/) { next }
+      in_users=0
+    }
+    { print }
+  ' "$AGH_YAML" > "$AGH_YAML.tmp" && mv "$AGH_YAML.tmp" "$AGH_YAML"
+  after=$(md5sum "$AGH_YAML" 2>/dev/null | awk '{print $1}')
+  if [[ "$before" != "$after" ]]; then
+    fixed "disabled AdGuard Home's own login (cleared users: in $AGH_YAML)"
+    systemctl restart adguardhome 2>/dev/null || systemctl restart AdGuardHome 2>/dev/null || true
+  fi
+}
+
+# ------------------------------------------------------------------ 3. Verify listen
 # Don't trust the config alone — check what's actually listening.
 check_adguard_listen() {
   command -v ss >/dev/null || return 0
@@ -91,12 +134,45 @@ check_adguard_listen() {
   fi
 }
 
-# ------------------------------------------------------------------ 3. Firewall
+# ------------------------------------------------------------------ 4. Firewall
 # Second line of defense: covers the config being reverted for any reason.
 # Re-checked every run, so anything that clears it (e.g. hostapd) is
 # corrected within 2 minutes.
+#
+# scripts/sentinel-adguard-8083.sh writes $UNBLOCK_FILE with a Unix
+# timestamp when an admin wants direct :8083 access for a while (to log
+# into AdGuard Home itself, which Sentinel otherwise never needs). While
+# that timestamp is still in the future, this function removes the block
+# instead of reapplying it - so "temporary" is enforced by this same
+# 2-minute cycle expiring it, not by a separate long-running process.
+UNBLOCK_FILE="$STATE_DIR/adguard-8083-unblock-until"
 check_firewall() {
   command -v iptables >/dev/null || return 0
+
+  local until=0
+  [[ -f "$UNBLOCK_FILE" ]] && until=$(cat "$UNBLOCK_FILE" 2>/dev/null || echo 0)
+  [[ "$until" =~ ^[0-9]+$ ]] || until=0
+
+  if (( until > $(date +%s) )); then
+    local removed=0
+    for cmd in iptables ip6tables; do
+      command -v "$cmd" >/dev/null || continue
+      while "$cmd" -C INPUT -p tcp --dport "$AGH_PORT" ! -i lo -j DROP 2>/dev/null; do
+        "$cmd" -D INPUT -p tcp --dport "$AGH_PORT" ! -i lo -j DROP 2>/dev/null && removed=1
+      done
+      while "$cmd" -C FORWARD -p tcp --dport "$AGH_PORT" -j DROP 2>/dev/null; do
+        "$cmd" -D FORWARD -p tcp --dport "$AGH_PORT" -j DROP 2>/dev/null && removed=1
+      done
+    done
+    (( removed )) && fixed "removed the port $AGH_PORT block rules (temporary access until $(date -d "@$until" '+%H:%M:%S' 2>/dev/null || echo "$until"))"
+    return 0
+  fi
+
+  # Expired or never requested - the enforced default. Also clean up a
+  # stale marker file so a later `sentinel-adguard-8083.sh status` doesn't
+  # report a bogus "until" time.
+  [[ -f "$UNBLOCK_FILE" ]] && rm -f "$UNBLOCK_FILE"
+
   local applied=0
   for cmd in iptables ip6tables; do
     command -v "$cmd" >/dev/null || continue
@@ -112,7 +188,7 @@ check_firewall() {
   return 0
 }
 
-# ------------------------------------------------------------------ 4. Audio
+# ------------------------------------------------------------------ 5. Audio
 # Pin output to the 3.5mm jack. numid=3 value 1 = headphone jack.
 check_audio() {
   command -v amixer >/dev/null || return 0
@@ -128,7 +204,7 @@ check_audio() {
   fi
 }
 
-# ------------------------------------------------------------------ 5. Bluetooth
+# ------------------------------------------------------------------ 6. Bluetooth
 # Keep the adapter powered, discoverable and pairable. bluetoothd restarts
 # reset these, so they're re-checked every run.
 check_bluetooth() {
@@ -149,7 +225,7 @@ check_bluetooth() {
   fi
 }
 
-# ------------------------------------------------------------------ 6. Services
+# ------------------------------------------------------------------ 7. Services
 check_services() {
   local units=(sentinel.service bluetooth.service)
   { command -v bluealsad >/dev/null || command -v bluealsa >/dev/null; } && \
@@ -168,7 +244,7 @@ check_services() {
   done
 }
 
-# ------------------------------------------------------------------ 7. Hotspot DNS
+# ------------------------------------------------------------------ 8. Hotspot DNS
 # Point hotspot clients at AdGuard for DNS.
 check_hotspot_dns() {
   local conf=/etc/dnsmasq.d/dietpi-wifi_hotspot.conf
@@ -188,7 +264,7 @@ check_hotspot_dns() {
   fi
 }
 
-# ------------------------------------------------------------------ 8. Storage ownership
+# ------------------------------------------------------------------ 9. Storage ownership
 # A drive re-mounted by hand (dietpi-drive_manager run again, a swapped
 # card, a reboot before the fstab fix below took effect) can silently
 # revert to being unwritable by the sentinel user - especially on
@@ -210,7 +286,7 @@ check_storage_owner() {
   fi
 }
 
-# ------------------------------------------------------------------ 9. Storage space
+# ------------------------------------------------------------------ 10. Storage space
 # Full storage would stall every feature, so warn early and keep one
 # diagnostics bundle on record for later investigation.
 check_storage() {
@@ -230,7 +306,7 @@ check_storage() {
   fi
 }
 
-# ------------------------------------------------------------------ 10. yt-dlp
+# ------------------------------------------------------------------ 11. yt-dlp
 # Try an update once a week; site changes break extraction otherwise.
 check_ytdlp() {
   local stamp="$STATE_DIR/ytdlp-updated"
@@ -247,6 +323,7 @@ check_ytdlp() {
 
 # ------------------------------------------------------------------ run
 check_adguard_bind
+check_adguard_auth
 check_adguard_listen
 check_firewall
 check_audio

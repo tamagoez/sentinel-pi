@@ -3,8 +3,8 @@
 日本語版: [SETUP.ja.md](SETUP.ja.md)
 
 Sentinel is installed from a git clone, and `setup.sh` walks you through it.
-It automates everything a script can decide and stops at the six points that
-need a person (marked **H1**–**H6** below).
+It automates everything a script can decide and stops at the five points that
+need a person (marked **H1**–**H5** below).
 
 All console output — DietPi's and this project's — is English by design.
 Japanese does not render on a physical HDMI console or a bare serial
@@ -17,7 +17,7 @@ terminal. The Web UI stays Japanese; it renders in a browser.
 | 0 | (on your PC) | flash DietPi, edit `dietpi.txt` |
 | 1 | first boot | DietPi's own first-run setup |
 | 2 | `sudo ./setup.sh` | H1, H2 → `bootstrap.sh` → H3 (reboot) |
-| 3 | `sudo ./setup.sh` | H4, H5 → `install.sh` → H6 |
+| 3 | `sudo ./setup.sh` | H4 → `install.sh` → H5 |
 
 `setup.sh` remembers where it stopped in `/var/lib/sentinel/setup-stage`, so
 after the reboot you run the same command again and it resumes. Re-running it
@@ -137,12 +137,16 @@ sudo ./setup.sh
   the mount's `uid=`/`gid=` options automatically so the `sentinel` user can
   write there, since those filesystems have no Unix ownership of their own
   and plain `chown` cannot fix them.
-- **H5 — AdGuard Home.** DietPi pre-configures it, so **there is no setup
-  wizard**: it already listens on `0.0.0.0:8083` with the user `admin`, the
-  DietPi global software password, and query logging enabled. Open
-  `http://<Pi-IP>:8083` now — while it is still directly reachable — log in,
-  and change the password if you want to. Afterwards the only way in is
-  Sentinel's `/adguard/` proxy.
+
+AdGuard Home itself needs no attention at this point: DietPi pre-configures
+it with query logging on, and there is nothing to log into - Guardian
+clears its own `users:` list automatically (see "Why it stays fixed across
+reboots" below), so its web UI never asks for credentials. It is not
+reachable from outside anyway (`install.sh` locks it to localhost and
+blocks port 8083 with iptables). If you ever want to open its admin panel
+directly - to edit filter lists, say - run
+`sudo sentinel-adguard-8083 enable [MINUTES]` on the Pi (default 15
+minutes; Guardian re-blocks it automatically once that time is up).
 
 `install.sh` then runs unattended: it creates the non-root `sentinel` user,
 deploys to `/opt/sentinel`, builds the venv, prepares the data directory,
@@ -150,13 +154,11 @@ disables any legacy `camguard` / `music-player` services, registers the
 Bluetooth units, locks AdGuard to localhost, and registers **Guardian**,
 which re-checks the whole configuration every 2 minutes and repairs drift.
 
-- **H6 — the application settings.** Open `http://<Pi-IP>:8080` and, in the
+- **H5 — the application settings.** Open `http://<Pi-IP>:8080` and, in the
   settings tab, set:
   1. the **Web UI password** — empty by default, and the web terminal is a
      shell for anyone who can reach port 8080
   2. the **Discord webhook URL**
-  3. the **AdGuard Home password** — the one from H5, needed to read the
-     query log
 
 ## Running the phases by hand
 
@@ -193,6 +195,7 @@ and repairs it:
 | Item | What can break it | Guardian's fix |
 |---|---|---|
 | AdGuard bind address | AdGuard auto-update | rewrite `AdGuardHome.yaml`, restart |
+| AdGuard login re-appearing | AdGuard auto-update, manual re-config | clear `users:` in `AdGuardHome.yaml`, restart |
 | Port 8083 actually blocked | reboot, hostapd | re-insert iptables rules |
 | Audio output (AUX) | kernel update | reset ALSA `numid=3` |
 | Bluetooth discoverable/pairable | bluetoothd restart | re-enable via `bluetoothctl` |
@@ -233,6 +236,6 @@ progress if you want to walk through the whole guided flow again.
 | Can't pair Bluetooth | `systemctl status sentinel-bt-agent`; `bluetoothctl show` should say `Discoverable: yes` |
 | A `sentinel-bluealsa*` unit shows `failed (start-limit-hit)` | `sudo systemctl reset-failed sentinel-bluealsa.service sentinel-bluealsa-aplay.service && sudo systemctl restart sentinel-bluealsa.service sentinel-bluealsa-aplay.service` (Guardian also does this automatically within 2 minutes) |
 | 8083 still reachable | `systemctl start sentinel-guardian`; `journalctl -t sentinel-guardian -n 20` |
-| Network log empty | AdGuard password wrong in the settings tab, or query logging off in AdGuard |
+| Network log empty | query logging off in AdGuard, or `adguard_url` wrong in the settings tab |
 | `setup.sh` starts from the wrong phase | `sudo ./setup.sh --reset` |
 | Anything else | `sentinel-diagnose` — bundles system + app state into one archive |

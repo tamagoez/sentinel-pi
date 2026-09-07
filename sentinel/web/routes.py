@@ -9,9 +9,6 @@ import json
 import logging
 import secrets
 import time
-import urllib.error
-import urllib.parse
-import urllib.request
 from datetime import datetime
 from pathlib import Path
 
@@ -368,47 +365,6 @@ async def netlog_view(request: Request, day: str = "", limit: int = Query(300, g
     days = sorted((p.stem for p in config.NETLOG_ROOT.glob("*.jsonl")), reverse=True)[:60]
     return {"records": records, "summary": netlog.today_summary(),
             "state": netlog.STATE, "days": days}
-
-
-# ---------------------------------------------------------------- AdGuard プロキシ
-
-_AG_HOP = {"content-encoding", "content-length", "transfer-encoding", "connection"}
-
-
-@router.api_route("/adguard/{path:path}",
-                  methods=["GET", "POST", "PUT", "DELETE", "PATCH"])
-async def adguard_proxy(path: str, request: Request):
-    """AdGuard Home の Web UI を 8080 経由でのみ見せるためのリバースプロキシ.
-
-    AdGuard 側は http.address を 127.0.0.1 に縛るため、LAN からもホットスポットからも
-    直接は届かない。ここを通った場合のみ到達できる。
-    """
-    require(request)
-    base = str(config.get("adguard_url") or "").rstrip("/")
-    if not base:
-        raise HTTPException(503, "AdGuard Home の URL が未設定です")
-    qs = request.url.query
-    url = f"{base}/{path}" + (f"?{qs}" if qs else "")
-    body = await request.body()
-    req = urllib.request.Request(url, data=body or None, method=request.method)
-    for k, v in request.headers.items():
-        if k.lower() in ("host", "cookie", "content-length", "connection"):
-            continue
-        req.add_header(k, v)
-    for k, v in netlog._auth_header().items():
-        req.add_header(k, v)
-    try:
-        resp = await asyncio.to_thread(
-            lambda: urllib.request.urlopen(req, timeout=20))
-    except urllib.error.HTTPError as exc:
-        return Response(content=exc.read(), status_code=exc.code,
-                        media_type=exc.headers.get("Content-Type", "text/plain"))
-    except Exception as exc:
-        raise HTTPException(502, f"AdGuard Home へ到達できません: {exc}")
-    data = await asyncio.to_thread(resp.read)
-    headers = {k: v for k, v in resp.headers.items() if k.lower() not in _AG_HOP}
-    return Response(content=data, status_code=resp.status,
-                    media_type=resp.headers.get("Content-Type"), headers=headers)
 
 
 # ---------------------------------------------------------------- 定時処理

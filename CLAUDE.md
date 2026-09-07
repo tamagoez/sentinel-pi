@@ -51,11 +51,30 @@ Web 端末で root になる場合は、利用者が端末内で `su -` を実�
 認証は OS の PAM がそのまま担当します。この設計を「便利だから」という理由で
 アプリ側のパスワード検証に変えないでください。漏洩経路を作ることになります。
 
-### 5. AdGuard Home の Web UI は localhost のみ
+### 5. AdGuard Home にはログインという概念自体を持たせない
 
-`http.address` を `127.0.0.1:8083` に固定し、iptables でも二重に塞いでいます。
-管理画面には Sentinel の `/adguard/` プロキシ経由でのみ到達できます
-(Sentinel の認証を通過した場合のみ)。
+AdGuard Home の管理画面を日常的に開く人はいません。Sentinel 側のクエリログ
+読み取りも含め、AdGuard 自身の認証は誰にとっても不要です。そこで
+`sentinel-guardian.sh` の `check_adguard_auth()` が `AdGuardHome.yaml` の
+`http:` ブロック内 `users:` を常に空リスト (`users: []`) に保ちます。
+AdGuard Home はユーザーが 1 人も設定されていないと Web UI・API のどちらも
+認証を要求しなくなります。以前は Sentinel の設定でユーザー名/パスワードを
+別途入力させ、それを `netlog.py` が Basic 認証ヘッダとして送っていました
+が、実機の DietPi 側パスワード (`admin` + DietPi のグローバルパスワード)
+と Sentinel 側の設定値が一致しないケースが実際にあり、ダッシュボードの
+アクセス記録が恒久的に `HTTP 401` で止まっていました。ユーザー名/パスワード
+という一致させるべき状態を丸ごと無くすことで、この種の設定ズレそのものを
+起こり得なくしています。
+
+到達性は別の話です。`http.address` を `127.0.0.1:8083` に固定し、iptables
+でも二重に塞いでいます (直接ログインが要らなくなった以上、8080 経由の
+`/adguard/` プロキシも撤去済みです — フィルタ設定などを直接いじりたい
+まれなケースのためだけに、`scripts/sentinel-adguard-8083.sh enable
+[MINUTES]` で :8083 を一時的に (既定 15 分、Guardian の次の周期までに
+自動で再遮断) 開けます。`disable` で即座に再遮断、`status` で現在の状態を
+確認できます)。**認証を無くした分、この firewall 側の遮断が唯一の防御線
+になります** — `check_firewall()` を弱めたり、`sentinel-adguard-8083.sh`
+の一時解放を恒久化したりしないでください。
 
 ### 6. シェルスクリプトの出力は英語で統一する
 
@@ -80,16 +99,17 @@ Web 端末で root になる場合は、利用者が端末内で `su -` を実�
 SD カードや外部ドライブからのコピーではなく、`git clone` した作業ツリーで
 `setup.sh` を実行する形に統一しています。`setup.sh` 自体は判断を持たず、
 
-1. 人の判断が要る 6 か所 (H1〜H6) で止まって尋ねる
+1. 人の判断が要る 5 か所 (H1〜H5) で止まって尋ねる
 2. その前後で `bootstrap.sh` と `install.sh` を呼ぶ
 3. 進捗を `/var/lib/sentinel/setup-stage` に記録し、再起動を挟んでも
    同じコマンドで再開できるようにする
 
 ことだけを行います。無人で完走させる仕組み (旧 `deploy.sh` の
-systemd 再開ユニット) は廃止しました。ドライブのマウント先、ホットスポットの
-パスフレーズ、AdGuard の初回ログインは、いずれも人が確認しないと誤りに
-気付けないためです。導入手順そのものを変える場合は `SETUP.md` と
-`SETUP.ja.md` の表、`setup.sh` のヘッダコメント (H1〜H6) を必ず同時に更新
+systemd 再開ユニット) は廃止しました。ドライブのマウント先やホットスポットの
+パスフレーズは、人が確認しないと誤りに気付けないためです (AdGuard は逆に、
+5. のとおり人の確認自体が要らないように作り替えています)。導入手順そのもの
+を変える場合は `SETUP.md` と
+`SETUP.ja.md` の表、`setup.sh` のヘッダコメント (H1〜H5) を必ず同時に更新
 してください。`SETUP.md` が正、`SETUP.ja.md` はその日本語訳という位置づけ
 です。フェーズ 0 (`dietpi.txt` の事前編集) を自動化する
 `windows/Configure-DietPi.ps1` も、対応するキーを変える場合は同時に更新して
@@ -236,6 +256,37 @@ ffmpeg 側は `overlay` と `drawbox` という、ビルドオプションに関
 場合は `_can_render_text()` が false を返し、テロップ/キャプションを
 省略するだけで処理は止まりません (「意図的にしていないこと」参照)。
 
+### 11. CPU ガバナの切り替えは sudo 経由で行う (直接書き込みでは効かない)
+
+`/sys/devices/system/cpu/cpu*/cpufreq/scaling_governor` は root しか書き込め
+ません。`sentinel` は非 root ユーザーで動作するため (#4)、
+`core/state.py` の `_apply_governor()` が以前これへ直接書き込んでいたコード
+は `PermissionError` を握り潰すだけで、実機では **eco モードに入っても
+CPU ガバナが一度も切り替わっていませんでした**。「eco モードでも負荷が
+ほぼ変わらない」という報告の直接の原因です。エラーも一切表面化しなかった
+ため (例外を投げずに黙って `return` していたため) 気付けませんでした。
+
+`scripts/sentinel-set-governor.sh <governor>` を新設し、`/etc/sudoers.d/
+sentinel` にこれ 1 本だけを (reboot 系コマンドと並んで) 個別に許可しました。
+sudoers は引数の *値* までは制限できないため、渡された governor 名が
+カーネルの実際の候補 (`performance`/`powersave`/`userspace`/`ondemand`/
+`conservative`/`schedutil`) のいずれかであることをスクリプト側で検証して
+から書き込みます。ここが実質的な権限の境界です。**このスクリプトを経由
+せず直接 sysfs に書き込むコードへ戻さないでください** — 同じ「実機では
+静かに何も起きない」不具合に戻ります。
+
+eco の既定ガバナは `conservative` から `powersave` に変更しました。
+`conservative` は結局のところ負荷が続けば周波数を最大まで上げてしまう
+可変ガバナで、eco の「確実に下げる」という目的に合っていなかったため
+です (`powersave` は常に最低クロックに固定されます)。
+
+また、`core/state.py` の `_apply_governor()` は `ModeManager.evaluate()` が
+モード「遷移」を検知したときにしか呼ばれません。起動直後は `_mode` の
+初期値が既に `normal` で最初の判定も大抵 `normal` のままのため遷移が
+起きず、起動時点でガバナが一切確認・強制されない隙間があります。
+`state.sync_governor()` を `main.py` の起動処理から一度だけ呼んで
+埋めています。
+
 ## モジュール構成
 
 各モジュールは疎結合で、`core/state.py` の `MODE` を購読するだけです。
@@ -249,6 +300,13 @@ scripts/sentinel-fix-storage-owner.sh
                     外部ストレージへの書き込み権限を確認し、必要なら
                     fstab のマウントオプションか chown で直す (install.sh
                     と Guardian の両方から呼ばれる)
+scripts/sentinel-adguard-8083.sh
+                    AdGuard Home の :8083 への直接アクセスを一時的に
+                    有効化 / 恒久的に無効化する (人が手動で実行する)
+scripts/sentinel-set-governor.sh
+                    CPU ガバナを切り替える。root しか書き込めないため
+                    sudoers で個別に許可し、core/state.py が sudo 経由で
+                    呼ぶ (直接書き込みでは権限エラーで無視される)
 
 core/config.py      設定の唯一の保管場所。型と範囲を強制する
 core/state.py       モード状態機械。「今どのモードか」の唯一の決定者

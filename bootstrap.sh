@@ -217,11 +217,9 @@ If you are driving the steps yourself, the remaining ones are:
 
     1. reboot
     2. dietpi-drive_manager   -> mount the external drive on /mnt/VIDEOSD
-    3. http://<this-Pi-IP>:8083  -> log in to AdGuard Home (user: admin,
-       password: the DietPi global software password) and confirm that
-       query logging is on. It is still reachable directly at this point;
-       install.sh locks it to localhost.
-    4. sudo ./install.sh
+    3. sudo ./install.sh     -> locks AdGuard to localhost and disables its
+       own login entirely (Guardian keeps it that way); nothing to log
+       into by hand
 
 EOS
 else
