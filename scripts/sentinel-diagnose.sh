@@ -63,13 +63,13 @@ run bluetooth.txt bash -c '
 '
 
 run packages.txt bash -c '
-  for p in ffmpeg mpg123 bluez bluez-alsa-utils bluez-tools python3-opencv yt-dlp; do
+  for p in ffmpeg mpg123 bluez bluez-alsa-utils bluez-tools python3-opencv python3-pil yt-dlp; do
     printf "%-20s " "$p"
     dpkg -l 2>/dev/null | awk -v p="$p" "\$2==p{print \$3}" || echo "?"
   done
   echo; echo "== yt-dlp version =="; yt-dlp --version 2>&1
   echo; echo "== ffmpeg =="; ffmpeg -version 2>&1 | head -1
-  echo "drawtext: $(ffmpeg -hide_banner -filters 2>/dev/null | grep -c '\'' drawtext '\'')"
+  echo "Pillow (text overlays): $(python3 -c "import PIL; print(PIL.__version__)" 2>&1)"
   echo "h264_v4l2m2m: $(ffmpeg -hide_banner -encoders 2>/dev/null | grep -c h264_v4l2m2m)"
 '
 

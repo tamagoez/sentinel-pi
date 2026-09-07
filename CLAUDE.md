@@ -163,6 +163,22 @@ ext4 側の `chown -R` は **`$DATA` (`/mnt/VIDEOSD/sentinel`) だけを直し�
 一切変えません)。**`$DATA` の chown だけに戻さないでください** — この
 `$MNT` 自体のチェックを外すと同じ症状がまた起こります。
 
+exFAT/NTFS 側で `/etc/fstab` を書き換えたあとは `systemctl daemon-reload`
+も呼びます。systemd は `/etc/fstab` から自動生成した `.mount` ユニットを
+起動時か `daemon-reload` のときにしか読み直さないため、これを呼ばずに
+`umount`/`mount` で直接反映させただけだと、書き換え直後は直って見えても
+systemd 側のユニットは古いオプションを覚えたままになります。あとで何かが
+そのユニットを再度動かす (タイマー、`systemctl restart`、次の再起動) と、
+古い壊れたオプションに巻き戻る可能性があります。
+
+**「実機で直っていない」と報告された時の切り分け**: このスクリプトは
+失敗時に `id`・`findmnt`・該当する `/etc/fstab` 行・`ls -ld` を
+`dump_diagnostics()` で出力します。「fstab エントリが無い」「マウントが
+そもそも認識されていない (`findmnt` が空)」「オプションは正しいのに書き
+込めない」のどれなのかがこの出力だけで区別できるようにしてあります。
+次に同じ報告が来たら、まずこの診断出力を見てから直してください — 過去
+2 回、根拠のない推測で直したつもりのものが実機では直っていませんでした。
+
 ### 9. systemd の `StartLimitIntervalSec` は `[Unit]` に書く
 
 `[Service]` に書いても構文エラーにはならず黙って無視されます
@@ -182,19 +198,28 @@ section 'Service', ignoring.` と出ます)。`Restart=always` な常駐サー�
 (`install.sh` の STEP 8 と `sentinel-guardian.sh` の `check_services` は
 どちらもこれを行っています)。
 
-### 10. ffmpeg の drawtext フィルタが無いのは大抵 Debian 側のビルド問題
+### 10. テロップは ffmpeg の drawtext を使わない (Pillow + overlay/drawbox)
 
 ffmpeg 6.1 以降、`drawtext` フィルタには `libfreetype` だけでなく
-`libharfbuzz` も有効化してビルドされている必要があります。Debian の
-ffmpeg パッケージは一時期 (trixie/sid の 7:6.1-4) harfbuzz を有効にせず
-ビルドしていたため drawtext が丸ごと欠けていました
-([Debian #1056597](https://bugs.debian.org/1056597)、7:6.1-5 で修正済み)。
-`bootstrap.sh` は drawtext が無いことを検知すると `apt-get update` の後に
-`apt-get install --only-upgrade ffmpeg` を試みます。ベースイメージの apt
-キャッシュが古いまま (`apt-get update` が一度も走っていない) だとこの
-壊れたビルドを掴んだままになるため、これで直ることが多いです。それでも
-直らない場合はテロップ (drawtext) を省略するだけで処理は止めません
-(「意図的にしていないこと」参照)。
+`libharfbuzz` も有効化してビルドされている必要があります。Debian/Raspberry
+Pi OS のパッケージは一時期これを有効にせずビルドしており
+([Debian #1056597](https://bugs.debian.org/1056597))、しかも安定版
+(bookworm など) は一度リリースされたバージョンを機能追加のために更新しない
+ため、`apt-get install --only-upgrade ffmpeg` を何度実行しても直る保証が
+ありません — リポジトリに直ったビルドがそもそも存在しないことがあります。
+実機でこれを踏み、`--only-upgrade` では解消しないことを確認しました。
+
+そのため、テロップ (NODATA ラベル・カメラごとのキャプション・アクセスログ
+のティッカー) は `drawtext` に一切依存しない方式に作り替えています
+(`sentinel/modules/maintenance.py` の `_render_text_png()` /
+`_can_render_text()`)。文字は Pillow (`python3-pil`) で PNG に描画し、
+ffmpeg 側は `overlay` と `drawbox` という、ビルドオプションに関わらず常に
+存在するコアフィルタだけで重ねます。Pillow は ffmpeg を一切リンクしない
+ので、この種のビルドフラグ問題そのものが起こり得ません。**drawtext を
+使う実装に戻さないでください** — 同じ「ディストリのパッケージ次第で機能
+が消える」問題に戻ります。フォントが見つからない、または Pillow が無い
+場合は `_can_render_text()` が false を返し、テロップ/キャプションを
+省略するだけで処理は止まりません (「意図的にしていないこと」参照)。
 
 ## モジュール構成
 

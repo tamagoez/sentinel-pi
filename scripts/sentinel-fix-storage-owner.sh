@@ -44,6 +44,19 @@ can_write() {
   runuser -u "$SVC_USER" -- sh -c 'f="$1/.sentinel-write-test.$$"; : > "$f" 2>/dev/null && rm -f "$f" 2>/dev/null' _ "$DATA" 2>/dev/null
 }
 
+# Printed only on final failure, so the next bug report already carries the
+# facts needed to tell "the fix didn't run" apart from "the fix ran but
+# genuinely didn't work" - guessing blind at this from a two-line error
+# message is how the previous two fixes each missed the real cause.
+dump_diagnostics() {
+  echo "--- diagnostics ---" >&2
+  echo "id $SVC_USER: $(id "$SVC_USER" 2>&1)" >&2
+  echo "findmnt $MNT: $(findmnt -no SOURCE,FSTYPE,OPTIONS "$MNT" 2>&1)" >&2
+  echo "fstab line for $MNT: $(grep -F "$MNT" /etc/fstab 2>/dev/null || echo '(none found)')" >&2
+  echo "ls -ld $MNT $DATA: $(ls -ld "$MNT" "$DATA" 2>&1)" >&2
+  echo "-------------------" >&2
+}
+
 # Already fine - the overwhelmingly common case once this has run once -
 # so nothing recursive runs at all.
 if can_write; then
@@ -91,6 +104,16 @@ fix_fat_mount() {
     fi
     printf '%s\n' "$new_opts" > /etc/fstab.tmp && mv /etc/fstab.tmp /etc/fstab
     echo "rewrote /etc/fstab options for $mnt to include $want" >&2
+    # systemd generates a transient .mount unit from /etc/fstab (via
+    # systemd-fstab-generator) and normally only re-reads it at boot or on
+    # daemon-reload. If this mount is systemd-managed (dietpi-drive_manager
+    # mounts often are, especially with "nofail"), a plain umount+mount
+    # below can succeed immediately yet leave systemd's cached unit
+    # pointing at the *old* options - and something that later re-triggers
+    # that unit (a timer, "systemctl restart", another reboot) would then
+    # silently put the old, broken options back. daemon-reload keeps
+    # systemd's view in sync with the fstab we just wrote.
+    systemctl daemon-reload 2>/dev/null || true
   fi
 
   # Remount to apply. A full umount+mount (not "-o remount") is required:
@@ -152,6 +175,7 @@ case "$fstype" in
     # comment) - stop here with a specific reason instead of trying it
     # anyway and reporting a generic, misleading "still cannot write".
     echo "$SVC_USER still cannot write to $DATA ($fstype mount options could not be fixed - see the message above)" >&2
+    dump_diagnostics
     exit 1
     ;;
 esac
@@ -182,4 +206,5 @@ if can_write; then
 fi
 
 echo "$SVC_USER still cannot write to $DATA" >&2
+dump_diagnostics
 exit 1
