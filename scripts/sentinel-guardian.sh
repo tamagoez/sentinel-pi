@@ -78,50 +78,7 @@ check_adguard_bind() {
   fi
 }
 
-# ------------------------------------------------------------------ 2. AdGuard auth
-# Nobody is expected to log into AdGuard Home itself - Sentinel's own
-# query-log reader doesn't need credentials either, and the admin panel
-# is otherwise unreachable (see the firewall check below and
-# scripts/sentinel-adguard-8083.sh for the rare occasion someone wants
-# it directly). An empty "users:" list under the "http:" block disables
-# AdGuard Home's own login entirely, both for the web UI and its API -
-# this is what actually fixed the Sentinel dashboard's persistent
-# "HTTP 401: check your credentials" on the network page, which happened
-# whenever the AdGuard admin password Sentinel was configured with (or
-# left blank) didn't match AdGuard's real one.
-check_adguard_auth() {
-  [[ -f "$AGH_YAML" ]] || return 0
-  # Always run the rewrite below and compare before/after by checksum,
-  # rather than trying to first detect "already users: []" separately:
-  # the rewrite is a no-op (byte-for-byte) when it's already empty, so a
-  # second detection pass would just be duplicate, harder-to-get-right
-  # logic for the exact same question.
-  local before after
-  before=$(md5sum "$AGH_YAML" 2>/dev/null | awk '{print $1}')
-  awk '
-    /^http:/ { inblk=1; print; next }
-    /^[^[:space:]]/ { inblk=0; in_users=0 }
-    inblk && /^[[:space:]]{2}users:/ { print "  users: []"; in_users=1; next }
-    in_users {
-      # Still part of the old multi-line "users:" list: go-yaml prints
-      # sequence items at the SAME indent as their parent key
-      # ("  - name: admin", 2 spaces, not 4), with the fields of each
-      # entry indented further ("    password: ..."). Swallow both; stop only
-      # at the next real "http:" sibling key (2-space indent, no
-      # leading dash).
-      if ($0 ~ /^[[:space:]]{2}-/ || $0 ~ /^[[:space:]]{3,}/) { next }
-      in_users=0
-    }
-    { print }
-  ' "$AGH_YAML" > "$AGH_YAML.tmp" && mv "$AGH_YAML.tmp" "$AGH_YAML"
-  after=$(md5sum "$AGH_YAML" 2>/dev/null | awk '{print $1}')
-  if [[ "$before" != "$after" ]]; then
-    fixed "disabled AdGuard Home's own login (cleared users: in $AGH_YAML)"
-    systemctl restart adguardhome 2>/dev/null || systemctl restart AdGuardHome 2>/dev/null || true
-  fi
-}
-
-# ------------------------------------------------------------------ 3. Verify listen
+# ------------------------------------------------------------------ 2. Verify listen
 # Don't trust the config alone — check what's actually listening.
 check_adguard_listen() {
   command -v ss >/dev/null || return 0
@@ -134,7 +91,7 @@ check_adguard_listen() {
   fi
 }
 
-# ------------------------------------------------------------------ 4. Firewall
+# ------------------------------------------------------------------ 3. Firewall
 # Second line of defense: covers the config being reverted for any reason.
 # Re-checked every run, so anything that clears it (e.g. hostapd) is
 # corrected within 2 minutes.
@@ -188,7 +145,7 @@ check_firewall() {
   return 0
 }
 
-# ------------------------------------------------------------------ 5. Audio
+# ------------------------------------------------------------------ 4. Audio
 # Pin output to the 3.5mm jack. numid=3 value 1 = headphone jack.
 check_audio() {
   command -v amixer >/dev/null || return 0
@@ -204,7 +161,7 @@ check_audio() {
   fi
 }
 
-# ------------------------------------------------------------------ 6. Bluetooth
+# ------------------------------------------------------------------ 5. Bluetooth
 # Keep the adapter powered, discoverable and pairable. bluetoothd restarts
 # reset these, so they're re-checked every run.
 check_bluetooth() {
@@ -225,7 +182,7 @@ check_bluetooth() {
   fi
 }
 
-# ------------------------------------------------------------------ 7. Services
+# ------------------------------------------------------------------ 6. Services
 check_services() {
   local units=(sentinel.service bluetooth.service)
   { command -v bluealsad >/dev/null || command -v bluealsa >/dev/null; } && \
@@ -244,7 +201,7 @@ check_services() {
   done
 }
 
-# ------------------------------------------------------------------ 8. Hotspot DNS
+# ------------------------------------------------------------------ 7. Hotspot DNS
 # Point hotspot clients at AdGuard for DNS.
 check_hotspot_dns() {
   local conf=/etc/dnsmasq.d/dietpi-wifi_hotspot.conf
@@ -264,7 +221,7 @@ check_hotspot_dns() {
   fi
 }
 
-# ------------------------------------------------------------------ 9. Storage ownership
+# ------------------------------------------------------------------ 8. Storage ownership
 # A drive re-mounted by hand (dietpi-drive_manager run again, a swapped
 # card, a reboot before the fstab fix below took effect) can silently
 # revert to being unwritable by the sentinel user - especially on
@@ -286,7 +243,7 @@ check_storage_owner() {
   fi
 }
 
-# ------------------------------------------------------------------ 10. Storage space
+# ------------------------------------------------------------------ 9. Storage space
 # Full storage would stall every feature, so warn early and keep one
 # diagnostics bundle on record for later investigation.
 check_storage() {
@@ -306,7 +263,7 @@ check_storage() {
   fi
 }
 
-# ------------------------------------------------------------------ 11. yt-dlp
+# ------------------------------------------------------------------ 10. yt-dlp
 # Try an update once a week; site changes break extraction otherwise.
 check_ytdlp() {
   local stamp="$STATE_DIR/ytdlp-updated"
@@ -323,7 +280,6 @@ check_ytdlp() {
 
 # ------------------------------------------------------------------ run
 check_adguard_bind
-check_adguard_auth
 check_adguard_listen
 check_firewall
 check_audio

@@ -76,6 +76,7 @@ def _render_text_png(text: str, path: Path, *, font_size: int,
                      color: tuple[int, int, int, int],
                      canvas: tuple[int, int] | None = None,
                      height: int | None = None,
+                     max_width: int | None = None,
                      bg: tuple[int, int, int, int] = (0, 0, 0, 0),
                      pad: int = 0) -> bool:
     """テキストを PNG に描画する。canvas 指定時はその中央に、height のみ
@@ -87,19 +88,32 @@ def _render_text_png(text: str, path: Path, *, font_size: int,
     自動的に切り取られる) ため、出力 PNG がこの高さを超えることはない。
     ffmpeg の overlay に渡す帯 (drawbox) の高さぴったりに描画したい
     ケース向け - 動画のフレーム自体からテキストがはみ出す事態を防ぐ。
+
+    max_width を渡すと、その幅に収まるまで font_size を比例縮小してから
+    描画する (文字を削るのではなく縮める - カメラ名が長くてタイルからは
+    み出す事態を防ぐ)。
     """
     try:
         from PIL import Image, ImageDraw, ImageFont
     except Exception:
         return False
     font_path = _font_path()
-    try:
-        font = ImageFont.truetype(font_path, font_size) if font_path else ImageFont.load_default()
-    except Exception:
-        font = ImageFont.load_default()
+
+    def _load(size: int):
+        try:
+            return ImageFont.truetype(font_path, size) if font_path else ImageFont.load_default()
+        except Exception:
+            return ImageFont.load_default()
+
+    font = _load(font_size)
     probe = ImageDraw.Draw(Image.new("RGBA", (1, 1)))
     bbox = probe.textbbox((0, 0), text, font=font)
     tw, th = bbox[2] - bbox[0], bbox[3] - bbox[1]
+    if max_width is not None and tw + pad * 2 > max_width and tw > 0:
+        shrunk = max(6, int(font_size * (max_width - pad * 2) / tw))
+        font = _load(shrunk)
+        bbox = probe.textbbox((0, 0), text, font=font)
+        tw, th = bbox[2] - bbox[0], bbox[3] - bbox[1]
     if canvas:
         size = canvas
     elif height is not None:
@@ -152,6 +166,33 @@ def _captures_for(cid: str, day: str) -> list[Path]:
     return sorted(folder.glob("*.jpg"))
 
 
+def _day_bounds(day: str) -> tuple[datetime, datetime]:
+    start = datetime.strptime(day, "%Y-%m-%d")
+    return start, start + timedelta(days=1)
+
+
+def _capture_time(day: str, p: Path) -> datetime:
+    """ファイル名 (HH-MM-SS-mmm, modules/camera.py が付ける) から実際の
+    撮影時刻を復元する。壊れたファイル名なら mtime にフォールバックする。"""
+    try:
+        hh, mm, ss, ms = p.stem.split("-")
+        return datetime.strptime(f"{day} {hh}:{mm}:{ss}.{ms}", "%Y-%m-%d %H:%M:%S.%f")
+    except (ValueError, OSError):
+        return datetime.fromtimestamp(p.stat().st_mtime)
+
+
+def _video_t(real_t: datetime, day_start: datetime, day_span: float,
+            target_seconds: float) -> float:
+    """実時刻を、その日 1 日 (day_start 〜 +span 秒) を target_seconds に
+    圧縮した動画の中の時刻へ変換する。カメラ間・テロップ間のずれをこの
+    1 つの対応関係だけに統一することで解消している - 別々に「均等割り」
+    していた以前の実装は、カメラごと・テロップで実時間との対応が
+    バラバラになり、同じ瞬間を指しているはずのものが動画内では全く
+    別の場面になっていた。"""
+    frac = (real_t - day_start).total_seconds() / day_span
+    return max(0.0, min(target_seconds, frac * target_seconds))
+
+
 def _make_nodata_clip(out: Path, label: str, seconds: float,
                       width: int, height: int) -> bool:
     """映像のないカメラ用のプレースホルダ動画。"""
@@ -184,20 +225,48 @@ def _make_nodata_clip(out: Path, label: str, seconds: float,
 
 
 def _make_camera_clip(cid: str, day: str, out: Path, width: int, height: int,
-                      target_seconds: float) -> bool:
+                      target_seconds: float, day_start: datetime, day_span: float) -> bool:
     frames = _captures_for(cid, day)
     fps = int(config.get("timelapse_fps"))
     if not frames:
         return _make_nodata_clip(out, f"{cid}  NODATA", target_seconds, width, height)
 
+    # 各フレームを、実際に撮影された時刻に対応する動画内の時刻へ配置する
+    # (「動体検知が起きた実時間」と「動画のどこか」が一致するように)。
+    # 密集した連写バーストは 1/fps 未満には縮めない (見えなくなるため) が、
+    # そのぶん合計が target_seconds を超えることがあるので、超えた場合は
+    # 全体を比例縮小して他のカメラ・テロップと尺を揃える。
+    vts = [_video_t(_capture_time(day, p), day_start, day_span, target_seconds) for p in frames]
+    floor = 1.0 / fps
+    durations = []
+    for i in range(len(frames)):
+        # frame 0 は (実際の撮影時刻に関わらず) 動画の先頭 t=0 から表示を
+        # 始める - concat デマルチプレクサはそれより前を表現できないため、
+        # 最初の1枚が撮れる前の時間帯は最初の1枚で埋める他ない。これを
+        # vts[0] から始めてしまうと (以前のバグ) 動画の冒頭 vts[0] 秒分が
+        # どのフレームにも割り当てられず、合計が target_seconds に届かない
+        # まま短くなり、他のカメラ・テロップと尺が揃わなくなっていた。
+        cur = vts[i] if i > 0 else 0.0
+        nxt = vts[i + 1] if i + 1 < len(frames) else target_seconds
+        durations.append(max(floor, nxt - cur))
+    total = sum(durations)
+    if total > target_seconds > 0:
+        scale = target_seconds / total
+        durations = [d * scale for d in durations]
+
     with tempfile.NamedTemporaryFile("w", suffix=".txt", delete=False,
                                      encoding="utf-8") as f:
         listfile = Path(f.name)
-        # 各フレームの表示時間を揃え、目標尺に近づける
-        per = max(1.0 / fps, target_seconds / max(1, len(frames)))
-        for p in frames:
-            f.write(f"file '{p}'\nduration {per:.4f}\n")
-        f.write(f"file '{frames[-1]}'\n")     # concat demuxer は最後の1枚を重複させる
+        # concat デマルチプレクサの "duration" ディレクティブは、静止画
+        # (image2 デマルチプレクサ) が相手だと最後のエントリで無視されたり、
+        # 内部のタイムベースの丸めで合計が数割ずれたりすることが実機の検証
+        # (ffprobe で実測) で分かった。代わりに各フレームを「1/fps 秒 = 1
+        # 行」として必要な行数だけ並べる方式にする。入力側に -r fps を
+        # 渡すことで各行が正確に1フレーム分になり、合計フレーム数 = 合計
+        # 秒数 という誤差の出ない単純な対応になる。
+        for p, dur in zip(frames, durations):
+            n = max(1, round(dur * fps))
+            f.write(f"file '{p}'\n" * n)
 
     vf = f"scale={width}:{height}:force_original_aspect_ratio=decrease," \
          f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2:color=0x141618"
@@ -205,19 +274,26 @@ def _make_camera_clip(cid: str, day: str, out: Path, width: int, height: int,
     caption_png: Path | None = None
     if _can_render_text():
         caption_png = out.with_suffix(".caption.png")
+        # カメラ名が長いとタイルの外までテロップがはみ出していた。幅の
+        # 半分強 (60%) を上限にし、超える場合は文字を削らずフォントを
+        # 縮めて収める (_render_text_png の max_width)。
         if not _render_text_png(cid, caption_png, font_size=max(12, height // 14),
-                                color=(176, 176, 176, 255), bg=(0, 0, 0, 115), pad=6):
+                                color=(176, 176, 176, 255), bg=(0, 0, 0, 115), pad=6,
+                                max_width=int(width * 0.6)):
             caption_png = None
 
+    # -r fps を -i より前 (入力オプション) に置くことで、リストの各行が
+    # ちょうど 1/fps 秒として解釈される (concat デマルチプレクサの
+    # duration ディレクティブより正確、上のコメント参照)。
     if caption_png is not None:
         cmd = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
-               "-f", "concat", "-safe", "0", "-i", str(listfile),
+               "-f", "concat", "-safe", "0", "-r", str(fps), "-i", str(listfile),
                "-i", str(caption_png),
                "-filter_complex", f"[0:v]{vf}[bg];[bg][1:v]overlay=8:6",
                "-r", str(fps)] + _encoder_args() + [str(out)]
     else:
         cmd = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
-               "-f", "concat", "-safe", "0", "-i", str(listfile),
+               "-f", "concat", "-safe", "0", "-r", str(fps), "-i", str(listfile),
                "-vf", vf, "-r", str(fps)] + _encoder_args() + [str(out)]
     ok, err = _run(cmd)
     listfile.unlink(missing_ok=True)
@@ -263,33 +339,69 @@ def _tile(clips: list[Path], out: Path, width: int, height: int) -> bool:
     return True
 
 
-def _overlay_ticker(src: Path, out: Path, lines: list[str]) -> bool:
-    """アクセスログをテロップとして下部に流す。"""
-    if not lines or not _can_render_text():
+def _render_ticker_strip(entries: list[tuple[datetime, str]], path: Path, *,
+                         day_start: datetime, day_span: float,
+                         target_seconds: float, band_h: int, px_per_sec: float) -> bool:
+    """アクセスログを、実時刻に比例した横位置に配置した 1 枚の帯画像に
+    描画する。全項目を等間隔で連結していた以前の実装は文字数依存の速さで
+    流れるだけで、動画内のどのカメラ映像が同時刻かとは無関係だった。
+    ここでは項目 i の横位置を _video_t() と同じ対応関係 (実時刻 -> 動画内
+    時刻) x px_per_sec で決めるため、_overlay_ticker() が
+    `x = W - t*px_per_sec` という一定速度のスクロールで重ねるだけで、
+    各項目が画面に入ってくる瞬間が必ずその実時刻に対応する動画内時刻と
+    一致する。"""
+    try:
+        from PIL import Image, ImageDraw, ImageFont
+    except Exception:
+        return False
+    font_path = _font_path()
+    if not font_path:
+        return False
+    try:
+        font = ImageFont.truetype(font_path, max(10, band_h - 16))
+    except Exception:
+        font = ImageFont.load_default()
+    strip_w = max(1, int(target_seconds * px_per_sec) + 1)
+    img = Image.new("RGBA", (strip_w, band_h), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(img)
+    for t, label in entries:
+        vt = _video_t(t, day_start, day_span, target_seconds)
+        x = int(vt * px_per_sec)
+        bbox = draw.textbbox((0, 0), label, font=font)
+        th = bbox[3] - bbox[1]
+        y = (band_h - th) // 2 - bbox[1]
+        draw.text((x, y), label, font=font, fill=(216, 216, 216, 255))
+    img.save(path)
+    return True
+
+
+def _overlay_ticker(src: Path, out: Path, entries: list[tuple[datetime, str]],
+                    day_start: datetime, day_span: float, target_seconds: float) -> bool:
+    """アクセスログをテロップとして下部に流す。動画の再生時刻と、実際に
+    その URL へアクセスしていた時刻が対応するように配置する
+    (_render_ticker_strip / _video_t を参照)。"""
+    if not entries or not _can_render_text():
         shutil.copy2(src, out)
         return True
 
     band_h = 34
-    # テロップ全体を横長の1枚の PNG に描画し、overlay で下から右へ流す
-    # (drawbox と overlay はどちらも常に存在するコアフィルタで、drawtext
-    # のようにビルドオプション次第で欠けることがない)。
-    #
-    # height=band_h で縦を帯の高さぴったりに固定する。Pillow はキャンバス
-    # の外には描画しない (=はみ出た分は自動的に切り取られる) ため、フォント
-    # の実際の字形が計算上の行の高さより大きい場合でも、出力 PNG が
-    # band_h を超えることはない。固定しなかった場合、フォント/文字種に
-    # よっては実測の高さが帯よりわずかに大きくなり、動画のフレーム自体の
-    # 下端からテロップがはみ出す不具合が実際に起きていた。
+    px_per_sec = 90.0
+    # drawbox と overlay はどちらも常に存在するコアフィルタで、drawtext の
+    # ようにビルドオプション次第で欠けることがない。
     ticker_png = out.with_suffix(".ticker.png")
-    ok_png = _render_text_png("   ///   ".join(lines[:600]), ticker_png,
-                              font_size=18, color=(216, 216, 216, 255),
-                              height=band_h, pad=4)
+    ok_png = _render_ticker_strip(entries[:2000], ticker_png, day_start=day_start,
+                                  day_span=day_span, target_seconds=target_seconds,
+                                  band_h=band_h, px_per_sec=px_per_sec)
     if not ok_png:
         shutil.copy2(src, out)
         return True
 
+    # x = W - t*px_per_sec: 一定速度の右->左スクロール。帯画像の中の項目 i
+    # の横位置は _video_t(項目iの実時刻)*px_per_sec なので、画面右端
+    # (x=W) をその項目が通過する瞬間はちょうど t = video_t(項目i) になる -
+    # 同時刻のカメラ映像と必ず重なる。
     vf = (f"[0:v]drawbox=x=0:y=ih-{band_h}:w=iw:h={band_h}:color=0x000000@0.72:t=fill[band];"
-          f"[band][1:v]overlay=x='W-mod(t*90\\,W+w)':y=H-{band_h}")
+          f"[band][1:v]overlay=x='W-t*{px_per_sec}':y=H-{band_h}")
     cmd = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
            "-i", str(src), "-i", str(ticker_png),
            "-filter_complex", vf] + _encoder_args() + [str(out)]
@@ -320,6 +432,8 @@ def _build(day: str) -> tuple[bool, str]:
     longest = max(counts.values()) if counts else 0
     fps = int(config.get("timelapse_fps"))
     target = max(8.0, longest / fps) if longest else 12.0
+    day_start, day_end = _day_bounds(day)
+    day_span = max(1.0, (day_end - day_start).total_seconds())
 
     with tempfile.TemporaryDirectory(prefix="sentinel-tl-") as tmpd:
         tmp = Path(tmpd)
@@ -328,12 +442,12 @@ def _build(day: str) -> tuple[bool, str]:
             STATE["stage"] = f"タイムラプス生成 ({cid})"
             STATE["progress"] = 0.1 + 0.5 * (i / max(1, len(cam_ids)))
             clip = tmp / f"{cid}.mp4"
-            if _make_camera_clip(cid, day, clip, tile_w, tile_h, target):
+            if _make_camera_clip(cid, day, clip, tile_w, tile_h, target, day_start, day_span):
                 clips.append(clip)
         if not clips:
             STATE["stage"] = "NODATA 画面を生成中"
             clip = tmp / "nodata.mp4"
-            _make_nodata_clip(clip, "NODATA", 12.0, tile_w, tile_h)
+            _make_nodata_clip(clip, "NODATA", target, tile_w, tile_h)
             clips = [clip]
 
         STATE["stage"] = "全カメラを統合中"
@@ -344,8 +458,8 @@ def _build(day: str) -> tuple[bool, str]:
         STATE["stage"] = "アクセスログのテロップを重畳中"
         STATE["progress"] = 0.85
         final = outdir / f"{day}_daily.mp4"
-        lines = netlog.timeline_for_ticker(day) if config.get("ticker_enabled") else []
-        _overlay_ticker(tiled, final, lines)
+        entries = netlog.ticker_entries(day) if config.get("ticker_enabled") else []
+        _overlay_ticker(tiled, final, entries, day_start, day_span, target)
 
     if not final.is_file():
         return False, "動画が生成されませんでした"

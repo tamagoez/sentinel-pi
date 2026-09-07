@@ -13,6 +13,7 @@ HTTPS の中身は見えないため、取得できるのは DNS の問い合わ
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import logging
 import time
@@ -109,16 +110,22 @@ def classify(domain: str) -> str:
     return ".".join(parts[-2:]) if len(parts) >= 2 else d
 
 
+def _auth_header() -> dict[str, str]:
+    user = str(config.get("adguard_user") or "")
+    pw = str(config.get("adguard_password") or "")
+    if not user:
+        return {}
+    token = base64.b64encode(f"{user}:{pw}".encode()).decode()
+    return {"Authorization": f"Basic {token}"}
+
+
 def _fetch_querylog(limit: int = 200) -> list[dict]:
-    # AdGuard Home's own login is disabled by sentinel-guardian.sh
-    # (AdGuardHome.yaml's "users" list is kept empty - see CLAUDE.md #5),
-    # since it is only ever reachable from localhost/Sentinel anyway. No
-    # credentials to send here as a result.
     base = str(config.get("adguard_url") or "").rstrip("/")
     if not base:
         raise RuntimeError("AdGuard Home の URL が設定されていません")
     url = f"{base}/control/querylog?limit={limit}"
-    with urllib.request.urlopen(url, timeout=10) as resp:
+    req = urllib.request.Request(url, headers=_auth_header())
+    with urllib.request.urlopen(req, timeout=10) as resp:
         payload = json.loads(resp.read().decode("utf-8"))
     return payload.get("data") or []
 
@@ -187,20 +194,27 @@ def read_day(day: str) -> list[dict]:
     return out
 
 
-def timeline_for_ticker(day: str) -> list[str]:
-    """テロップ用の1行テキスト列を作る。連続する同一サービスはまとめる。"""
+def ticker_entries(day: str) -> list[tuple[datetime, str]]:
+    """テロップ用の (実際の時刻, ラベル) 列を作る。連続する同一サービスは
+    まとめる。実時刻を返すのは、動画側 (maintenance.py) がカメラの
+    タイムラプスと同じ「実時間 -> 動画時間」の対応でテロップを配置し、
+    両者を同期させるため。"""
     records = read_day(day)
-    lines: list[str] = []
+    out: list[tuple[datetime, str]] = []
     last = None
     for r in records:
-        t = r["time"][11:16] if len(r["time"]) >= 16 else ""
-        label = f"{t}  {r['service']}"
+        ts = str(r.get("time") or "")
+        try:
+            t = datetime.strptime(f"{day} {ts[11:19]}", "%Y-%m-%d %H:%M:%S")
+        except (ValueError, IndexError):
+            continue
+        label = str(r.get("service") or "")
         if r.get("blocked"):
             label += "  [遮断]"
         if label != last:
-            lines.append(label)
+            out.append((t, label))
             last = label
-    return lines
+    return out
 
 
 def _cleanup() -> None:

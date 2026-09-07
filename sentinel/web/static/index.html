@@ -8,10 +8,29 @@
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/xterm@5.3.0/css/xterm.css">
 <style>
 :root{
-  --bg:#0e1013; --panel:#14171b; --panel2:#191d22; --line:#252a31; --line2:#333a43;
+  --bg:#0e1013; --bg-deep:#0b0d10; --panel:#14171b; --panel2:#191d22;
+  --line:#252a31; --line2:#333a43; --row-line:#1b1f24;
+  --hover:#171b20; --active:#14181d;
   --fg:#d6dae0; --dim:#7d858f; --faint:#4d545c;
   --ok:#4ea87a; --warn:#c9903f; --bad:#c4574f; --acc:#5b8fd6;
+  --p-bg:#1e3350; --p-bg-hover:#254063;
+  --d-border:#4a2c2a; --d-fg:#d68b85; --d-hover:#2a1a19;
+  --cur-bg:#16202c; --cur-fg:#cfe0f4;
+  --overlay:#000000cc;
+  --bar-bg:rgba(14,16,19,.94);
   --mono:ui-monospace,"SF Mono",Menlo,Consolas,"DejaVu Sans Mono",monospace;
+}
+:root[data-theme="light"]{
+  --bg:#f4f5f7; --bg-deep:#e8eaee; --panel:#ffffff; --panel2:#eef0f3;
+  --line:#dde1e6; --line2:#c7ccd3; --row-line:#e4e7eb;
+  --hover:#eef0f3; --active:#e6ebf2;
+  --fg:#1b1e22; --dim:#565e68; --faint:#7b8290;
+  --ok:#2f8058; --warn:#a3701a; --bad:#b8443c; --acc:#3f6fb0;
+  --p-bg:#dbe6f5; --p-bg-hover:#c9daf1;
+  --d-border:#eecac6; --d-fg:#a8382f; --d-hover:#fbe4e1;
+  --cur-bg:#dcebfa; --cur-fg:#1c3a5e;
+  --overlay:#00000066;
+  --bar-bg:rgba(244,245,247,.92);
 }
 *{box-sizing:border-box;margin:0;padding:0}
 html,body{height:100%}
@@ -19,31 +38,31 @@ body{background:var(--bg);color:var(--fg);font:13px/1.55 var(--mono);-webkit-fon
 a{color:var(--acc);text-decoration:none}
 button,input,select{font:inherit;color:inherit}
 button{background:var(--panel2);border:1px solid var(--line2);padding:4px 10px;cursor:pointer}
-button:hover{background:#20252b;border-color:#3f4753}
-button:active{background:#171b20}
-button.p{background:#1e3350;border-color:#2f5580}
-button.p:hover{background:#254063}
-button.d{border-color:#4a2c2a;color:#d68b85}
-button.d:hover{background:#2a1a19}
-input,select{background:#0b0d10;border:1px solid var(--line2);padding:4px 7px;width:100%}
+button:hover{background:var(--hover);border-color:var(--line2)}
+button:active{background:var(--active)}
+button.p{background:var(--p-bg);border-color:var(--acc)}
+button.p:hover{background:var(--p-bg-hover)}
+button.d{border-color:var(--d-border);color:var(--d-fg)}
+button.d:hover{background:var(--d-hover)}
+input,select{background:var(--bg-deep);border:1px solid var(--line2);padding:4px 7px;width:100%}
 input:focus,select:focus{outline:none;border-color:var(--acc)}
 
 /* ---- layout ---- */
 #app{display:grid;grid-template-columns:190px 1fr;height:100vh}
-aside{background:#0b0d10;border-right:1px solid var(--line);display:flex;flex-direction:column;overflow:hidden}
+aside{background:var(--bg-deep);border-right:1px solid var(--line);display:flex;flex-direction:column;overflow:hidden}
 .brand{padding:14px 16px 10px;border-bottom:1px solid var(--line)}
 .brand h1{font-size:15px;font-weight:500;letter-spacing:2.5px;text-transform:uppercase}
 .brand .b-sub{color:var(--faint);font-size:11px;letter-spacing:.5px;margin-top:2px}
 nav{padding:6px 0;flex:1;overflow-y:auto}
 nav a{display:flex;justify-content:space-between;align-items:center;padding:6px 16px;color:var(--dim);border-left:2px solid transparent;cursor:pointer}
-nav a:hover{color:var(--fg);background:#111418}
-nav a.on{color:var(--fg);background:#14181d;border-left-color:var(--acc)}
+nav a:hover{color:var(--fg);background:var(--hover)}
+nav a.on{color:var(--fg);background:var(--active);border-left-color:var(--acc)}
 nav a kbd{color:var(--faint);font-size:10px;border:1px solid var(--line);padding:0 4px}
 .sidefoot{border-top:1px solid var(--line);padding:9px 16px;font-size:11px;color:var(--faint);line-height:1.9}
 .sidefoot b{color:var(--dim);font-weight:400}
 
 main{overflow-y:auto;padding:0 0 40px}
-header.bar{position:sticky;top:0;z-index:5;background:rgba(14,16,19,.94);backdrop-filter:blur(6px);border-bottom:1px solid var(--line);padding:9px 20px;display:flex;align-items:center;gap:16px;flex-wrap:wrap}
+header.bar{position:sticky;top:0;z-index:5;background:var(--bar-bg);backdrop-filter:blur(6px);border-bottom:1px solid var(--line);padding:9px 20px;display:flex;align-items:center;gap:16px;flex-wrap:wrap}
 header.bar h2{font-size:13px;font-weight:500;letter-spacing:1.5px;text-transform:uppercase;color:var(--dim)}
 .spacer{flex:1}
 .pill{display:inline-flex;align-items:center;gap:5px;border:1px solid var(--line2);padding:1px 8px;font-size:11px;color:var(--dim)}
@@ -67,17 +86,17 @@ section.page.on{display:block}
 
 table{width:100%;border-collapse:collapse;font-size:12px}
 th{text-align:left;font-weight:400;color:var(--faint);font-size:10px;letter-spacing:1px;text-transform:uppercase;padding:5px 8px;border-bottom:1px solid var(--line)}
-td{padding:4px 8px;border-bottom:1px solid #1b1f24;vertical-align:top}
-tr:hover td{background:#171b20}
+td{padding:4px 8px;border-bottom:1px solid var(--row-line);vertical-align:top}
+tr:hover td{background:var(--hover)}
 td.num{text-align:right;font-variant-numeric:tabular-nums}
 .muted{color:var(--dim)} .faint{color:var(--faint)}
 
-.bar-g{height:4px;background:#0b0d10;border:1px solid var(--line);overflow:hidden}
+.bar-g{height:4px;background:var(--bg-deep);border:1px solid var(--line);overflow:hidden}
 .bar-g i{display:block;height:100%;background:var(--acc)}
 .bar-g i.warn{background:var(--warn)} .bar-g i.bad{background:var(--bad)}
 
 .cams{display:grid;gap:12px;grid-template-columns:repeat(auto-fit,minmax(300px,1fr))}
-.cam img{width:100%;aspect-ratio:4/3;object-fit:cover;background:#08090b;display:block;cursor:pointer}
+.cam img{width:100%;aspect-ratio:4/3;object-fit:cover;background:var(--bg-deep);display:block;cursor:pointer}
 .cam .meta{display:flex;gap:12px;padding:7px 10px;font-size:11px;color:var(--dim);flex-wrap:wrap;border-top:1px solid var(--line)}
 .cam .hd{display:flex;align-items:center;gap:7px;padding:7px 10px;border-bottom:1px solid var(--line)}
 .cam .hd .nm{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
@@ -87,22 +106,22 @@ td.num{text-align:right;font-variant-numeric:tabular-nums}
 .field label{display:block;font-size:10px;letter-spacing:.8px;text-transform:uppercase;color:var(--faint);margin-bottom:3px}
 .field .hint{font-size:11px;color:var(--faint);margin-top:2px}
 
-pre.log{background:#08090b;border:1px solid var(--line);padding:10px;font-size:11.5px;line-height:1.5;max-height:65vh;overflow:auto;white-space:pre-wrap;word-break:break-all}
+pre.log{background:var(--bg-deep);border:1px solid var(--line);padding:10px;font-size:11.5px;line-height:1.5;max-height:65vh;overflow:auto;white-space:pre-wrap;word-break:break-all}
 .list{max-height:60vh;overflow:auto}
-.tk{display:flex;gap:8px;padding:3px 8px;cursor:pointer;border-bottom:1px solid #1b1f24}
-.tk:hover{background:#171b20}
-.tk.cur{background:#16202c;color:#cfe0f4}
+.tk{display:flex;gap:8px;padding:3px 8px;cursor:pointer;border-bottom:1px solid var(--row-line)}
+.tk:hover{background:var(--hover)}
+.tk.cur{background:var(--cur-bg);color:var(--cur-fg)}
 .tk .i{color:var(--faint);width:34px;text-align:right;flex:none}
 .tk .n{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.errow{padding:6px 10px;border-bottom:1px solid #1b1f24}
-.errow:hover{background:#171b20}
+.errow{padding:6px 10px;border-bottom:1px solid var(--row-line)}
+.errow:hover{background:var(--hover)}
 .det{display:none;margin-top:6px;font-size:11px}
 .det.on{display:block}
 .badge-n{background:var(--bad);color:#fff;border-radius:8px;padding:0 5px;font-size:10px;margin-left:5px}
 #err-badge{background:var(--bad);color:#fff;border-radius:8px;padding:0 5px;font-size:10px;margin-left:5px;display:none}
 
-#term{height:calc(100vh - 130px);background:#08090b;border:1px solid var(--line);padding:6px}
-#overlay{position:fixed;inset:0;background:#000c;display:none;align-items:center;justify-content:center;z-index:50}
+#term{height:calc(100vh - 130px);background:var(--bg-deep);border:1px solid var(--line);padding:6px}
+#overlay{position:fixed;inset:0;background:var(--overlay);display:none;align-items:center;justify-content:center;z-index:50}
 #overlay.on{display:flex}
 #overlay img{max-width:94vw;max-height:92vh}
 #login{position:fixed;inset:0;background:var(--bg);display:none;align-items:center;justify-content:center;z-index:60}
@@ -111,7 +130,7 @@ pre.log{background:#08090b;border:1px solid var(--line);padding:10px;font-size:1
 #toast{position:fixed;right:16px;bottom:16px;z-index:70;display:flex;flex-direction:column;gap:6px}
 #toast div{background:var(--panel2);border:1px solid var(--line2);border-left:2px solid var(--acc);padding:7px 12px;font-size:12px;max-width:360px}
 #toast div.bad{border-left-color:var(--bad)}
-canvas{display:block;width:100%;height:120px}
+canvas{display:block;width:100%;height:130px}
 .menu-btn{display:none}
 #backdrop{display:none}
 @media(max-width:820px){
@@ -122,6 +141,13 @@ canvas{display:block;width:100%;height:120px}
   #backdrop.on{display:block;position:fixed;inset:0;background:#000a;z-index:40}
 }
 </style>
+<script>
+// 描画前に適用し、暗いテーマのままフラッシュしてから明るくなるのを防ぐ
+try{
+  const t = localStorage.getItem("sentinel-theme");
+  if(t === "light") document.documentElement.dataset.theme = "light";
+}catch(e){}
+</script>
 </head>
 <body>
 
@@ -142,6 +168,9 @@ canvas{display:block;width:100%;height:120px}
     <div><b>mode</b> <span id="f-mode">-</span></div>
     <div><b>temp</b> <span id="f-temp">-</span></div>
     <div><b>up</b> <span id="f-up">-</span></div>
+    <div style="margin-top:6px">
+      <button id="theme-btn" style="width:100%;padding:4px" onclick="toggleTheme()">ライトモード</button>
+    </div>
   </div>
 </aside>
 
@@ -169,7 +198,9 @@ canvas{display:block;width:100%;height:120px}
     <div class="grid g2">
       <div class="card"><h3>温度と CPU の推移 (直近30分)</h3><div class="body"><canvas id="chart"></canvas>
         <div class="row faint" style="font-size:11px;margin-top:6px">
-          <span style="color:var(--bad)">━</span> 温度 ℃ &nbsp; <span style="color:var(--acc)">━</span> CPU %
+          <span style="color:var(--bad)">━</span> 温度 (左軸) &nbsp; <span style="color:var(--acc)">━</span> CPU % (右軸)
+          &nbsp;&nbsp; <span style="display:inline-block;width:10px;height:10px;background:rgba(91,143,214,.35);vertical-align:-1px"></span> エコ
+          <span style="display:inline-block;width:10px;height:10px;background:rgba(196,87,79,.4);vertical-align:-1px;margin-left:6px"></span> 緊急
         </div></div></div>
       <div class="card"><h3>モード</h3><div class="body">
         <div id="mode-info"></div>
@@ -255,15 +286,17 @@ canvas{display:block;width:100%;height:120px}
       <div class="card"><h3>AdGuard Home</h3><div class="body">
         <div id="net-state"></div>
         <div class="row" style="margin-top:10px">
-          <span class="faint" style="font-size:11px">管理画面はログイン不要ですが既定で外部から遮断されています。
-          直接開く場合は Pi 上で「sudo sentinel-adguard-8083 enable」を実行してください</span>
+          <span class="faint" style="font-size:11px">管理画面は既定で外部から遮断されています。
+          直接開く場合は Pi 上で「sudo sentinel-adguard-8083 enable」を実行してください。
+          クエリログの読み取りには設定タブのユーザー名/パスワードが必要です</span>
         </div>
       </div></div>
     </div>
     <div class="card"><h3>アクセス記録</h3>
       <div class="body" style="padding:8px 12px"><div class="row">
         <select id="net-day" style="width:auto" onchange="loadNet()"></select>
-        <button onclick="loadNet()">更新</button></div></div>
+        <button onclick="loadNet()">更新</button>
+        <button class="d" onclick="deleteNetlogDay()">この日を削除</button></div></div>
       <div class="list"><table><thead><tr><th>時刻</th><th>サービス</th><th>ドメイン</th><th>端末</th></tr></thead>
       <tbody id="net-rows"></tbody></table></div></div>
   </section>
@@ -294,6 +327,7 @@ canvas{display:block;width:100%;height:120px}
     <div class="row" style="margin-bottom:12px">
       <button class="p" onclick="saveSettings()">保存</button>
       <button onclick="loadSettings()">再読込</button>
+      <button onclick="testWebhook()">Discord にテスト送信</button>
       <button class="d" onclick="doReboot()">今すぐ再起動</button>
       <span class="faint" id="set-msg"></span>
     </div>
@@ -361,13 +395,31 @@ function toggleMenu(){
   $("#backdrop").classList.toggle("on");
 }
 
+function applyThemeLabel(){
+  const light = document.documentElement.dataset.theme === "light";
+  $("#theme-btn").textContent = light ? "ダークモード" : "ライトモード";
+}
+function toggleTheme(){
+  const light = document.documentElement.dataset.theme === "light";
+  if(light){ delete document.documentElement.dataset.theme; }
+  else{ document.documentElement.dataset.theme = "light"; }
+  try{ localStorage.setItem("sentinel-theme", light ? "dark" : "light"); }catch(e){}
+  applyThemeLabel();
+  if(typeof drawChart === "function"){ drawChart._pts = null; drawChart(); }
+}
+applyThemeLabel();
+
 function go(p){
+  if(!PAGES.some(x => x[0] === p)) p = "dash";
   CUR = p;
   $$("section.page").forEach(s => s.classList.toggle("on", s.id === "p-"+p));
   $$("#nav a").forEach(a => a.classList.toggle("on", a.dataset.p === p));
   $("#title").textContent = (PAGES.find(x => x[0]===p) || [,""])[1];
   document.querySelector("aside").classList.remove("open");
   $("#backdrop").classList.remove("on");
+  // リロードや「戻る」でもページが保たれるよう、URL のハッシュと同期する。
+  // 値が既に同じなら再設定しない (hashchange の無限ループを避ける)。
+  if(location.hash.slice(1) !== p) location.hash = p;
   if(p==="ev") loadEvents();
   if(p==="net") loadNet();
   if(p==="arc") loadArchive();
@@ -377,6 +429,7 @@ function go(p){
   if(p==="music") loadMusic();
   if(p==="term" && FIT) setTimeout(()=>FIT.fit(), 60);
 }
+window.addEventListener("hashchange", () => go(location.hash.slice(1)));
 document.addEventListener("keydown", e => {
   if(/^(INPUT|SELECT|TEXTAREA)$/.test(e.target.tagName) || e.target.closest("#term")) return;
   const hit = PAGES.find(x => x[2] === e.key);
@@ -405,7 +458,7 @@ async function doLogin(){
   try{
     await post("/api/login", {password: $("#pw").value});
     $("#login").classList.remove("on"); $("#lerr").textContent = "";
-    connect(); go(CUR);
+    connect(); go(location.hash.slice(1) || CUR);
   }catch(e){ $("#lerr").textContent = "パスワードが違います"; }
 }
 $("#pw").addEventListener("keydown", e => { if(e.key === "Enter") doLogin(); });
@@ -528,6 +581,7 @@ async function restartCam(id){
 function reloadCams(){ $("#cams").dataset.sig = ""; renderCams(); }
 
 /* ---------------- chart ---------------- */
+const MODE_TINT = {normal:null, eco:"rgba(91,143,214,.10)", critical:"rgba(196,87,79,.14)"};
 async function drawChart(){
   const c = $("#chart");
   if(!c) return;
@@ -537,23 +591,63 @@ async function drawChart(){
     catch{ return; }
   }
   if(!pts || pts.length < 2) return;
-  const dpr = window.devicePixelRatio || 1, W = c.clientWidth, H = 120;
+  const cs = getComputedStyle(document.documentElement);
+  const cv = name => cs.getPropertyValue(name).trim();
+  const colLine = cv("--line"), colFaint = cv("--faint"), colBad = cv("--bad"), colAcc = cv("--acc");
+  const dpr = window.devicePixelRatio || 1, W = c.clientWidth, H = 130;
   c.width = W*dpr; c.height = H*dpr;
   const x = c.getContext("2d"); x.scale(dpr,dpr); x.clearRect(0,0,W,H);
+  const padL = 30, padR = 32, padT = 6, padB = 16;
+  const plotW = W - padL - padR, plotY0 = padT, plotY1 = H - padB;
   const t0 = pts[0].t, t1 = pts[pts.length-1].t || t0+1;
-  const px = p => (p.t - t0) / Math.max(1, t1 - t0) * (W-2) + 1;
-  x.strokeStyle = "#252a31"; x.lineWidth = 1;
-  for(let i=0;i<=3;i++){ const y = 6 + i*(H-16)/3; x.beginPath(); x.moveTo(0,y); x.lineTo(W,y); x.stroke(); }
+  const px = p => padL + (p.t - t0) / Math.max(1, t1 - t0) * plotW;
+  const tempMax = 90, cpuMax = 100;
+
+  // モードごとの背景帯: 連続する同一モード区間をまとめて塗る
+  let segStart = 0;
+  for(let i=1;i<=pts.length;i++){
+    const changed = i === pts.length || pts[i].mode !== pts[segStart].mode;
+    if(changed){
+      const tint = MODE_TINT[pts[segStart].mode];
+      if(tint){
+        const xa = px(pts[segStart]), xb = px(pts[Math.min(i,pts.length-1)]);
+        x.fillStyle = tint;
+        x.fillRect(xa, plotY0, Math.max(1, xb-xa), plotY1-plotY0);
+      }
+      segStart = i;
+    }
+  }
+
+  // 横グリッド線 + 左 (温度) / 右 (CPU%) の軸ラベル
+  x.strokeStyle = colLine; x.lineWidth = 1;
+  x.fillStyle = colFaint; x.font = "10px " + getComputedStyle(document.body).fontFamily;
+  x.textBaseline = "middle";
+  for(let i=0;i<=3;i++){
+    const y = plotY0 + i*(plotY1-plotY0)/3;
+    x.beginPath(); x.moveTo(padL,y); x.lineTo(W-padR,y); x.stroke();
+    const tempV = Math.round(tempMax * (1 - i/3));
+    const cpuV = Math.round(cpuMax * (1 - i/3));
+    x.textAlign = "right"; x.fillStyle = colBad; x.fillText(tempV+"°", padL-4, y);
+    x.textAlign = "left"; x.fillStyle = colAcc; x.fillText(cpuV+"%", W-padR+4, y);
+  }
+  // 横軸: 開始・中間・終了の時刻
+  x.fillStyle = colFaint; x.textBaseline = "top"; x.textAlign = "center";
+  [0, 0.5, 1].forEach(f => {
+    const t = t0 + (t1-t0)*f;
+    const lbl = new Date(t*1000).toLocaleTimeString("ja-JP", {hour:"2-digit", minute:"2-digit"});
+    x.fillText(lbl, padL + plotW*f, plotY1+3);
+  });
+
   const line = (key, max, color) => {
     x.strokeStyle = color; x.lineWidth = 1.5; x.beginPath();
     pts.forEach((p,i) => {
-      const y = H - 8 - Math.min(1, p[key]/max) * (H-16);
+      const y = plotY1 - Math.min(1, p[key]/max) * (plotY1-plotY0);
       i ? x.lineTo(px(p), y) : x.moveTo(px(p), y);
     });
     x.stroke();
   };
-  line("temp", 90, "#c4574f");
-  line("cpu", 100, "#5b8fd6");
+  line("temp", tempMax, colBad);
+  line("cpu", cpuMax, colAcc);
 }
 
 /* ---------------- mode ---------------- */
@@ -581,14 +675,18 @@ function renderMusic(full){
   $("#m-volv").textContent = (s.volume ?? 0) + "%";
   if(document.activeElement !== $("#m-vol")) $("#m-vol").value = s.volume ?? 0;
   $("#m-repeat").value = s.repeat || "all";
-  $("#m-shuf").style.borderColor = s.shuffle ? "#2f5580" : "";
-  $("#m-shuf").style.background = s.shuffle ? "#1e3350" : "";
+  $("#m-shuf").style.borderColor = s.shuffle ? "var(--acc)" : "";
+  $("#m-shuf").style.background = s.shuffle ? "var(--p-bg)" : "";
 
   if(full){
     $("#pl-n").textContent = `(${(MUSIC.playlist||[]).length} 曲)`;
     $("#playlist").innerHTML = (MUSIC.playlist||[]).map(t =>
-      `<div class="tk ${t.current?"cur":""}" onclick="mus('jump',{index:${t.index}})">
-        <span class="i">${t.index+1}</span><span class="n">${esc(t.name)}</span></div>`).join("")
+      `<div class="tk ${t.current?"cur":""}">
+        <span class="i" onclick="mus('jump',{index:${t.index}})" style="cursor:pointer">${t.index+1}</span>
+        <span class="n" onclick="mus('jump',{index:${t.index}})" style="cursor:pointer">${esc(t.name)}</span>
+        <span onclick="event.stopPropagation();deleteTrack('${esc(t.name).replace(/'/g,"\\'")}')"
+              style="color:var(--bad);cursor:pointer;flex:none;padding:0 4px" title="削除">✕</span>
+       </div>`).join("")
       || `<div class="body faint" style="padding:12px">曲がありません。URL から追加するか、音楽フォルダに mp3 を置いてください。</div>`;
     $("#dls").innerHTML = (MUSIC.downloads||[]).map(d => {
       const lbl = {queued:"待機中", waiting:"通常モード待ち", running:"取得中", done:"完了", error:"失敗"}[d.state] || d.state;
@@ -606,6 +704,12 @@ $("#m-seekbar").addEventListener("click", e => {
 });
 async function mus(action, body){
   try{ await post("/api/music/"+action, body); setTimeout(loadMusic, 350); }
+  catch(e){ toast(e.message, true); }
+}
+async function deleteTrack(name){
+  if(!confirm(`「${name}」を削除します。よろしいですか。`)) return;
+  try{ await api(`/api/music/track?name=${encodeURIComponent(name)}`, {method:"DELETE"});
+       toast("削除しました"); loadMusic(); }
   catch(e){ toast(e.message, true); }
 }
 function toggleShuffle(){
@@ -663,6 +767,14 @@ async function loadNet(){
       || `<tr><td class="faint">記録がありません</td></tr>`;
   }catch(e){}
 }
+async function deleteNetlogDay(){
+  const day = $("#net-day").value;
+  if(!day){ toast("「直近」ではなく特定の日を選んでください", true); return; }
+  if(!confirm(`${day} のネットワークログを削除します。よろしいですか。`)) return;
+  try{ await api(`/api/netlog/${encodeURIComponent(day)}`, {method:"DELETE"});
+       toast("削除しました"); $("#net-day").value = ""; loadNet(); }
+  catch(e){ toast(e.message, true); }
+}
 
 /* ---------------- errors ---------------- */
 async function loadErrors(){
@@ -704,11 +816,20 @@ async function loadArchive(){
       : s.last_run ? `前回 ${new Date(s.last_run*1000).toLocaleString("ja-JP")} · ${s.last_result} · ${s.last_output||""}`
       : (s.next_run ? `次回 ${new Date(s.next_run*1000).toLocaleString("ja-JP")}` : "");
     $("#archive").innerHTML = (r.items||[]).map(i =>
-      `<div class="card"><h3>${esc(i.day)} <span class="faint">${i.size_mb} MB</span></h3>
+      `<div class="card"><h3 style="display:flex;align-items:center;gap:6px">
+         <span style="flex:1">${esc(i.day)} <span class="faint">${i.size_mb} MB</span></span>
+         <button class="d" style="padding:1px 6px;font-size:11px" onclick="deleteArchive('${esc(i.day)}','${esc(i.file)}')">削除</button>
+       </h3>
        <video controls preload="none" style="width:100%;display:block;background:#000" src="${i.url}"></video></div>`).join("")
       || `<div class="card"><div class="body faint">アーカイブはまだありません。</div></div>`;
     if(s.running) setTimeout(loadArchive, 3000);
   }catch(e){}
+}
+async function deleteArchive(day, file){
+  if(!confirm(`${day} のアーカイブ動画を削除します。よろしいですか。`)) return;
+  try{ await api(`/api/archive/${encodeURIComponent(day)}/${encodeURIComponent(file)}`, {method:"DELETE"});
+       toast("削除しました"); loadArchive(); }
+  catch(e){ toast(e.message, true); }
 }
 async function runMaint(reboot){
   if(reboot && !confirm("動画を生成したあと再起動します。よろしいですか。")) return;
@@ -731,9 +852,11 @@ const GROUPS = [
   ["音楽", ["music_enabled","music_autoplay_on_presence","music_volume","music_repeat",
             "music_shuffle","mpg123_buffer_kb","alsa_device"]],
   ["Bluetooth", ["bt_enabled","bt_poll_seconds"]],
-  ["通知 (Discord)", ["discord_webhook","notify_motion","notify_system_events",
-                      "notify_min_interval","notify_summary_after"]],
-  ["ネットワーク記録", ["netlog_enabled","adguard_url",
+  ["通知 (Discord)", ["discord_webhook","notify_motion","notify_min_interval",
+                      "notify_summary","notify_summary_after","notify_mode_change",
+                      "notify_system_events","notify_motion_title","notify_summary_title",
+                      "notify_mode_title"]],
+  ["ネットワーク記録", ["netlog_enabled","adguard_url","adguard_user","adguard_password",
                         "netlog_poll_seconds","netlog_retention_days"]],
   ["定時処理", ["maintenance_enabled","maintenance_hour","maintenance_minute",
                 "reboot_after_maintenance","timelapse_fps","timelapse_tile_width","ticker_enabled"]],
@@ -755,9 +878,15 @@ const LABELS = {
   mpg123_buffer_kb:"mpg123 バッファ (KB)", alsa_device:"ALSA デバイス (空欄で既定)",
   bt_enabled:"Bluetooth 連携を有効にする", bt_poll_seconds:"接続確認の間隔 (秒)",
   discord_webhook:"Webhook URL", notify_motion:"動体検知を通知する",
-  notify_system_events:"システムイベントを通知する",
-  notify_min_interval:"同一カメラの最短通知間隔 (秒)", notify_summary_after:"統計を送るまでの静穏時間 (秒)",
+  notify_system_events:"システムイベント (起動・端末など) を通知する",
+  notify_min_interval:"同一カメラの最短通知間隔 (秒)",
+  notify_summary:"無検知が続いたら集計を通知する", notify_summary_after:"統計を送るまでの静穏時間 (秒)",
+  notify_mode_change:"モード遷移 (通常/エコ/緊急) を通知する",
+  notify_motion_title:"動体検知の文面 ({camera} {mode} {temp} {time})",
+  notify_summary_title:"集計通知の文面 ({total} {duration_min} {quiet_min})",
+  notify_mode_title:"モード遷移の文面 ({old} {new} {reason})",
   netlog_enabled:"アクセス記録を有効にする", adguard_url:"AdGuard Home の URL",
+  adguard_user:"ユーザー名", adguard_password:"パスワード",
   netlog_poll_seconds:"取得間隔 (秒)", netlog_retention_days:"記録の保存日数",
   maintenance_enabled:"定時処理を有効にする", maintenance_hour:"実行時 (時)",
   maintenance_minute:"実行時 (分)", reboot_after_maintenance:"処理後に再起動する",
@@ -813,6 +942,14 @@ async function saveSettings(){
 }
 const cfg = patch => api("/api/config", {method:"PUT",
   headers:{"Content-Type":"application/json"}, body: JSON.stringify(patch)});
+async function testWebhook(){
+  $("#set-msg").textContent = "送信中…";
+  try{
+    const r = await post("/api/notify/test", {});
+    $("#set-msg").textContent = r.message;
+    toast(r.ok ? "テスト通知を送信しました。Discord を確認してください" : `送信失敗: ${r.message}`, !r.ok);
+  }catch(e){ $("#set-msg").textContent = ""; toast(e.message, true); }
+}
 
 /* ---------------- logs ---------------- */
 async function loadLogs(){
@@ -867,7 +1004,7 @@ function termStop(){ if(TWS) TWS.close(); TWS = null; }
     if(a.required && !a.authenticated){ $("#login").classList.add("on"); return; }
   }catch{ $("#login").classList.add("on"); return; }
   connect();
-  go("dash");
+  go(location.hash.slice(1) || "dash");
 })();
 </script>
 </body>

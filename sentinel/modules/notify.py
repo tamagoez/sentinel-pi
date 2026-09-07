@@ -110,6 +110,20 @@ def _enqueue_threadsafe(payload: dict) -> None:
     _LOOP.call_soon_threadsafe(_enqueue, payload)
 
 
+def _fmt(key: str, default: str, values: dict) -> str:
+    """設定タブのテンプレート文字列を安全に .format() する。
+
+    知らない {プレースホルダ} や壊れた書式が来ても例外で通知全体を落とさず、
+    既定の文言へ静かに戻す。
+    """
+    template = str(config.get(key) or default)
+    try:
+        return template.format(**values)
+    except Exception:
+        log.warning("通知テンプレート %s の書式が不正です。既定文を使います: %r", key, template)
+        return default.format(**values)
+
+
 def _embed(title: str, description: str = "", *, color: int = 0x8A8A8A,
            fields: list[dict] | None = None, author: str = "") -> dict:
     e: dict = {
@@ -159,7 +173,11 @@ def on_motion(camera_id: str, capture_path: str = "") -> None:
         {"name": "モード", "value": MODE.mode, "inline": True},
         {"name": "CPU温度", "value": f"{MODE.temperature:.1f}℃", "inline": True},
     ]
-    payload = _embed("動体を検知しました", color=_color_for(camera_id),
+    title = _fmt("notify_motion_title", "動体を検知しました", {
+        "camera": camera_id, "mode": MODE.mode, "temp": f"{MODE.temperature:.1f}",
+        "time": datetime.now().strftime("%H:%M:%S"),
+    })
+    payload = _embed(title, color=_color_for(camera_id),
                      fields=fields, author=camera_id)
     _enqueue_threadsafe(payload)
 
@@ -176,14 +194,37 @@ def on_terminal_session(event: str, info: dict) -> None:
 
 
 def on_mode_change(new: str, old: str) -> None:
+    # notify_system_events (system_event() の共通ゲート) とは独立させている。
+    # モード遷移は他のシステムイベントよりずっと頻繁に起こりうるため、
+    # 別々に on/off できないと不便 (エコ<->通常の往復を都度通知されたくない
+    # が、端末セッションや起動/停止は知りたい、といったケース)。
+    if not config.get("notify_mode_change"):
+        return
     snap = MODE.snapshot()
-    level = {"critical": "error", "eco": "info", "normal": "good"}.get(new, "info")
-    system_event(
-        f"モードが {old} から {new} へ変わりました",
-        snap.get("reason", ""),
-        level=level,
+    color = {"critical": 0xD8566B, "eco": 0x5B8DEF, "normal": 0x30B27B}.get(new, 0x8A8A8A)
+    title = _fmt("notify_mode_title", "モードが {old} から {new} へ変わりました",
+                 {"old": old, "new": new, "reason": snap.get("reason", "")})
+    _enqueue(_embed(
+        title, snap.get("reason", ""), color=color,
         fields=[{"name": "CPU温度", "value": f"{snap['temperature_c']}℃", "inline": True}],
+    ))
+
+
+def send_test() -> tuple[bool, str]:
+    """設定タブの「テスト送信」用。キューを経由せず即座に 1 通送り、結果を
+    そのまま返す - Webhook の動作が Web UI から目に見えるようにする。"""
+    if not str(config.get("discord_webhook") or "").strip():
+        return False, "Webhook URL が設定されていません"
+    payload = _embed(
+        "テスト通知です", "Sentinel の設定タブから送信しました。",
+        color=0x5B8DEF,
+        fields=[{"name": "時刻", "value": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                 "inline": True}],
     )
+    wait = _post(payload)
+    if STATE["last_error"]:
+        return False, STATE["last_error"]
+    return True, "送信しました"
 
 
 # ---------------------------------------------------------------- ループ
@@ -215,6 +256,12 @@ async def summary_loop() -> None:
             _window_open = False
             continue
         duration = _last_motion_any - _window_start
+        if not config.get("notify_summary"):
+            # 集計通知自体は無効でも、次の無検知ウィンドウのために状態は
+            # 通常どおりリセットする (でないと総数が積み上がり続ける)。
+            _window_counts = Counter()
+            _window_open = False
+            continue
         fields = [{"name": cid, "value": f"{n} 回", "inline": True}
                   for cid, n in _window_counts.most_common(10)]
         fields.append({"name": "検知期間",
@@ -224,7 +271,9 @@ async def summary_loop() -> None:
                        "inline": False})
         fields.append({"name": "静穏時間", "value": f"{quiet / 60:.0f} 分", "inline": True})
         fields.append({"name": "現在のモード", "value": MODE.mode, "inline": True})
-        _enqueue(_embed(f"検知が落ち着きました — 合計 {total} 回",
-                        color=0x6C7A89, fields=fields))
+        title = _fmt("notify_summary_title", "検知が落ち着きました — 合計 {total} 回", {
+            "total": total, "duration_min": f"{duration / 60:.0f}", "quiet_min": f"{quiet / 60:.0f}",
+        })
+        _enqueue(_embed(title, color=0x6C7A89, fields=fields))
         _window_counts = Counter()
         _window_open = False
