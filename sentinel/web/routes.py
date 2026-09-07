@@ -504,7 +504,10 @@ async def ws_status(ws: WebSocket):
     try:
         while True:
             await ws.send_text(json.dumps(_overview(), ensure_ascii=False, default=str))
-            await asyncio.sleep(1.5)
+            # eco/critical では、この定期送信自体 (_overview() の構築・
+            # JSON 化・送信) を含めて頻度を落とす。「WebUI との同期」の一部:
+            # ブラウザ側の再描画もそのぶん減る。
+            await asyncio.sleep({"eco": 4.0, "critical": 6.0}.get(MODE.mode, 1.5))
     except (WebSocketDisconnect, RuntimeError):
         pass
     except Exception:

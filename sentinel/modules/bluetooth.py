@@ -17,6 +17,7 @@ import shutil
 import subprocess
 
 from ..core import config
+from ..core.state import NORMAL, MODE
 from . import music
 
 log = logging.getLogger("sentinel.bluetooth")
@@ -109,4 +110,8 @@ async def loop() -> None:
             STATE.update(connected=False, device_addr="", device_name="", since=0.0)
             await asyncio.to_thread(music.resume_from_bluetooth)
 
-        await asyncio.sleep(float(config.get("bt_poll_seconds")))
+        # eco/critical では接続確認の間隔を延ばし、bluetoothctl の呼び出し
+        # (プロセス起動を伴う) 頻度を落とす。BGM 自体エコでは全停止するため、
+        # ここでの即応性を多少犠牲にしても実害は小さい。
+        base = float(config.get("bt_poll_seconds"))
+        await asyncio.sleep(base * (3 if MODE.mode != NORMAL else 1))

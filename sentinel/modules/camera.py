@@ -301,6 +301,23 @@ def _worker(cid: str, device: str, stop: "Event", cfg: dict) -> None:
                 frames = 0
                 fps_t0 = time.monotonic()
 
+            # eco/critical で誰も見ておらず、かつ次のフレームまで十分な間隔が
+            # あるときは、待っている間 USB カメラを開いたまま (=V4L2 の
+            # STREAMON 状態のまま) にしない。UVC カメラは dequeue の頻度に
+            # 関わらずストリーミング状態である限り USB 上へフレームを流し
+            # 続けることが多く、CLAUDE.md にある「USB 2.0 ハブを Ethernet と
+            # 共有」という制約下ではその帯域そのものが負荷になる。ここで
+            # release して次サイクルで開き直すことで、待機中は実際に何も
+            # 流れていない状態にする (間隔が短いとオープンのやり直しの方が
+            # 高くつくので、ある程度長い間隔のときだけ行う)。
+            if mode != NORMAL and viewers == 0 and interval >= 2.0 and cap is not None:
+                try:
+                    cap.release()
+                except Exception:
+                    pass
+                cap = None
+                applied_res = None
+
             rest = interval - (time.monotonic() - t0)
             if rest > 0:
                 time.sleep(rest)
