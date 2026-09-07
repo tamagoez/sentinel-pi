@@ -408,12 +408,16 @@ function toggleTheme(){
 applyThemeLabel();
 
 function go(p){
+  if(!PAGES.some(x => x[0] === p)) p = "dash";
   CUR = p;
   $$("section.page").forEach(s => s.classList.toggle("on", s.id === "p-"+p));
   $$("#nav a").forEach(a => a.classList.toggle("on", a.dataset.p === p));
   $("#title").textContent = (PAGES.find(x => x[0]===p) || [,""])[1];
   document.querySelector("aside").classList.remove("open");
   $("#backdrop").classList.remove("on");
+  // リロードや「戻る」でもページが保たれるよう、URL のハッシュと同期する。
+  // 値が既に同じなら再設定しない (hashchange の無限ループを避ける)。
+  if(location.hash.slice(1) !== p) location.hash = p;
   if(p==="ev") loadEvents();
   if(p==="net") loadNet();
   if(p==="arc") loadArchive();
@@ -423,6 +427,7 @@ function go(p){
   if(p==="music") loadMusic();
   if(p==="term" && FIT) setTimeout(()=>FIT.fit(), 60);
 }
+window.addEventListener("hashchange", () => go(location.hash.slice(1)));
 document.addEventListener("keydown", e => {
   if(/^(INPUT|SELECT|TEXTAREA)$/.test(e.target.tagName) || e.target.closest("#term")) return;
   const hit = PAGES.find(x => x[2] === e.key);
@@ -451,7 +456,7 @@ async function doLogin(){
   try{
     await post("/api/login", {password: $("#pw").value});
     $("#login").classList.remove("on"); $("#lerr").textContent = "";
-    connect(); go(CUR);
+    connect(); go(location.hash.slice(1) || CUR);
   }catch(e){ $("#lerr").textContent = "パスワードが違います"; }
 }
 $("#pw").addEventListener("keydown", e => { if(e.key === "Enter") doLogin(); });
@@ -955,7 +960,7 @@ function termStop(){ if(TWS) TWS.close(); TWS = null; }
     if(a.required && !a.authenticated){ $("#login").classList.add("on"); return; }
   }catch{ $("#login").classList.add("on"); return; }
   connect();
-  go("dash");
+  go(location.hash.slice(1) || "dash");
 })();
 </script>
 </body>
