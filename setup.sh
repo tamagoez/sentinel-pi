@@ -12,7 +12,8 @@
 #   H2  choose the WiFi hotspot SSID / passphrase (or skip the hotspot)
 #   H3  reboot after the prerequisites (Bluetooth and audio need it)
 #   H4  mount the external drive on /mnt/VIDEOSD (dietpi-drive_manager)
-#   H5  set the Web UI password / Discord webhook
+#   H5  log in to AdGuard Home once, while it is still reachable directly
+#   H6  set the Web UI password / Discord webhook / AdGuard password
 #
 # Progress is kept in /var/lib/sentinel/setup-stage, so after the reboot in
 # H3 you run the same command again and it continues where it left off.
@@ -251,22 +252,32 @@ else
   fi
 fi
 
-# ---- AdGuard Home: fully automatic, no human step ------------------
-# install.sh (via Guardian) locks the web UI to localhost, blocks :8083
-# from the LAN/hotspot with iptables, and clears AdGuardHome.yaml's
-# "users" list so its own login is never needed - nobody is expected to
-# open AdGuard Home's admin panel day to day, and Sentinel's own query
-# log reader does not need credentials either way. No prompt needed here.
+# ---- H5: AdGuard Home ---------------------------------------------
+human "H5  Log in to AdGuard Home once, now"
+IP=$(my_ip)
 AGH_YAML=$(ls /mnt/dietpi_userdata/adguardhome/AdGuardHome.yaml \
               /mnt/dietpi_userdata/AdGuardHome.yaml 2>/dev/null | head -1 || true)
 if [[ -z "$AGH_YAML" ]]; then
   w "AdGuardHome.yaml not found, so AdGuard Home is probably not installed."
   w "Install it with 'dietpi-software install 126', then re-run this script."
   w "Without it, Sentinel's network log stays empty; everything else works."
+  pause
 else
-  ok "AdGuard Home found; Guardian will lock it down and disable its login."
-  echo "     To open it directly for a while (e.g. to edit filter lists), run:"
-  echo "       sudo sentinel-adguard-8083 enable [MINUTES]"
+  echo "     DietPi pre-configures AdGuard Home, so there is no setup wizard:"
+  echo "       URL      http://${IP:-<this-Pi-IP>}:8083"
+  echo "       User     admin"
+  echo "       Password your DietPi global software password ('dietpi' unless"
+  echo "                you changed it during the DietPi first-run setup)"
+  echo
+  echo "     Open it now and check that:"
+  echo "       - you can log in (change the password here if you want to)"
+  echo "       - Settings -> General settings -> query logging is enabled;"
+  echo "         Sentinel's network log reads exactly that query log"
+  echo
+  echo "     Once this script finishes, port 8083 is blocked from the LAN/"
+  echo "     hotspot; run 'sudo sentinel-adguard-8083 enable [MINUTES]' to"
+  echo "     open it again for a while."
+  pause
 fi
 
 # ---- automatic ----------------------------------------------------
@@ -275,15 +286,16 @@ c "Running install.sh"
   die "install.sh failed. Read the message above, then re-run 'sudo ./setup.sh'."
 stage_set 2
 
-# ---- H5: application settings -------------------------------------
+# ---- H6: application settings -------------------------------------
 IP=$(my_ip)
-human "H5  Finish the configuration in the Web UI"
+human "H6  Finish the configuration in the Web UI"
 cat <<EOS
      Open  http://${IP:-<this-Pi-IP>}:8080  and set, in the settings tab:
 
        1. Web UI password       - empty by default. Set it: the web terminal
                                   is a shell for anyone who reaches port 8080.
        2. Discord webhook URL   - motion and status notifications.
+       3. AdGuard Home password - the one from H5; needed to read the query log.
 
      Verify:
 

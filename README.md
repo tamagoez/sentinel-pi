@@ -7,7 +7,7 @@ Web 端末を 1 つのサービスにまとめ、ポート 8080 で完結させ�
 ## 導入
 
 git clone してから `setup.sh` を実行します。スクリプトが判断できる部分は自動で
-進み、人の判断が要る 5 か所 (H1〜H5) で止まって尋ねる、半自動の導入です。
+進み、人の判断が要る 6 か所 (H1〜H6) で止まって尋ねる、半自動の導入です。
 詳細は `SETUP.ja.md` (日本語) / `SETUP.md` (English) を参照してください。
 Windows から SD カードを準備する場合、`windows/Configure-DietPi.ps1` で
 `dietpi.txt` の事前編集を自動化できます。
@@ -20,7 +20,7 @@ cd ~/sentinel-pi
 sudo ./setup.sh          # H1・H2 → 前提ソフト導入 → H3 (再起動)
 
 # 再起動後、同じコマンドで続きから再開します
-sudo ./setup.sh          # H4 → 本体導入 → H5
+sudo ./setup.sh          # H4・H5 → 本体導入 → H6
 ```
 
 | 印 | 人が介入する内容 |
@@ -29,7 +29,8 @@ sudo ./setup.sh          # H4 → 本体導入 → H5
 | H2 | WiFi ホットスポットの SSID とパスフレーズ (導入しない選択も可) |
 | H3 | 再起動 (Bluetooth・音声・SWAP の変更を反映するため) |
 | H4 | `dietpi-drive_manager` で外部ストレージを `/mnt/VIDEOSD` にマウント |
-| H5 | Web UI でパスワード・Discord Webhook を設定 |
+| H5 | AdGuard Home へ 1 度ログイン (この後は localhost 限定になります) |
+| H6 | Web UI でパスワード・Discord Webhook・AdGuard パスワードを設定 |
 
 進捗は `/var/lib/sentinel/setup-stage` に記録されるため、途中で中断しても
 同じコマンドで再開できます。個別に動かしたい場合は
@@ -49,10 +50,7 @@ sudo ./setup.sh          # H4 → 本体導入 → H5
 導入されます (`bootstrap.sh` が ID 5, 7, 17, 60, 126, 130, 182, 195 を導入)。
 
 AdGuard Home は DietPi が設定済みの状態で入るため、初期設定ウィザードはあり
-ません。ログインという概念自体が不要で (Guardian が認証設定を常に空にします)、
-外部からの直接アクセスも既定でブロックされています。フィルタ設定などを直接
-編集したい場合だけ、Pi 上で `sudo sentinel-adguard-8083 enable [分数]` を実行
-すると一時的に開放できます (既定 15 分で自動的に再ブロックされます)。
+ません。利用者は `admin` と DietPi のグローバルパスワードでログインできます。
 
 ## 機能
 
@@ -95,9 +93,9 @@ AdGuard Home のクエリログを取得し、ドメインをサービス名 (Yo
 に変換して日次で記録します。HTTPS の中身は見えないため、記録できるのは
 DNS の問い合わせ先です。
 
-AdGuard Home の管理画面は localhost 限定・ログイン不要の設計で、日常的に
-開く想定がありません。直接開きたいときだけ `sudo sentinel-adguard-8083
-enable [分数]` で一時的に外部へ開放できます (「導入」の節を参照)。
+AdGuard Home の管理画面は localhost に限定されており、外部からは既定で
+遮断されています。直接開きたい場合は Pi 上で `sudo sentinel-adguard-8083
+enable [分数]` を実行してください。
 
 ### 定時処理 (毎日 4 時)
 

@@ -164,6 +164,7 @@ def snapshot() -> dict:
 async def loop() -> None:
     last_throttle_check = 0.0
     throttle_info = {"raw": "", "flags": [], "available": False}
+    prev_active: set[str] = set()
     while True:
         temp = read_temp()
         cpu = read_cpu_percent()
@@ -183,9 +184,25 @@ async def loop() -> None:
         })
         del HISTORY[:-_MAX_HISTORY]
 
-        if throttle_info.get("flags"):
-            active = [f for f in throttle_info["flags"] if "履歴" not in f]
-            if active:
-                log.warning("スロットリング検出: %s", " / ".join(active))
+        # CLAUDE.md #1: 周波数低下・温度リミット (bit 1-3) は Pi 3B+ の設計通りの
+        # 挙動で、危険域は 80℃ 以降。log.warning() は core/errors.py の
+        # LogCaptureHandler がそのまま「エラー」タブ・診断バンドルへ吸い上げる
+        # ため、これを毎回 WARNING で出すと「よくスロットリングする」だけで
+        # エラー扱いされ続けてしまう。低電圧検出 (bit 0) だけは電源側の実際の
+        # 問題なので引き続き警告する。状態が変化した瞬間だけログし、同じ状態が
+        # 続く間は再ログしない (スパム防止)。
+        active = set(f for f in throttle_info.get("flags", ()) if "履歴" not in f)
+        if active != prev_active:
+            undervoltage = {f for f in active if "低電圧" in f}
+            thermal_only = active - undervoltage
+            if undervoltage:
+                log.warning("低電圧を検出しています (電源を確認してください): %s",
+                           " / ".join(sorted(undervoltage)))
+            if thermal_only:
+                log.info("スロットリング状態が変化しました (設計通りの挙動です): %s",
+                         " / ".join(sorted(thermal_only)))
+            if not active and prev_active:
+                log.info("スロットリングが解消しました")
+            prev_active = active
 
         await asyncio.sleep(5)

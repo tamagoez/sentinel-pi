@@ -1,8 +1,19 @@
 [Unit]
 Description=Sentinel - unified camera/music/monitoring service
 Documentation=file:/opt/sentinel/README.md
-After=network-online.target sound.target bluetooth.service
+After=network-online.target sound.target bluetooth.service mnt-VIDEOSD.mount
 Wants=network-online.target
+# core/config.py resolves DATA_ROOT (and therefore where archives, captures,
+# the music library and config.json all live) exactly once at import time,
+# by checking whether /mnt/VIDEOSD is a directory. Without this, sentinel
+# can start before the (autofs-based, noauto,x-systemd.automount) drive is
+# actually mounted, silently fall back to a directory on the SD card for
+# that entire run, and only pick the real external drive back up on the
+# next restart - archives/captures written during the fallback run become
+# invisible again afterwards, which looked like "only one archive ever
+# shows up". RequiresMountsFor both orders after and actively waits for/
+# triggers the mount (autofs included) before starting.
+RequiresMountsFor=/mnt/VIDEOSD
 # Never give up retrying, no matter how many times it crashes in a row.
 # This belongs here, not in [Service]: modern systemd (v255, confirmed
 # with "systemd-analyze verify") silently ignores StartLimitIntervalSec/

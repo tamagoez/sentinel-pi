@@ -3,8 +3,8 @@
 English: [SETUP.md](SETUP.md)
 
 Sentinel は `git clone` してから `setup.sh` を実行して導入します。`setup.sh`
-はスクリプトで判断できる部分は自動で進め、人の判断が要る 5 か所
-(**H1**〜**H5**、下記) で止まって尋ねます。
+はスクリプトで判断できる部分は自動で進め、人の判断が要る 6 か所
+(**H1**〜**H6**、下記) で止まって尋ねます。
 
 DietPi 本体とこのプロジェクトのコンソール出力は、意図的にすべて英語です。
 物理 HDMI コンソールや素のシリアル端末では日本語グリフが正しく描画されない
@@ -17,7 +17,7 @@ DietPi 本体とこのプロジェクトのコンソール出力は、意図的�
 | 0 | (お使いの PC 上で) | DietPi を書き込み、`dietpi.txt` を編集 |
 | 1 | 初回起動 | DietPi 自体の初期設定 |
 | 2 | `sudo ./setup.sh` | H1・H2 → `bootstrap.sh` → H3 (再起動) |
-| 3 | `sudo ./setup.sh` | H4 → `install.sh` → H5 |
+| 3 | `sudo ./setup.sh` | H4・H5 → `install.sh` → H6 |
 
 `setup.sh` は進捗を `/var/lib/sentinel/setup-stage` に記録するため、H3 の
 再起動後は同じコマンドを実行するだけで続きから再開します。いつ再実行しても
@@ -139,16 +139,14 @@ sudo ./setup.sh
   Unix の所有権を持たないため `chown` だけでは直せませんが、`install.sh`
   と Guardian がマウントの `uid=`/`gid=` オプションを自動で修正するので、
   `sentinel` ユーザーが問題なく書き込めます。
-
-AdGuard Home についてはこの時点で何もする必要はありません。DietPi がクエリ
-ログ有効の状態で導入済みで、そもそもログインという概念自体が要りません —
-Guardian が `AdGuardHome.yaml` の `users:` を自動で空にし続けるため
-(下の「再起動をまたいでも設定が保たれる仕組み」参照)、Web UI はログインを
-一切求めなくなります。外部からの到達もできません (`install.sh` が
-localhost 限定にし、iptables でポート 8083 も塞ぎます)。フィルタ設定の
-編集など、どうしても管理画面を直接開きたい場合だけ、Pi 上で
-`sudo sentinel-adguard-8083 enable [分数]` を実行してください (既定 15 分。
-時間が来ると Guardian が自動で再び塞ぎます)。
+- **H5 — AdGuard Home。** DietPi が設定済みの状態で導入するため、**初期設定
+  ウィザードはありません**。導入した時点ですでに `0.0.0.0:8083` で待ち受け
+  ており、ユーザーは `admin`、パスワードは DietPi のグローバルソフトウェア
+  パスワード、クエリログも有効です。まだ直接到達できるこの段階で
+  `http://<PiのIP>:8083` を開いてログインし、必要ならパスワードを変更して
+  ください。この後はポート 8083 が LAN/ホットスポットから遮断されます。
+  再度開きたいときは Pi 上で `sudo sentinel-adguard-8083 enable [分数]`
+  を実行してください。
 
 続けて `install.sh` が無人で実行されます。非 root の `sentinel` ユーザーを
 作成し、`/opt/sentinel` へ配置し、venv を構築し、データ領域を用意し、旧
@@ -156,11 +154,13 @@ localhost 限定にし、iptables でポート 8083 も塞ぎます)。フィル
 サービスを登録し、AdGuard を localhost 限定にし、設定全体を 2 分ごとに
 再点検して直す **Guardian** を登録します。
 
-- **H5 — アプリの設定。** `http://<PiのIP>:8080` を開き、設定タブで次を
+- **H6 — アプリの設定。** `http://<PiのIP>:8080` を開き、設定タブで次を
   設定してください。
   1. **Web UI のパスワード** — 既定は未設定です。Web 端末はポート 8080 に
      到達できる誰にでもシェルを渡してしまうので、必ず設定してください
   2. **Discord Webhook URL**
+  3. **AdGuard Home のパスワード** — H5 で使ったもの。クエリログを読むのに
+     必要です
 
 ## 各フェーズを個別に実行する場合
 
@@ -197,7 +197,6 @@ WiFi ホットスポットも起動後にこれを触ることがあります。
 | 項目 | 何が壊すか | Guardian の対処 |
 |---|---|---|
 | AdGuard の bind アドレス | AdGuard の自動更新 | `AdGuardHome.yaml` を書き直して再起動 |
-| AdGuard のログインが復活する | AdGuard の自動更新、手動での再設定 | `AdGuardHome.yaml` の `users:` を空にして再起動 |
 | ポート 8083 が実際に遮断されているか | 再起動、hostapd | iptables ルールを再投入 |
 | 音声出力 (AUX) | カーネル更新 | ALSA `numid=3` をリセット |
 | Bluetooth の discoverable/pairable | bluetoothd の再起動 | `bluetoothctl` で再度有効化 |
@@ -237,6 +236,6 @@ sudo ./update.sh
 | Bluetooth がペアリングできない | `systemctl status sentinel-bt-agent`。`bluetoothctl show` で `Discoverable: yes` になっているか |
 | `sentinel-bluealsa*` が `failed (start-limit-hit)` になっている | `sudo systemctl reset-failed sentinel-bluealsa.service sentinel-bluealsa-aplay.service && sudo systemctl restart sentinel-bluealsa.service sentinel-bluealsa-aplay.service` (Guardian も 2 分以内に自動で同じことをします) |
 | 8083 がまだ外から開ける | `systemctl start sentinel-guardian`。`journalctl -t sentinel-guardian -n 20` |
-| ネットワークログが空 | AdGuard 側でクエリログが無効、または設定タブの `adguard_url` が違う |
+| ネットワークログが空 | 設定タブの AdGuard パスワードが違う、または AdGuard 側でクエリログが無効 |
 | `setup.sh` が想定と違うフェーズから始まる | `sudo ./setup.sh --reset` |
 | それ以外 | `sentinel-diagnose` — システムとアプリの状態を 1 つのアーカイブにまとめます |
