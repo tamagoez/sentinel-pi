@@ -97,14 +97,24 @@ for g in video audio bluetooth plugdev systemd-journal; do
 done
 ok "$SVC_USER added to video/audio/bluetooth/plugdev/systemd-journal"
 
-# Only 'reboot' is granted via sudo. Any other root action is done by the
-# operator inside the web terminal via 'su -'; the app never sees a
-# root password, so there is no password-handling code to leak it.
+# 'reboot' and one narrowly-scoped script are granted via sudo. Any other
+# root action is done by the operator inside the web terminal via 'su -';
+# the app never sees a root password, so there is no password-handling
+# code to leak it.
+#
+# sentinel-set-governor.sh: /sys/.../cpufreq/scaling_governor is root-
+# writable only, and eco mode is meaningless without being able to
+# actually lower it - core/state.py's _apply_governor() was writing to
+# it directly and silently swallowing the resulting PermissionError on
+# every real deployment, so eco mode never actually changed the CPU
+# governor at all. sudoers can't restrict a wildcarded argument's
+# *value*, so the script itself validates it against the kernel's own
+# governor names before writing anything (see the script for detail).
 cat > /etc/sudoers.d/sentinel <<EOF
-$SVC_USER ALL=(root) NOPASSWD: /sbin/reboot, /sbin/shutdown, /usr/bin/systemctl reboot
+$SVC_USER ALL=(root) NOPASSWD: /sbin/reboot, /sbin/shutdown, /usr/bin/systemctl reboot, $APP_DIR/scripts/sentinel-set-governor.sh *
 EOF
 chmod 440 /etc/sudoers.d/sentinel
-visudo -cf /etc/sudoers.d/sentinel >/dev/null && ok "sudoers: reboot only"
+visudo -cf /etc/sudoers.d/sentinel >/dev/null && ok "sudoers: reboot + CPU governor switch only"
 
 # ---------------------------------------------------------------- 3. Deploy
 c "STEP 3/9  Deploy application files"

@@ -256,6 +256,37 @@ ffmpeg 側は `overlay` と `drawbox` という、ビルドオプションに関
 場合は `_can_render_text()` が false を返し、テロップ/キャプションを
 省略するだけで処理は止まりません (「意図的にしていないこと」参照)。
 
+### 11. CPU ガバナの切り替えは sudo 経由で行う (直接書き込みでは効かない)
+
+`/sys/devices/system/cpu/cpu*/cpufreq/scaling_governor` は root しか書き込め
+ません。`sentinel` は非 root ユーザーで動作するため (#4)、
+`core/state.py` の `_apply_governor()` が以前これへ直接書き込んでいたコード
+は `PermissionError` を握り潰すだけで、実機では **eco モードに入っても
+CPU ガバナが一度も切り替わっていませんでした**。「eco モードでも負荷が
+ほぼ変わらない」という報告の直接の原因です。エラーも一切表面化しなかった
+ため (例外を投げずに黙って `return` していたため) 気付けませんでした。
+
+`scripts/sentinel-set-governor.sh <governor>` を新設し、`/etc/sudoers.d/
+sentinel` にこれ 1 本だけを (reboot 系コマンドと並んで) 個別に許可しました。
+sudoers は引数の *値* までは制限できないため、渡された governor 名が
+カーネルの実際の候補 (`performance`/`powersave`/`userspace`/`ondemand`/
+`conservative`/`schedutil`) のいずれかであることをスクリプト側で検証して
+から書き込みます。ここが実質的な権限の境界です。**このスクリプトを経由
+せず直接 sysfs に書き込むコードへ戻さないでください** — 同じ「実機では
+静かに何も起きない」不具合に戻ります。
+
+eco の既定ガバナは `conservative` から `powersave` に変更しました。
+`conservative` は結局のところ負荷が続けば周波数を最大まで上げてしまう
+可変ガバナで、eco の「確実に下げる」という目的に合っていなかったため
+です (`powersave` は常に最低クロックに固定されます)。
+
+また、`core/state.py` の `_apply_governor()` は `ModeManager.evaluate()` が
+モード「遷移」を検知したときにしか呼ばれません。起動直後は `_mode` の
+初期値が既に `normal` で最初の判定も大抵 `normal` のままのため遷移が
+起きず、起動時点でガバナが一切確認・強制されない隙間があります。
+`state.sync_governor()` を `main.py` の起動処理から一度だけ呼んで
+埋めています。
+
 ## モジュール構成
 
 各モジュールは疎結合で、`core/state.py` の `MODE` を購読するだけです。
@@ -272,6 +303,10 @@ scripts/sentinel-fix-storage-owner.sh
 scripts/sentinel-adguard-8083.sh
                     AdGuard Home の :8083 への直接アクセスを一時的に
                     有効化 / 恒久的に無効化する (人が手動で実行する)
+scripts/sentinel-set-governor.sh
+                    CPU ガバナを切り替える。root しか書き込めないため
+                    sudoers で個別に許可し、core/state.py が sudo 経由で
+                    呼ぶ (直接書き込みでは権限エラーで無視される)
 
 core/config.py      設定の唯一の保管場所。型と範囲を強制する
 core/state.py       モード状態機械。「今どのモードか」の唯一の決定者

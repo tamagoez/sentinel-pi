@@ -16,6 +16,7 @@ from fastapi.staticfiles import StaticFiles
 
 from .core import config
 from .core import errors as errors_mod
+from .core import state
 from .core.state import MODE
 from .core.supervisor import SUPERVISOR
 from .modules import bluetooth, camera, maintenance, music, netlog, notify, terminal, thermal
@@ -61,6 +62,7 @@ async def lifespan(app: FastAPI):
     MODE.subscribe(camera.on_mode_change)
     MODE.subscribe(music.on_mode_change)
     MODE.subscribe(notify.on_mode_change)
+    await _to_thread_safe(state.sync_governor)
 
     await _to_thread_safe(camera.reconcile)
 

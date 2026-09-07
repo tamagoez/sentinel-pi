@@ -61,7 +61,10 @@ DEFAULTS: dict[str, Any] = {
     "temp_critical_c": 80.0,              # これ以上で Critical
     "temp_recover_c": 68.0,               # Critical/強制 Eco からの復帰閾値
     "mode_override": "auto",              # auto | normal | eco
-    "eco_governor": "conservative",       # powersave | conservative | ondemand
+    "eco_governor": "powersave",           # powersave | conservative | ondemand
+                                           # powersave はクロックを最低固定にする。
+                                           # conservative は負荷次第で結局上まで
+                                           # 伸びうるため、eco の既定には向かない
     "normal_governor": "ondemand",
 
     # --- カメラ ---

@@ -66,8 +66,6 @@ SERVICE_RULES: list[tuple[tuple[str, ...], str]] = [
     (("playstation.net", "playstation.com", "sonyentertainmentnetwork.com"),
      "PlayStation"),
     (("xboxlive.com", "xbox.com"), "Xbox"),
-    (("apple.com", "icloud.com", "mzstatic.com", "cdn-apple.com",
-      "push.apple.com"), "Apple"),
     (("windowsupdate.com", "microsoft.com", "msftconnecttest.com",
       "live.com", "office.com", "office365.com"), "Microsoft"),
     (("gstatic.com", "googleapis.com", "google.com", "googleusercontent.com",
@@ -84,6 +82,12 @@ SERVICE_RULES: list[tuple[tuple[str, ...], str]] = [
 
 # 名前解決の基盤であり、サービスとしては意味が薄いもの
 IGNORE_SUFFIXES = ("in-addr.arpa", "ip6.arpa", "local", "lan", "home.arpa")
+
+# 記録・テロップから完全に除外するドメイン (人が「アクセスした」とは言えない
+# デバイスの自動的な裏側の通信。iOS/macOS の App Store・iCloud 同期・OS 資産
+# 配信・プッシュ通知は極めて高頻度で、テロップを埋め尽くす主要因でもあった)。
+IGNORE_DOMAINS = ("apple.com", "icloud.com", "mzstatic.com", "cdn-apple.com",
+                  "push.apple.com")
 
 # 集計 (メモリ上)
 RECENT: list[dict] = []          # 直近のイベント (最大 500)
@@ -133,12 +137,17 @@ def _append(records: list[dict]) -> None:
             f.write(json.dumps(r, ensure_ascii=False) + "\n")
 
 
+def _is_ignored_domain(domain: str) -> bool:
+    d = domain.lower()
+    return any(d == s or d.endswith("." + s) for s in IGNORE_DOMAINS)
+
+
 def _process(entries: list[dict]) -> list[dict]:
     fresh: list[dict] = []
     for e in entries:
         q = e.get("question") or {}
         domain = str(q.get("name") or "").rstrip(".")
-        if not domain or domain.lower().endswith(IGNORE_SUFFIXES):
+        if not domain or domain.lower().endswith(IGNORE_SUFFIXES) or _is_ignored_domain(domain):
             continue
         ts = str(e.get("time") or "")
         client = str(e.get("client") or "")
