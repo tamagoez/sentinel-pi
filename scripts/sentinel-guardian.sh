@@ -164,12 +164,30 @@ check_audio() {
 # ------------------------------------------------------------------ 5. Bluetooth
 # Keep the adapter powered, discoverable and pairable. bluetoothd restarts
 # reset these, so they're re-checked every run.
+#
+# On the RPi 3B+ the Bluetooth chip hangs off the UART, attached at boot by
+# hciuart.service (raspberrypi-sys-mods). That attach can lose the race
+# against bluetooth.service starting - bluetoothd then comes up with zero
+# controllers, which is exactly "Bluetooth won't connect after a reboot,
+# but works after 'sudo systemctl restart bluetooth'" (a known class of
+# issue on RPi 3/3B+: https://github.com/MichaIng/DietPi/issues/2390). A
+# plain reboot doesn't reliably fix it either, since it's a race, not a
+# one-time fault - so this has to be detected and repaired here rather
+# than just told to the user as "reboot again".
 check_bluetooth() {
   command -v bluetoothctl >/dev/null || return 0
   systemctl is-active --quiet bluetooth || return 0
   local info
-  info=$(bluetoothctl show 2>/dev/null) || return 0
-  [[ -n "$info" ]] || return 0
+  info=$(bluetoothctl show 2>&1)
+  if [[ -z "$info" ]] || grep -qi 'no default controller' <<<"$info"; then
+    if systemctl list-unit-files hciuart.service &>/dev/null; then
+      systemctl restart hciuart.service 2>/dev/null
+      sleep 2   # give the UART attach a moment before bluetoothd retries
+    fi
+    systemctl restart bluetooth.service 2>/dev/null
+    fixed "no Bluetooth controller was found; restarted hciuart/bluetoothd"
+    return 0
+  fi
 
   if ! grep -qE 'Powered:\s*yes' <<<"$info"; then
     bluetoothctl power on >/dev/null 2>&1 && fixed "powered the Bluetooth adapter back on"
@@ -187,6 +205,15 @@ check_services() {
   local units=(sentinel.service bluetooth.service)
   { command -v bluealsad >/dev/null || command -v bluealsa >/dev/null; } && \
     units+=(sentinel-bluealsa.service sentinel-bluealsa-aplay.service sentinel-bt-agent.service)
+  # hciuart.service (RPi's UART-attached Bluetooth chip) and hostapd.service
+  # (WiFi Hotspot) both start very early at boot and can fail outright if
+  # the underlying interface/UART isn't ready yet - the same class of race
+  # as check_bluetooth()'s "no controller" case above, just surfacing as a
+  # plain failed unit instead. Catching that here means the next cycle
+  # (45s after boot, then every 2 minutes) retries them automatically
+  # instead of the hotspot or Bluetooth staying down until a fresh reboot.
+  systemctl list-unit-files hciuart.service &>/dev/null && units+=(hciuart.service)
+  systemctl list-unit-files hostapd.service &>/dev/null && units+=(hostapd.service)
 
   for u in "${units[@]}"; do
     systemctl list-unit-files "$u" &>/dev/null || continue
@@ -198,6 +225,38 @@ check_services() {
       # counter and is a harmless no-op otherwise.
       systemctl reset-failed "$u" 2>/dev/null
       systemctl start "$u" >/dev/null 2>&1 && fixed "started $u"; }
+  done
+}
+
+# ------------------------------------------------------------------ 6b. BlueALSA freshness
+# bluealsad/bluealsa-aplay hold a D-Bus connection to bluetoothd. If
+# bluetooth.service restarts for any reason - check_bluetooth() above,
+# install.sh re-run, an apt upgrade, an OOM kill - that connection goes
+# stale: systemd still reports the BlueALSA units as "active" (the process
+# didn't crash, it's just talking to a socket nobody answers any more), so
+# check_services() never touches them, and Bluetooth audio silently stops
+# working until something restarts them by hand. Comparing "when did each
+# unit last become active" catches this in every case, not just the one
+# check_bluetooth() just fixed - a plain is-active check can't tell a live
+# connection from a stale one.
+check_bluealsa_freshness() {
+  systemctl is-active --quiet bluetooth || return 0
+  local bt_start bt_epoch
+  bt_start=$(systemctl show -p ActiveEnterTimestamp --value bluetooth.service 2>/dev/null)
+  [[ -n "$bt_start" && "$bt_start" != "n/a" ]] || return 0
+  bt_epoch=$(date -d "$bt_start" +%s 2>/dev/null) || return 0
+
+  local u u_start u_epoch
+  for u in sentinel-bluealsa.service sentinel-bluealsa-aplay.service sentinel-bt-agent.service; do
+    systemctl list-unit-files "$u" &>/dev/null || continue
+    systemctl is-active --quiet "$u" || continue     # check_services() 側で扱う
+    u_start=$(systemctl show -p ActiveEnterTimestamp --value "$u" 2>/dev/null)
+    [[ -n "$u_start" && "$u_start" != "n/a" ]] || continue
+    u_epoch=$(date -d "$u_start" +%s 2>/dev/null) || continue
+    if (( bt_epoch > u_epoch )); then
+      systemctl restart "$u" 2>/dev/null && \
+        fixed "restarted $u (bluetoothd restarted after it did; its D-Bus connection had gone stale)"
+    fi
   done
 }
 
@@ -285,6 +344,7 @@ check_firewall
 check_audio
 check_bluetooth
 check_services
+check_bluealsa_freshness
 check_hotspot_dns
 check_storage_owner
 check_storage

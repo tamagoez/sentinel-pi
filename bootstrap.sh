@@ -217,9 +217,11 @@ If you are driving the steps yourself, the remaining ones are:
 
     1. reboot
     2. dietpi-drive_manager   -> mount the external drive on /mnt/VIDEOSD
-    3. sudo ./install.sh     -> locks AdGuard to localhost and disables its
-       own login entirely (Guardian keeps it that way); nothing to log
-       into by hand
+    3. log in to AdGuard Home once, at http://<this-Pi-IP>:8083, while it
+       is still reachable directly (set/confirm its admin password there)
+    4. sudo ./install.sh     -> locks AdGuard's web UI to localhost and
+       blocks :8083 from outside (Guardian keeps it that way); afterwards,
+       use 'sudo sentinel-adguard-8083 enable [MINUTES]' for direct access
 
 EOS
 else

@@ -263,8 +263,10 @@ sed -i -e "s|^Environment=SENTINEL_DATA=.*|Environment=SENTINEL_DATA=$DATA|" \
        -e "s|^Environment=SENTINEL_STORAGE=.*|Environment=SENTINEL_STORAGE=$STORAGE|" \
   /etc/systemd/system/sentinel-guardian.service
 ok "Runs every 2 minutes; repairs AdGuard bind / iptables / audio output /"
-echo "     Bluetooth state / storage ownership / service uptime / hotspot DNS /"
-echo "     disk space / yt-dlp"
+echo "     Bluetooth state (including a missing controller after a boot-time"
+echo "     hciuart race, and stale BlueALSA D-Bus connections after any"
+echo "     bluetoothd restart) / hostapd boot races / storage ownership /"
+echo "     service uptime / hotspot DNS / disk space / yt-dlp"
 
 # ---------------------------------------------------------------- 8. Main service
 c "STEP 8/9  Register Sentinel service"
@@ -319,8 +321,9 @@ if systemctl is-active --quiet sentinel; then
 == Install complete ==
 
   Web UI      http://${IP:-<this-Pi-IP>}:8080
-  AdGuard     no login needed; blocked externally by default - run
+  AdGuard     locked to localhost now; blocked externally by default - run
               'sudo sentinel-adguard-8083 enable [MINUTES]' to open :8083
+              (log in with the admin password set during H5 of setup.sh)
   Data        $DATA
   Logs        journalctl -u sentinel -f
   Guardian    journalctl -t sentinel-guardian -f

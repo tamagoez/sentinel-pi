@@ -283,6 +283,44 @@ eco の既定ガバナは `conservative` から `powersave` に変更しまし�
 `state.sync_governor()` を `main.py` の起動処理から一度だけ呼んで
 埋めています。
 
+### 12. Bluetooth/Hotspot の起動直後の競合は、Guardian の周期実行で拾う (再起動では直らない)
+
+RPi 3B+ の Bluetooth チップは UART 接続で、起動時に `hciuart.service`
+(raspberrypi-sys-mods 提供) がアタッチを担います。この UART アタッチが
+`bluetooth.service` の起動と競合し、`bluetoothd` がコントローラを一つも
+掴めないまま起動し切ってしまうことがあります
+([DietPi #2390](https://github.com/MichaIng/DietPi/issues/2390) など、
+RPi 3/3B+ で広く報告されている既知の競合)。WiFi Hotspot (`hostapd`) も
+同様に、無線インタフェースの準備が起動直後にまだ整っていないまま起動を
+試みて失敗することがあります。**これは一度きりの故障ではなく毎回一定確率で
+起こりうる競合なので、「もう一度再起動する」ことは修正になりません** —
+運が良ければ直るだけで、次の再起動でまた起こり得ます。
+
+`sentinel-guardian.sh` の `check_bluetooth()` は `bluetoothctl show` が
+コントローラなし ("No default controller available" または空) を返した
+場合に `hciuart.service` → `bluetooth.service` の順に再起動します。
+`check_services()` も `hciuart.service`/`hostapd.service` を監視対象に
+加え、起動直後に failed のまま止まっていれば拾って再起動します。Guardian
+は起動 45 秒後に初回実行、以降 2 分ごとなので、これらの競合は再起動を
+待たずに次の周期までに自己修復されます。**このチェックを外して「再起動を
+促すだけ」の実装に戻さないでください** — 競合の性質上、再現性のある
+修正になりません。
+
+もう一つ、これとは別に見つかった不具合として、`bluealsad`/
+`bluealsa-aplay` は `bluetoothd` への D-Bus 接続を張ったまま動き続けます。
+`bluetooth.service` が (上記の自己修復や `apt` の自動アップグレード、
+OOM Kill など) 何らかの理由で再起動すると、この D-Bus 接続は静かに
+無効になりますが、`bluealsad` プロセス自体は生きたままなので
+`systemctl is-active` は "active" を返し続け、`check_services()` は
+異常に気付けません。結果として **Bluetooth 再生が理由不明のまま止まる**
+という症状になります。`check_bluealsa_freshness()` は
+`bluetooth.service` と各 BlueALSA 系ユニットの `ActiveEnterTimestamp`
+を比較し、`bluetoothd` の方が後から起動していれば (= 接続が古い) その
+ユニットを再起動します。単純な `is-active` チェックでは生きた接続と
+死んだ接続を区別できないため、**この比較をやめて `is-active` だけに
+戻さないでください** — 同じ「サービスは動いているのに音が出ない」不具合
+に戻ります。
+
 ## モジュール構成
 
 各モジュールは疎結合で、`core/state.py` の `MODE` を購読するだけです。
