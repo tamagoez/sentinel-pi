@@ -76,6 +76,7 @@ def _render_text_png(text: str, path: Path, *, font_size: int,
                      color: tuple[int, int, int, int],
                      canvas: tuple[int, int] | None = None,
                      height: int | None = None,
+                     max_width: int | None = None,
                      bg: tuple[int, int, int, int] = (0, 0, 0, 0),
                      pad: int = 0) -> bool:
     """テキストを PNG に描画する。canvas 指定時はその中央に、height のみ
@@ -87,19 +88,32 @@ def _render_text_png(text: str, path: Path, *, font_size: int,
     自動的に切り取られる) ため、出力 PNG がこの高さを超えることはない。
     ffmpeg の overlay に渡す帯 (drawbox) の高さぴったりに描画したい
     ケース向け - 動画のフレーム自体からテキストがはみ出す事態を防ぐ。
+
+    max_width を渡すと、その幅に収まるまで font_size を比例縮小してから
+    描画する (文字を削るのではなく縮める - カメラ名が長くてタイルからは
+    み出す事態を防ぐ)。
     """
     try:
         from PIL import Image, ImageDraw, ImageFont
     except Exception:
         return False
     font_path = _font_path()
-    try:
-        font = ImageFont.truetype(font_path, font_size) if font_path else ImageFont.load_default()
-    except Exception:
-        font = ImageFont.load_default()
+
+    def _load(size: int):
+        try:
+            return ImageFont.truetype(font_path, size) if font_path else ImageFont.load_default()
+        except Exception:
+            return ImageFont.load_default()
+
+    font = _load(font_size)
     probe = ImageDraw.Draw(Image.new("RGBA", (1, 1)))
     bbox = probe.textbbox((0, 0), text, font=font)
     tw, th = bbox[2] - bbox[0], bbox[3] - bbox[1]
+    if max_width is not None and tw + pad * 2 > max_width and tw > 0:
+        shrunk = max(6, int(font_size * (max_width - pad * 2) / tw))
+        font = _load(shrunk)
+        bbox = probe.textbbox((0, 0), text, font=font)
+        tw, th = bbox[2] - bbox[0], bbox[3] - bbox[1]
     if canvas:
         size = canvas
     elif height is not None:
@@ -205,8 +219,12 @@ def _make_camera_clip(cid: str, day: str, out: Path, width: int, height: int,
     caption_png: Path | None = None
     if _can_render_text():
         caption_png = out.with_suffix(".caption.png")
+        # カメラ名が長いとタイルの外までテロップがはみ出していた。幅の
+        # 半分強 (60%) を上限にし、超える場合は文字を削らずフォントを
+        # 縮めて収める (_render_text_png の max_width)。
         if not _render_text_png(cid, caption_png, font_size=max(12, height // 14),
-                                color=(176, 176, 176, 255), bg=(0, 0, 0, 115), pad=6):
+                                color=(176, 176, 176, 255), bg=(0, 0, 0, 115), pad=6,
+                                max_width=int(width * 0.6)):
             caption_png = None
 
     if caption_png is not None:
