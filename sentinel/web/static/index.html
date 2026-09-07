@@ -245,8 +245,8 @@ canvas{display:block;width:100%;height:120px}
       <div class="card"><h3>AdGuard Home</h3><div class="body">
         <div id="net-state"></div>
         <div class="row" style="margin-top:10px">
-          <a href="/adguard/" target="_blank"><button>管理画面を開く</button></a>
-          <span class="faint" style="font-size:11px">8080 経由でのみ到達できます</span>
+          <span class="faint" style="font-size:11px">管理画面はログイン不要ですが既定で外部から遮断されています。
+          直接開く場合は Pi 上で「sudo sentinel-adguard-8083 enable」を実行してください</span>
         </div>
       </div></div>
     </div>
@@ -716,7 +716,7 @@ const GROUPS = [
   ["Bluetooth", ["bt_enabled","bt_poll_seconds"]],
   ["通知 (Discord)", ["discord_webhook","notify_motion","notify_system_events",
                       "notify_min_interval","notify_summary_after"]],
-  ["ネットワーク記録", ["netlog_enabled","adguard_url","adguard_user","adguard_password",
+  ["ネットワーク記録", ["netlog_enabled","adguard_url",
                         "netlog_poll_seconds","netlog_retention_days"]],
   ["定時処理", ["maintenance_enabled","maintenance_hour","maintenance_minute",
                 "reboot_after_maintenance","timelapse_fps","timelapse_tile_width","ticker_enabled"]],
@@ -741,7 +741,6 @@ const LABELS = {
   notify_system_events:"システムイベントを通知する",
   notify_min_interval:"同一カメラの最短通知間隔 (秒)", notify_summary_after:"統計を送るまでの静穏時間 (秒)",
   netlog_enabled:"アクセス記録を有効にする", adguard_url:"AdGuard Home の URL",
-  adguard_user:"ユーザー名", adguard_password:"パスワード",
   netlog_poll_seconds:"取得間隔 (秒)", netlog_retention_days:"記録の保存日数",
   maintenance_enabled:"定時処理を有効にする", maintenance_hour:"実行時 (時)",
   maintenance_minute:"実行時 (分)", reboot_after_maintenance:"処理後に再起動する",

@@ -114,6 +114,7 @@ cp -r "$SRC/sentinel" "$APP_DIR/"
 cp -f "$SRC/scripts/"*.sh "$APP_DIR/scripts/"
 chmod +x "$APP_DIR/scripts/"*.sh
 ln -sf "$APP_DIR/scripts/sentinel-diagnose.sh" /usr/local/bin/sentinel-diagnose
+ln -sf "$APP_DIR/scripts/sentinel-adguard-8083.sh" /usr/local/bin/sentinel-adguard-8083
 for f in setup.sh update.sh bootstrap.sh install.sh; do
   cp -f "$SRC/$f" "$APP_DIR/" 2>/dev/null || true
 done
@@ -308,7 +309,8 @@ if systemctl is-active --quiet sentinel; then
 == Install complete ==
 
   Web UI      http://${IP:-<this-Pi-IP>}:8080
-  AdGuard     http://${IP:-<IP>}:8080/adguard/   (direct :8083 is now blocked)
+  AdGuard     no login needed; blocked externally by default - run
+              'sudo sentinel-adguard-8083 enable [MINUTES]' to open :8083
   Data        $DATA
   Logs        journalctl -u sentinel -f
   Guardian    journalctl -t sentinel-guardian -f
@@ -317,7 +319,6 @@ if systemctl is-active --quiet sentinel; then
   Do this next, in the Web UI settings tab:
     1. Set a Web UI password
     2. Set the Discord webhook URL
-    3. Set the AdGuard Home password (needed for access logging)
 
 EOS
 else
