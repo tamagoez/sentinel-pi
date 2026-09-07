@@ -7,7 +7,9 @@ import hashlib
 import hmac
 import json
 import logging
+import os
 import secrets
+import shutil
 import time
 from datetime import datetime
 from pathlib import Path
@@ -153,6 +155,33 @@ async def diagnostics_bundle(request: Request):
 async def get_config(request: Request):
     require(request)
     return {"config": config.all_values(), "defaults": config.DEFAULTS}
+
+
+@router.get("/api/config/export")
+async def export_config(request: Request):
+    require(request)
+    # バックアップ・復元用途のため、伏字にせず実際の値を返す (認証済みの
+    # 操作者のみが到達できるエンドポイント)。
+    data = config.all_values(hide_secrets=False)
+    body = json.dumps(data, indent=2, ensure_ascii=False)
+    fname = f"sentinel-config-{datetime.now():%Y%m%d-%H%M%S}.json"
+    return Response(content=body, media_type="application/json",
+                    headers={"Content-Disposition": f'attachment; filename="{fname}"'})
+
+
+@router.post("/api/config/import")
+async def import_config(request: Request):
+    require(request)
+    try:
+        patch = await request.json()
+    except Exception:
+        raise HTTPException(400, "JSON として読み込めません")
+    if not isinstance(patch, dict):
+        raise HTTPException(400, "設定ファイルの形式が不正です")
+    changed = config.update(patch)
+    if changed:
+        log.info("設定をインポートしました: %s", ", ".join(changed))
+    return {"ok": True, "changed": changed, "config": config.all_values()}
 
 
 @router.put("/api/config")
@@ -415,6 +444,117 @@ async def netlog_delete_day(day: str, request: Request):
     if not p.is_file() or config.NETLOG_ROOT.resolve() not in p.parents:
         raise HTTPException(404, "見つかりません")
     p.unlink()
+    return {"ok": True}
+
+
+# ---------------------------------------------------------------- ファイル管理 (疑似 FTP)
+
+# 「外部ストレージから普通のストレージまで」閲覧できるようにする一方、
+# 本体の R/W は増やしたくない (SD カード保護)。そのため、フォルダサイズの
+# 再帰計算・サムネイル生成・変更監視は一切行わず、要求されたディレクトリを
+# os.scandir() で 1 回読むだけに留める。real FTP は実装しない (要件どおり)。
+FILE_ROOTS = {
+    "drive": config.EXTERNAL_STORAGE,   # 外部ストレージ全体 (マウントされていなければ使えない)
+    "local": config.DATA_ROOT,          # sentinel のデータ本体
+}
+
+
+def _fm_resolve(root: str, rel: str) -> Path:
+    base = FILE_ROOTS.get(root)
+    if base is None or not base.is_dir():
+        raise HTTPException(404, "このストレージは利用できません")
+    base = base.resolve()
+    p = (base / (rel or "")).resolve()
+    if p != base and base not in p.parents:
+        raise HTTPException(400, "不正なパスです")
+    return p
+
+
+@router.get("/api/files/roots")
+async def files_roots(request: Request):
+    require(request)
+    return {"roots": [{"key": k, "path": str(b)} for k, b in FILE_ROOTS.items() if b.is_dir()]}
+
+
+@router.get("/api/files")
+async def files_list(request: Request, root: str = Query(...), path: str = ""):
+    require(request)
+    p = _fm_resolve(root, path)
+    if not p.is_dir():
+        raise HTTPException(404, "ディレクトリが見つかりません")
+    entries = []
+    with os.scandir(p) as it:
+        for e in it:
+            try:
+                is_dir = e.is_dir(follow_symlinks=False)
+                st = e.stat(follow_symlinks=False)
+            except OSError:
+                continue
+            entries.append({"name": e.name, "is_dir": is_dir,
+                            "size": None if is_dir else st.st_size,
+                            "mtime": st.st_mtime})
+    entries.sort(key=lambda x: (not x["is_dir"], x["name"].lower()))
+    return {"root": root, "path": path, "entries": entries}
+
+
+@router.get("/api/files/download")
+async def files_download(request: Request, root: str = Query(...), path: str = Query(...)):
+    require(request)
+    p = _fm_resolve(root, path)
+    if not p.is_file():
+        raise HTTPException(404, "ファイルが見つかりません")
+    return FileResponse(p, filename=p.name)
+
+
+@router.post("/api/files/mkdir")
+async def files_mkdir(request: Request):
+    require(request)
+    body = await request.json()
+    p = _fm_resolve(str(body.get("root") or ""), str(body.get("path") or ""))
+    name = str(body.get("name") or "").strip()
+    if not name or "/" in name or name in (".", ".."):
+        raise HTTPException(400, "フォルダ名が不正です")
+    try:
+        (p / name).mkdir()
+    except FileExistsError:
+        raise HTTPException(409, "その名前はすでに使われています")
+    return {"ok": True}
+
+
+@router.post("/api/files/rename")
+async def files_rename(request: Request):
+    require(request)
+    body = await request.json()
+    p = _fm_resolve(str(body.get("root") or ""), str(body.get("path") or ""))
+    new_name = str(body.get("new_name") or "").strip()
+    if not new_name or "/" in new_name or new_name in (".", ".."):
+        raise HTTPException(400, "名前が不正です")
+    if not p.exists():
+        raise HTTPException(404, "見つかりません")
+    dest = p.parent / new_name
+    if dest.exists():
+        raise HTTPException(409, "その名前はすでに使われています")
+    p.rename(dest)
+    return {"ok": True}
+
+
+@router.delete("/api/files")
+async def files_delete(request: Request, root: str = Query(...), path: str = Query(...),
+                       recursive: bool = Query(False)):
+    require(request)
+    p = _fm_resolve(root, path)
+    if not p.exists():
+        raise HTTPException(404, "見つかりません")
+    if p.is_dir():
+        if recursive:
+            await asyncio.to_thread(shutil.rmtree, p)
+        else:
+            try:
+                p.rmdir()
+            except OSError:
+                raise HTTPException(400, "フォルダが空ではありません")
+    else:
+        p.unlink()
     return {"ok": True}
 
 
