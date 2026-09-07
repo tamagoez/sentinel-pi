@@ -101,8 +101,16 @@ DEFAULTS: dict[str, Any] = {
     "discord_webhook": "",
     "notify_motion": True,
     "notify_min_interval": 60.0,          # 同一カメラの即時通知の最短間隔 (秒)
+    "notify_summary": True,               # 無検知が続いたときの集計通知
     "notify_summary_after": 300.0,        # 無検知がこれだけ続いたら統計を送る (秒)
+    "notify_mode_change": True,           # モード遷移 (通常/エコ/緊急) の通知
     "notify_system_events": True,
+    # プレースホルダ: {camera} {mode} {temp} {time} (動体) /
+    # {total} {duration_min} {quiet_min} (集計) / {old} {new} {reason} (モード)。
+    # 知らないプレースホルダは無視され、書式が壊れている場合は既定文へ戻る。
+    "notify_motion_title": "動体を検知しました",
+    "notify_summary_title": "検知が落ち着きました — 合計 {total} 回",
+    "notify_mode_title": "モードが {old} から {new} へ変わりました",
 
     # --- ネットワークログ ---
     "netlog_enabled": True,

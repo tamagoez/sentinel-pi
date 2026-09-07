@@ -338,6 +338,15 @@ async def delete_track(request: Request, name: str = Query(...)):
     return {"ok": True}
 
 
+# ---------------------------------------------------------------- 通知
+
+@router.post("/api/notify/test")
+async def notify_test(request: Request):
+    require(request)
+    ok, message = await asyncio.to_thread(notify.send_test)
+    return {"ok": ok, "message": message}
+
+
 # ---------------------------------------------------------------- Bluetooth
 
 @router.post("/api/bluetooth/{action}")

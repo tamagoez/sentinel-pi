@@ -326,6 +326,7 @@ try{
     <div class="row" style="margin-bottom:12px">
       <button class="p" onclick="saveSettings()">保存</button>
       <button onclick="loadSettings()">再読込</button>
+      <button onclick="testWebhook()">Discord にテスト送信</button>
       <button class="d" onclick="doReboot()">今すぐ再起動</button>
       <span class="faint" id="set-msg"></span>
     </div>
@@ -823,8 +824,10 @@ const GROUPS = [
   ["音楽", ["music_enabled","music_autoplay_on_presence","music_volume","music_repeat",
             "music_shuffle","mpg123_buffer_kb","alsa_device"]],
   ["Bluetooth", ["bt_enabled","bt_poll_seconds"]],
-  ["通知 (Discord)", ["discord_webhook","notify_motion","notify_system_events",
-                      "notify_min_interval","notify_summary_after"]],
+  ["通知 (Discord)", ["discord_webhook","notify_motion","notify_min_interval",
+                      "notify_summary","notify_summary_after","notify_mode_change",
+                      "notify_system_events","notify_motion_title","notify_summary_title",
+                      "notify_mode_title"]],
   ["ネットワーク記録", ["netlog_enabled","adguard_url","adguard_user","adguard_password",
                         "netlog_poll_seconds","netlog_retention_days"]],
   ["定時処理", ["maintenance_enabled","maintenance_hour","maintenance_minute",
@@ -847,8 +850,13 @@ const LABELS = {
   mpg123_buffer_kb:"mpg123 バッファ (KB)", alsa_device:"ALSA デバイス (空欄で既定)",
   bt_enabled:"Bluetooth 連携を有効にする", bt_poll_seconds:"接続確認の間隔 (秒)",
   discord_webhook:"Webhook URL", notify_motion:"動体検知を通知する",
-  notify_system_events:"システムイベントを通知する",
-  notify_min_interval:"同一カメラの最短通知間隔 (秒)", notify_summary_after:"統計を送るまでの静穏時間 (秒)",
+  notify_system_events:"システムイベント (起動・端末など) を通知する",
+  notify_min_interval:"同一カメラの最短通知間隔 (秒)",
+  notify_summary:"無検知が続いたら集計を通知する", notify_summary_after:"統計を送るまでの静穏時間 (秒)",
+  notify_mode_change:"モード遷移 (通常/エコ/緊急) を通知する",
+  notify_motion_title:"動体検知の文面 ({camera} {mode} {temp} {time})",
+  notify_summary_title:"集計通知の文面 ({total} {duration_min} {quiet_min})",
+  notify_mode_title:"モード遷移の文面 ({old} {new} {reason})",
   netlog_enabled:"アクセス記録を有効にする", adguard_url:"AdGuard Home の URL",
   adguard_user:"ユーザー名", adguard_password:"パスワード",
   netlog_poll_seconds:"取得間隔 (秒)", netlog_retention_days:"記録の保存日数",
@@ -906,6 +914,14 @@ async function saveSettings(){
 }
 const cfg = patch => api("/api/config", {method:"PUT",
   headers:{"Content-Type":"application/json"}, body: JSON.stringify(patch)});
+async function testWebhook(){
+  $("#set-msg").textContent = "送信中…";
+  try{
+    const r = await post("/api/notify/test", {});
+    $("#set-msg").textContent = r.message;
+    toast(r.ok ? "テスト通知を送信しました。Discord を確認してください" : `送信失敗: ${r.message}`, !r.ok);
+  }catch(e){ $("#set-msg").textContent = ""; toast(e.message, true); }
+}
 
 /* ---------------- logs ---------------- */
 async function loadLogs(){
