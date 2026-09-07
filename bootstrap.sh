@@ -79,22 +79,19 @@ else
   ok "ALSA / FFmpeg / Git / Python3-pip / yt-dlp already installed; skipped"
 fi
 
-# ffmpeg's drawtext filter (the daily archive's ticker overlay) needs
-# libharfbuzz as well as libfreetype since ffmpeg 6.1. Debian briefly
-# shipped ffmpeg 6.1 without harfbuzz enabled - fixed in 7:6.1-5
-# (https://bugs.debian.org/1056597) - so a base image whose apt cache
-# predates that fix, or was never updated, can still pull the broken
-# build. Try an upgrade before accepting that the ticker will be skipped.
-if command -v ffmpeg >/dev/null && ! ffmpeg -hide_banner -filters 2>/dev/null | grep -q ' drawtext '; then
-  export DEBIAN_FRONTEND=noninteractive
-  apt-get update -qq 2>/dev/null
-  apt-get install -y --only-upgrade ffmpeg >/dev/null 2>&1
-  if ffmpeg -hide_banner -filters 2>/dev/null | grep -q ' drawtext '; then
-    ok "ffmpeg upgraded; drawtext (ticker overlay) is now available"
-  else
-    w "ffmpeg still has no drawtext filter after an upgrade attempt; the daily ticker overlay will be skipped (harmless - see README)."
-  fi
-fi
+# ffmpeg's drawtext filter needed libharfbuzz as well as libfreetype since
+# ffmpeg 6.1, and Debian/Raspberry Pi OS have shipped ffmpeg builds without
+# it (https://bugs.debian.org/1056597). On a frozen stable release,
+# "apt-get install --only-upgrade ffmpeg" can never fix that - there may
+# simply be no newer package in the repo to upgrade to, ever, until the
+# next stable release. Chasing an OS packaging fix that may never arrive
+# was the wrong approach. The daily archive's text overlays (NODATA label,
+# camera caption, access-log ticker) are drawn as PNGs with Pillow instead
+# and composited with ffmpeg's overlay/drawbox filters, which are core
+# filters always present regardless of how ffmpeg was built - see
+# sentinel/modules/maintenance.py. Nothing here depends on drawtext any
+# more; python3-pil above is the only requirement, and it has no such
+# build-flag pitfall since it does not link ffmpeg at all.
 
 # ---------------------------------------------------------------- 3. DNS
 c "STEP 3/7  Install AdGuard Home + Unbound"
@@ -153,7 +150,7 @@ apt-get update -qq
 # that separately by fixing the mount's uid=/gid= options.
 apt-get install -y --no-install-recommends \
   bluez bluez-alsa-utils bluez-tools \
-  mpg123 v4l-utils python3-opencv python3-venv \
+  mpg123 v4l-utils python3-opencv python3-pil python3-venv \
   fonts-dejavu-core fonts-noto-cjk iptables \
   exfatprogs ntfs-3g >/dev/null 2>&1 \
   && ok "Bluetooth-audio, camera and exFAT/NTFS packages installed" \

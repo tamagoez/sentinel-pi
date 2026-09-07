@@ -68,9 +68,15 @@ else
 fi
 
 if command -v ffmpeg >/dev/null; then
-  ffmpeg -hide_banner -filters 2>/dev/null | grep -q ' drawtext ' \
-    && ok "ffmpeg supports drawtext (ticker overlay available)" \
-    || w "ffmpeg has no drawtext; the daily ticker overlay will be skipped."
+  # Text overlays (NODATA label / camera caption / access-log ticker) are
+  # drawn with Pillow and composited with ffmpeg's overlay/drawbox - core
+  # filters that exist regardless of build flags - specifically because
+  # ffmpeg's own drawtext filter needs libharfbuzz and some distro builds
+  # ship without it with no fix ever reaching the repo (see CLAUDE.md #10).
+  # So the only requirement here is Pillow, not a particular ffmpeg build.
+  python3 -c 'import PIL' >/dev/null 2>&1 \
+    && ok "Pillow available (text overlays enabled)" \
+    || w "python3-pil not found; text overlays (NODATA/caption/ticker) will be skipped."
   ffmpeg -hide_banner -encoders 2>/dev/null | grep -q h264_v4l2m2m \
     && ok "Hardware encoder h264_v4l2m2m available" \
     || w "No hardware encoder; falling back to libx264 ultrafast."

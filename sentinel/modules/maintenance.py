@@ -53,14 +53,52 @@ def _font_path() -> str | None:
     return None
 
 
-def _has_drawtext() -> bool:
-    """ffmpeg が drawtext (libfreetype) 付きでビルドされているか確認する。"""
+def _can_render_text() -> bool:
+    """テキストを画像として描画できるか (フォント + Pillow) を確認する。
+
+    以前は ffmpeg の drawtext フィルタ (libharfbuzz 依存) を使っていたが、
+    Debian/Raspberry Pi OS の ffmpeg パッケージが harfbuzz 無効でビルドされて
+    出荷される事例があり (https://bugs.debian.org/1056597)、しかもその修正が
+    安定版リポジトリに永久に来ないことがある — つまり `apt upgrade` では
+    直しようがない環境が実在する。テロップ機能を OS のパッケージングに
+    左右されないようにするため、drawtext には一切依存しない。Pillow で
+    PNG に描画し、ffmpeg には overlay/drawbox という常に存在するコア
+    フィルタだけで重ねる。
+    """
     try:
-        out = subprocess.run(["ffmpeg", "-hide_banner", "-filters"],
-                             capture_output=True, text=True, timeout=15).stdout
-        return " drawtext " in out
+        import PIL  # noqa: F401
     except Exception:
         return False
+    return _font_path() is not None
+
+
+def _render_text_png(text: str, path: Path, *, font_size: int,
+                     color: tuple[int, int, int, int],
+                     canvas: tuple[int, int] | None = None,
+                     bg: tuple[int, int, int, int] = (0, 0, 0, 0),
+                     pad: int = 0) -> bool:
+    """テキストを PNG に描画する。canvas 指定時はその中央に、それ以外は
+    テキストぴったりのサイズ (+pad) で書き出す。"""
+    try:
+        from PIL import Image, ImageDraw, ImageFont
+    except Exception:
+        return False
+    font_path = _font_path()
+    try:
+        font = ImageFont.truetype(font_path, font_size) if font_path else ImageFont.load_default()
+    except Exception:
+        font = ImageFont.load_default()
+    probe = ImageDraw.Draw(Image.new("RGBA", (1, 1)))
+    bbox = probe.textbbox((0, 0), text, font=font)
+    tw, th = bbox[2] - bbox[0], bbox[3] - bbox[1]
+    size = canvas or (max(1, tw + pad * 2), max(1, th + pad * 2))
+    img = Image.new("RGBA", size, bg)
+    draw = ImageDraw.Draw(img)
+    x = (size[0] - tw) // 2 - bbox[0] if canvas else pad - bbox[0]
+    y = (size[1] - th) // 2 - bbox[1] if canvas else pad - bbox[1]
+    draw.text((x, y), text, font=font, fill=color)
+    img.save(path)
+    return True
 
 
 def _encoder_args() -> list[str]:
@@ -102,24 +140,32 @@ def _captures_for(cid: str, day: str) -> list[Path]:
 def _make_nodata_clip(out: Path, label: str, seconds: float,
                       width: int, height: int) -> bool:
     """映像のないカメラ用のプレースホルダ動画。"""
-    vf = []
-    font = _font_path()
-    if font and _has_drawtext():
-        text = label.replace(":", r"\:").replace("'", "")
-        vf.append(
-            f"drawtext=fontfile={font}:text='{text}':fontcolor=0x606060:"
-            f"fontsize={max(14, height // 10)}:x=(w-text_w)/2:y=(h-text_h)/2"
-        )
-    cmd = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
-           "-f", "lavfi", "-i",
-           f"color=c=0x141618:s={width}x{height}:d={max(1.0, seconds)}:r={int(config.get('timelapse_fps'))}"]
-    if vf:
-        cmd += ["-vf", ",".join(vf)]
-    cmd += _encoder_args() + [str(out)]
-    ok, err = _run(cmd, timeout=600)
-    if not ok:
-        log.warning("NODATA クリップの生成に失敗: %s", err)
-    return ok
+    fps = int(config.get("timelapse_fps"))
+    frame_png: Path | None = None
+    if _can_render_text():
+        frame_png = out.with_suffix(".frame.png")
+        if not _render_text_png(label, frame_png, font_size=max(14, height // 10),
+                                color=(96, 96, 96, 255), canvas=(width, height),
+                                bg=(20, 22, 24, 255)):
+            frame_png = None
+    try:
+        if frame_png is not None:
+            cmd = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
+                   "-loop", "1", "-i", str(frame_png),
+                   "-t", str(max(1.0, seconds)), "-r", str(fps)] \
+                + _encoder_args() + [str(out)]
+        else:
+            cmd = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
+                   "-f", "lavfi", "-i",
+                   f"color=c=0x141618:s={width}x{height}:d={max(1.0, seconds)}:r={fps}"] \
+                + _encoder_args() + [str(out)]
+        ok, err = _run(cmd, timeout=600)
+        if not ok:
+            log.warning("NODATA クリップの生成に失敗: %s", err)
+        return ok
+    finally:
+        if frame_png is not None:
+            frame_png.unlink(missing_ok=True)
 
 
 def _make_camera_clip(cid: str, day: str, out: Path, width: int, height: int,
@@ -140,17 +186,28 @@ def _make_camera_clip(cid: str, day: str, out: Path, width: int, height: int,
 
     vf = f"scale={width}:{height}:force_original_aspect_ratio=decrease," \
          f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2:color=0x141618"
-    font = _font_path()
-    if font and _has_drawtext():
-        vf += (f",drawtext=fontfile={font}:text='{cid}':fontcolor=0xB0B0B0:"
-               f"fontsize={max(12, height // 14)}:x=8:y=6:"
-               f"box=1:boxcolor=0x000000@0.45:boxborderw=4")
 
-    cmd = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
-           "-f", "concat", "-safe", "0", "-i", str(listfile),
-           "-vf", vf, "-r", str(fps)] + _encoder_args() + [str(out)]
+    caption_png: Path | None = None
+    if _can_render_text():
+        caption_png = out.with_suffix(".caption.png")
+        if not _render_text_png(cid, caption_png, font_size=max(12, height // 14),
+                                color=(176, 176, 176, 255), bg=(0, 0, 0, 115), pad=6):
+            caption_png = None
+
+    if caption_png is not None:
+        cmd = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
+               "-f", "concat", "-safe", "0", "-i", str(listfile),
+               "-i", str(caption_png),
+               "-filter_complex", f"[0:v]{vf}[bg];[bg][1:v]overlay=8:6",
+               "-r", str(fps)] + _encoder_args() + [str(out)]
+    else:
+        cmd = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
+               "-f", "concat", "-safe", "0", "-i", str(listfile),
+               "-vf", vf, "-r", str(fps)] + _encoder_args() + [str(out)]
     ok, err = _run(cmd)
     listfile.unlink(missing_ok=True)
+    if caption_png is not None:
+        caption_png.unlink(missing_ok=True)
     if not ok:
         log.warning("カメラ %s のタイムラプス生成に失敗: %s", cid, err)
         return _make_nodata_clip(out, f"{cid}  ERROR", target_seconds, width, height)
@@ -193,25 +250,28 @@ def _tile(clips: list[Path], out: Path, width: int, height: int) -> bool:
 
 def _overlay_ticker(src: Path, out: Path, lines: list[str]) -> bool:
     """アクセスログをテロップとして下部に流す。"""
-    font = _font_path()
-    if not lines or not font or not _has_drawtext():
+    if not lines or not _can_render_text():
         shutil.copy2(src, out)
         return True
 
-    # ffmpeg の textfile を使い、長大なコマンドラインを避ける
-    with tempfile.NamedTemporaryFile("w", suffix=".txt", delete=False,
-                                     encoding="utf-8") as f:
-        textfile = Path(f.name)
-        f.write("   ///   ".join(lines[:600]))
-
     band_h = 34
-    vf = (f"drawbox=x=0:y=ih-{band_h}:w=iw:h={band_h}:color=0x000000@0.72:t=fill,"
-          f"drawtext=fontfile={font}:textfile={textfile}:fontcolor=0xD8D8D8:"
-          f"fontsize=18:y=h-{band_h}+8:x=w-mod(t*90\\,w+text_w):reload=0")
+    # テロップ全体を横長の1枚の PNG に描画し、overlay で下から右へ流す
+    # (drawbox と overlay はどちらも常に存在するコアフィルタで、drawtext
+    # のようにビルドオプション次第で欠けることがない)。
+    ticker_png = out.with_suffix(".ticker.png")
+    ok_png = _render_text_png("   ///   ".join(lines[:600]), ticker_png,
+                              font_size=18, color=(216, 216, 216, 255), pad=4)
+    if not ok_png:
+        shutil.copy2(src, out)
+        return True
+
+    vf = (f"[0:v]drawbox=x=0:y=ih-{band_h}:w=iw:h={band_h}:color=0x000000@0.72:t=fill[band];"
+          f"[band][1:v]overlay=x='W-mod(t*90\\,W+w)':y='H-{band_h}+({band_h}-h)/2'")
     cmd = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
-           "-i", str(src), "-vf", vf] + _encoder_args() + [str(out)]
+           "-i", str(src), "-i", str(ticker_png),
+           "-filter_complex", vf] + _encoder_args() + [str(out)]
     ok, err = _run(cmd)
-    textfile.unlink(missing_ok=True)
+    ticker_png.unlink(missing_ok=True)
     if not ok:
         log.warning("テロップの重畳に失敗しました: %s", err)
         shutil.copy2(src, out)

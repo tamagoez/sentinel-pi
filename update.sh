@@ -17,10 +17,10 @@
 #   2. Re-run bootstrap.sh. Every step in it is idempotent (skips
 #      anything already installed/configured) except for a few cheap,
 #      always-safe calls (apt-get update, re-asserting the sound card),
-#      so re-running it is how package- and OS-level fixes (like the
-#      ffmpeg drawtext check) actually reach a box that was set up
-#      before that fix existed. It only asks for a reboot if something
-#      that genuinely needs one changed just now.
+#      so re-running it is how package- and OS-level fixes (like a newly
+#      added apt package) actually reach a box that was set up before
+#      that fix existed. It only asks for a reboot if something that
+#      genuinely needs one changed just now.
 #   3. Re-run install.sh - idempotent: redeploys the app, re-registers
 #      systemd units, and re-checks/repairs external-storage permissions.
 #

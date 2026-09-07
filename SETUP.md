@@ -214,9 +214,9 @@ sudo ./update.sh
 one command for "make sure everything is current and every known fix is
 applied", not just a redeploy. `sudo ./setup.sh --update` is kept as an
 alias for the same thing. (An earlier version of `setup.sh --update` only
-ran `install.sh`, which meant fixes that live in `bootstrap.sh` - like
-`ffmpeg`'s drawtext check - were silently skipped on update; this no
-longer happens.)
+ran `install.sh`, which meant fixes that live in `bootstrap.sh` - like a
+newly added apt package - were silently skipped on update; this no longer
+happens.)
 
 Config and data are preserved. `sudo ./setup.sh --reset` forgets the saved
 progress if you want to walk through the whole guided flow again.

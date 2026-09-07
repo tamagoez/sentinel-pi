@@ -177,5 +177,6 @@ sudo ./update.sh                   # 更新 (何度実行しても安全です)
 
 - 内蔵 WiFi と Bluetooth はチップを共有するため、ホットスポット運用中は
   Bluetooth 再生に音飛びが出ることがあります (許容前提の構成です)
-- ffmpeg が `drawtext` 非対応でビルドされている場合、テロップは省略されます
+- テロップは Pillow で描画するため、`python3-pil` またはフォントが無い環境
+  では省略されます (ffmpeg の `drawtext` 対応可否には左右されません)
 - `h264_v4l2m2m` が使えない場合、`libx264 -preset ultrafast` に自動で落ちます
