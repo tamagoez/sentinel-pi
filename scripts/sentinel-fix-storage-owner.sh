@@ -162,7 +162,20 @@ fix_fat_mount() {
 
 fstype=""
 if mountpoint -q "$MNT" 2>/dev/null; then
-  fstype=$(findmnt -no FSTYPE "$MNT" 2>/dev/null)
+  # dietpi-drive_manager mounts with "noauto,x-systemd.automount" produce
+  # TWO stacked mounts at the same path: an autofs trigger (mounted first,
+  # persistent) and the real filesystem underneath it (mounted on first
+  # access, and what "findmnt $MNT" without qualifiers actually shows
+  # matters here). `findmnt -no FSTYPE "$MNT"` with no other options
+  # prints ALL of them, one per line, oldest-mounted first - so on such a
+  # drive it returned "autofs\nexfat", which matched none of the case
+  # patterns below and silently fell through to the ext4/chown branch,
+  # which can never work on exFAT (this was found from a real diagnostics
+  # dump: findmnt showed exactly that "systemd-1 autofs ..." / "/dev/sda1
+  # exfat ..." pair, and chown reported an error as a result). The last
+  # line is always the currently effective, topmost filesystem - the one
+  # that read/write actually goes through - so take that one only.
+  fstype=$(findmnt -no FSTYPE "$MNT" 2>/dev/null | tail -n1)
 fi
 
 case "$fstype" in
