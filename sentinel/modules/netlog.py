@@ -194,20 +194,27 @@ def read_day(day: str) -> list[dict]:
     return out
 
 
-def timeline_for_ticker(day: str) -> list[str]:
-    """テロップ用の1行テキスト列を作る。連続する同一サービスはまとめる。"""
+def ticker_entries(day: str) -> list[tuple[datetime, str]]:
+    """テロップ用の (実際の時刻, ラベル) 列を作る。連続する同一サービスは
+    まとめる。実時刻を返すのは、動画側 (maintenance.py) がカメラの
+    タイムラプスと同じ「実時間 -> 動画時間」の対応でテロップを配置し、
+    両者を同期させるため。"""
     records = read_day(day)
-    lines: list[str] = []
+    out: list[tuple[datetime, str]] = []
     last = None
     for r in records:
-        t = r["time"][11:16] if len(r["time"]) >= 16 else ""
-        label = f"{t}  {r['service']}"
+        ts = str(r.get("time") or "")
+        try:
+            t = datetime.strptime(f"{day} {ts[11:19]}", "%Y-%m-%d %H:%M:%S")
+        except (ValueError, IndexError):
+            continue
+        label = str(r.get("service") or "")
         if r.get("blocked"):
             label += "  [遮断]"
         if label != last:
-            lines.append(label)
+            out.append((t, label))
             last = label
-    return lines
+    return out
 
 
 def _cleanup() -> None:
