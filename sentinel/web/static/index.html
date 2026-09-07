@@ -295,7 +295,8 @@ try{
     <div class="card"><h3>アクセス記録</h3>
       <div class="body" style="padding:8px 12px"><div class="row">
         <select id="net-day" style="width:auto" onchange="loadNet()"></select>
-        <button onclick="loadNet()">更新</button></div></div>
+        <button onclick="loadNet()">更新</button>
+        <button class="d" onclick="deleteNetlogDay()">この日を削除</button></div></div>
       <div class="list"><table><thead><tr><th>時刻</th><th>サービス</th><th>ドメイン</th><th>端末</th></tr></thead>
       <tbody id="net-rows"></tbody></table></div></div>
   </section>
@@ -674,14 +675,18 @@ function renderMusic(full){
   $("#m-volv").textContent = (s.volume ?? 0) + "%";
   if(document.activeElement !== $("#m-vol")) $("#m-vol").value = s.volume ?? 0;
   $("#m-repeat").value = s.repeat || "all";
-  $("#m-shuf").style.borderColor = s.shuffle ? "#2f5580" : "";
-  $("#m-shuf").style.background = s.shuffle ? "#1e3350" : "";
+  $("#m-shuf").style.borderColor = s.shuffle ? "var(--acc)" : "";
+  $("#m-shuf").style.background = s.shuffle ? "var(--p-bg)" : "";
 
   if(full){
     $("#pl-n").textContent = `(${(MUSIC.playlist||[]).length} 曲)`;
     $("#playlist").innerHTML = (MUSIC.playlist||[]).map(t =>
-      `<div class="tk ${t.current?"cur":""}" onclick="mus('jump',{index:${t.index}})">
-        <span class="i">${t.index+1}</span><span class="n">${esc(t.name)}</span></div>`).join("")
+      `<div class="tk ${t.current?"cur":""}">
+        <span class="i" onclick="mus('jump',{index:${t.index}})" style="cursor:pointer">${t.index+1}</span>
+        <span class="n" onclick="mus('jump',{index:${t.index}})" style="cursor:pointer">${esc(t.name)}</span>
+        <span onclick="event.stopPropagation();deleteTrack('${esc(t.name).replace(/'/g,"\\'")}')"
+              style="color:var(--bad);cursor:pointer;flex:none;padding:0 4px" title="削除">✕</span>
+       </div>`).join("")
       || `<div class="body faint" style="padding:12px">曲がありません。URL から追加するか、音楽フォルダに mp3 を置いてください。</div>`;
     $("#dls").innerHTML = (MUSIC.downloads||[]).map(d => {
       const lbl = {queued:"待機中", waiting:"通常モード待ち", running:"取得中", done:"完了", error:"失敗"}[d.state] || d.state;
@@ -699,6 +704,12 @@ $("#m-seekbar").addEventListener("click", e => {
 });
 async function mus(action, body){
   try{ await post("/api/music/"+action, body); setTimeout(loadMusic, 350); }
+  catch(e){ toast(e.message, true); }
+}
+async function deleteTrack(name){
+  if(!confirm(`「${name}」を削除します。よろしいですか。`)) return;
+  try{ await api(`/api/music/track?name=${encodeURIComponent(name)}`, {method:"DELETE"});
+       toast("削除しました"); loadMusic(); }
   catch(e){ toast(e.message, true); }
 }
 function toggleShuffle(){
@@ -756,6 +767,14 @@ async function loadNet(){
       || `<tr><td class="faint">記録がありません</td></tr>`;
   }catch(e){}
 }
+async function deleteNetlogDay(){
+  const day = $("#net-day").value;
+  if(!day){ toast("「直近」ではなく特定の日を選んでください", true); return; }
+  if(!confirm(`${day} のネットワークログを削除します。よろしいですか。`)) return;
+  try{ await api(`/api/netlog/${encodeURIComponent(day)}`, {method:"DELETE"});
+       toast("削除しました"); $("#net-day").value = ""; loadNet(); }
+  catch(e){ toast(e.message, true); }
+}
 
 /* ---------------- errors ---------------- */
 async function loadErrors(){
@@ -797,11 +816,20 @@ async function loadArchive(){
       : s.last_run ? `前回 ${new Date(s.last_run*1000).toLocaleString("ja-JP")} · ${s.last_result} · ${s.last_output||""}`
       : (s.next_run ? `次回 ${new Date(s.next_run*1000).toLocaleString("ja-JP")}` : "");
     $("#archive").innerHTML = (r.items||[]).map(i =>
-      `<div class="card"><h3>${esc(i.day)} <span class="faint">${i.size_mb} MB</span></h3>
+      `<div class="card"><h3 style="display:flex;align-items:center;gap:6px">
+         <span style="flex:1">${esc(i.day)} <span class="faint">${i.size_mb} MB</span></span>
+         <button class="d" style="padding:1px 6px;font-size:11px" onclick="deleteArchive('${esc(i.day)}','${esc(i.file)}')">削除</button>
+       </h3>
        <video controls preload="none" style="width:100%;display:block;background:#000" src="${i.url}"></video></div>`).join("")
       || `<div class="card"><div class="body faint">アーカイブはまだありません。</div></div>`;
     if(s.running) setTimeout(loadArchive, 3000);
   }catch(e){}
+}
+async function deleteArchive(day, file){
+  if(!confirm(`${day} のアーカイブ動画を削除します。よろしいですか。`)) return;
+  try{ await api(`/api/archive/${encodeURIComponent(day)}/${encodeURIComponent(file)}`, {method:"DELETE"});
+       toast("削除しました"); loadArchive(); }
+  catch(e){ toast(e.message, true); }
 }
 async function runMaint(reboot){
   if(reboot && !confirm("動画を生成したあと再起動します。よろしいですか。")) return;

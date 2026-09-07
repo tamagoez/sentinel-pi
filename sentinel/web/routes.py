@@ -278,6 +278,38 @@ async def capture_file(cid: str, day: str, filename: str, request: Request):
     return FileResponse(p, media_type="image/jpeg")
 
 
+@router.delete("/api/capture/{cid}/{day}/{filename}")
+async def capture_delete(cid: str, day: str, filename: str, request: Request):
+    require(request)
+    p = (config.CAPTURE_ROOT / cid / day / filename).resolve()
+    if not p.is_file() or config.CAPTURE_ROOT.resolve() not in p.parents:
+        raise HTTPException(404, "見つかりません")
+    p.unlink()
+    return {"ok": True}
+
+
+@router.delete("/api/captures")
+async def captures_delete_day(request: Request, day: str = Query(...), camera: str = ""):
+    """1 日分のイベント (静止画) をまとめて消す。camera を指定すると
+    そのカメラだけに絞る。"""
+    require(request)
+    removed = 0
+    targets = [config.CAPTURE_ROOT / camera / day] if camera else \
+        list(config.CAPTURE_ROOT.glob(f"*/{day}"))
+    for d in targets:
+        d = d.resolve()
+        if not d.is_dir() or config.CAPTURE_ROOT.resolve() not in d.parents:
+            continue
+        for f in d.glob("*.jpg"):
+            f.unlink()
+            removed += 1
+        try:
+            d.rmdir()
+        except OSError:
+            pass    # 他に何か残っていれば無理に消さない
+    return {"ok": True, "removed": removed}
+
+
 # ---------------------------------------------------------------- 音楽
 
 @router.get("/api/music")
@@ -376,6 +408,16 @@ async def netlog_view(request: Request, day: str = "", limit: int = Query(300, g
             "state": netlog.STATE, "days": days}
 
 
+@router.delete("/api/netlog/{day}")
+async def netlog_delete_day(day: str, request: Request):
+    require(request)
+    p = (config.NETLOG_ROOT / f"{day}.jsonl").resolve()
+    if not p.is_file() or config.NETLOG_ROOT.resolve() not in p.parents:
+        raise HTTPException(404, "見つかりません")
+    p.unlink()
+    return {"ok": True}
+
+
 # ---------------------------------------------------------------- 定時処理
 
 @router.get("/api/archive")
@@ -398,6 +440,20 @@ async def archive_file(day: str, filename: str, request: Request):
     if not p.is_file() or config.ARCHIVE_ROOT.resolve() not in p.parents:
         raise HTTPException(404, "見つかりません")
     return FileResponse(p, media_type="video/mp4")
+
+
+@router.delete("/api/archive/{day}/{filename}")
+async def archive_delete(day: str, filename: str, request: Request):
+    require(request)
+    p = (config.ARCHIVE_ROOT / day / filename).resolve()
+    if not p.is_file() or config.ARCHIVE_ROOT.resolve() not in p.parents:
+        raise HTTPException(404, "見つかりません")
+    p.unlink()
+    try:
+        p.parent.rmdir()
+    except OSError:
+        pass
+    return {"ok": True}
 
 
 @router.post("/api/maintenance/run")
