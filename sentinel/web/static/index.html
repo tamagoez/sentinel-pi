@@ -101,6 +101,21 @@ td.num{text-align:right;font-variant-numeric:tabular-nums}
 .cam .hd{display:flex;align-items:center;gap:7px;padding:7px 10px;border-bottom:1px solid var(--line)}
 .cam .hd .nm{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 
+.ev-cam-group{margin-bottom:18px}
+.ev-cam-group h4{font-size:12px;color:var(--dim);margin:0 0 8px;font-weight:600}
+
+.tl{position:relative}
+.tl-row{position:relative;height:34px;margin-bottom:4px;background:var(--bg-deep);border-radius:5px;overflow:hidden}
+.tl-row .tl-label{position:absolute;left:6px;top:0;bottom:0;display:flex;align-items:center;font-size:11px;color:var(--dim);z-index:2;pointer-events:none;text-shadow:0 0 4px var(--bg-deep)}
+.tl-row .tl-dot{position:absolute;top:5px;width:6px;height:24px;border-radius:3px;background:var(--acc);cursor:pointer;transform:translateX(-3px)}
+.tl-row.tl-net{height:20px}
+.tl-row.tl-net .tl-dot{top:3px;width:3px;height:14px;border-radius:2px;background:var(--dim2,#8892a6)}
+.tl-row.tl-net .tl-dot.bad{background:var(--bad)}
+.tl-axis{position:relative;height:16px;font-size:10px;color:var(--dim)}
+.tl-axis span{position:absolute;top:0;transform:translateX(-50%)}
+.tl-wrap{overflow-x:auto}
+.tl-inner{min-width:900px}
+
 .row{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
 .field{margin-bottom:9px}
 .field label{display:block;font-size:10px;letter-spacing:.8px;text-transform:uppercase;color:var(--faint);margin-bottom:3px}
@@ -226,10 +241,16 @@ try{
   <section class="page" id="p-ev">
     <div class="row" style="margin-bottom:12px">
       <select id="ev-day" style="width:auto" onchange="loadEvents()"></select>
+      <select id="ev-view" style="width:auto" onchange="renderEvents()">
+        <option value="grid">グリッド表示</option>
+        <option value="camera">カメラ別表示</option>
+        <option value="timeline">タイムライン表示 (URL アクセス重ね)</option>
+      </select>
       <button onclick="loadEvents()">更新</button>
+      <button onclick="deleteEventsDay()">この日のイベントを消去</button>
       <span class="faint" id="ev-sum"></span>
     </div>
-    <div class="cams" id="events"></div>
+    <div id="events"></div>
   </section>
 
   <!-- ================= music ================= -->
@@ -312,6 +333,23 @@ try{
     <div class="grid g2" id="archive"></div>
   </section>
 
+  <!-- ================= file manager ================= -->
+  <section class="page" id="p-fm">
+    <div class="row" style="margin-bottom:12px">
+      <select id="fm-root" style="width:auto" onchange="fmSwitchRoot()"></select>
+      <button onclick="loadFiles()">更新</button>
+      <button onclick="fmMkdir()">新規フォルダ</button>
+      <span class="faint" style="font-size:11px">
+        本体の書き込み負荷を抑えるため、フォルダの合計サイズやプレビュー画像の生成は行いません。
+      </span>
+    </div>
+    <div class="faint" id="fm-path" style="font-size:12px;margin-bottom:8px"></div>
+    <div class="card"><div class="body" style="padding:0">
+      <table><thead><tr><th>名前</th><th class="num">サイズ</th><th>更新日時</th><th></th></tr></thead>
+      <tbody id="fm-list"></tbody></table>
+    </div></div>
+  </section>
+
   <!-- ================= terminal ================= -->
   <section class="page" id="p-term">
     <div class="row" style="margin-bottom:8px">
@@ -328,6 +366,9 @@ try{
       <button class="p" onclick="saveSettings()">保存</button>
       <button onclick="loadSettings()">再読込</button>
       <button onclick="testWebhook()">Discord にテスト送信</button>
+      <a href="/api/config/export"><button>設定をエクスポート</button></a>
+      <button onclick="$('#set-import-file').click()">設定をインポート</button>
+      <input type="file" id="set-import-file" accept="application/json" style="display:none" onchange="importSettings(this.files[0])">
       <button class="d" onclick="doReboot()">今すぐ再起動</button>
       <span class="faint" id="set-msg"></span>
     </div>
@@ -383,6 +424,7 @@ const fmtUp = s => { const d=Math.floor(s/86400), h=Math.floor(s%86400/3600), m=
 const PAGES = [
   ["dash","ダッシュボード","1"], ["cam","カメラ","2"], ["ev","イベント","3"],
   ["music","音楽","4"], ["net","ネットワーク","5"], ["arc","アーカイブ","6"],
+  ["fm","ファイル","f"],
   ["term","端末","7"], ["err","エラー","8"], ["set","設定","9"], ["log","ログ","0"],
 ];
 $("#nav").innerHTML = PAGES.map(([id,label,key]) =>
@@ -423,6 +465,7 @@ function go(p){
   if(p==="ev") loadEvents();
   if(p==="net") loadNet();
   if(p==="arc") loadArchive();
+  if(p==="fm") loadFiles();
   if(p==="err") loadErrors();
   if(p==="set") loadSettings();
   if(p==="log") loadLogs();
@@ -724,6 +767,8 @@ async function addDownload(){
 }
 
 /* ---------------- events ---------------- */
+let EV_ITEMS = [], EV_DAY = "", EV_NET = [];
+function camName(id){ return ((DATA.cameras||[]).find(c => c.id === id) || {}).name || id; }
 async function loadEvents(){
   try{
     const day = $("#ev-day").value || "";
@@ -731,12 +776,163 @@ async function loadEvents(){
     if($("#ev-day").options.length !== r.days.length)
       $("#ev-day").innerHTML = r.days.map(d => `<option ${d===r.day?"selected":""}>${d}</option>`).join("")
         || `<option>${r.day}</option>`;
+    EV_ITEMS = r.items; EV_DAY = r.day;
     $("#ev-sum").textContent = `${r.items.length} 件`;
-    $("#events").innerHTML = r.items.map(i =>
-      `<div class="card cam"><img src="${i.url}" onclick="$('#ov-img').src='${i.url}';$('#overlay').classList.add('on')">
-       <div class="meta"><span>${esc(i.camera)}</span><span class="faint">${esc(i.file)}</span></div></div>`).join("")
-      || `<div class="card"><div class="body faint">この日のイベントはありません。</div></div>`;
+    EV_NET = [];
+    if($("#ev-view").value === "timeline"){
+      // タイムライン表示のときだけ、その日の URL アクセス記録も取得して重ねる
+      // (本体の R/W・通信は増やしたくないため、必要なときだけ取りに行く)
+      try{ const n = await api(`/api/netlog?day=${EV_DAY}&limit=2000`); EV_NET = n.records || []; }catch(e){}
+    }
+    renderEvents();
   }catch(e){}
+}
+function renderEvents(){
+  const view = $("#ev-view").value;
+  if(view === "camera") return renderEventsByCamera();
+  if(view === "timeline") return renderEventsTimeline();
+  return renderEventsGrid();
+}
+function renderEventsGrid(){
+  if(!EV_ITEMS.length){
+    $("#events").innerHTML = `<div class="card"><div class="body faint">この日のイベントはありません。</div></div>`;
+    return;
+  }
+  $("#events").innerHTML = `<div class="cams">` + EV_ITEMS.map(i =>
+    `<div class="card cam"><img src="${i.url}" onclick="$('#ov-img').src='${i.url}';$('#overlay').classList.add('on')">
+     <div class="meta"><span>${esc(camName(i.camera))}</span><span class="faint">${esc(i.file)}</span></div></div>`).join("")
+    + `</div>`;
+}
+function renderEventsByCamera(){
+  const groups = {};
+  for(const i of EV_ITEMS){ (groups[i.camera] = groups[i.camera] || []).push(i); }
+  const ids = Object.keys(groups).sort();
+  $("#events").innerHTML = ids.map(id => `
+    <div class="ev-cam-group">
+      <h4>${esc(camName(id))} · ${groups[id].length} 件</h4>
+      <div class="cams">${groups[id].map(i =>
+        `<div class="card cam"><img src="${i.url}" onclick="$('#ov-img').src='${i.url}';$('#overlay').classList.add('on')">
+         <div class="meta"><span class="faint">${esc(i.file)}</span></div></div>`).join("")}</div>
+    </div>`).join("") || `<div class="card"><div class="body faint">この日のイベントはありません。</div></div>`;
+}
+function renderEventsTimeline(){
+  const day = EV_DAY || new Date().toISOString().slice(0,10);
+  const dayStart = new Date(`${day}T00:00:00`).getTime() / 1000;
+  const pct = t => Math.max(0, Math.min(100, (t - dayStart) / 864));
+  const groups = {};
+  for(const i of EV_ITEMS){ (groups[i.camera] = groups[i.camera] || []).push(i); }
+  const ids = Object.keys(groups).sort();
+  let html = `<div class="tl-wrap"><div class="tl-inner tl">`;
+  for(const id of ids){
+    html += `<div class="tl-row"><span class="tl-label">${esc(camName(id))}</span>` +
+      groups[id].map(i => `<div class="tl-dot" style="left:${pct(i.at)}%"
+        title="${esc(camName(id))} ${new Date(i.at*1000).toLocaleTimeString('ja-JP')}"
+        onclick="$('#ov-img').src='${i.url}';$('#overlay').classList.add('on')"></div>`).join("") +
+      `</div>`;
+  }
+  if(!ids.length) html += `<div class="faint" style="padding:8px 0 4px;font-size:12px">この日のイベントはありません。</div>`;
+  if(EV_NET.length){
+    html += `<div class="tl-row tl-net"><span class="tl-label">URL アクセス</span>` +
+      EV_NET.map(r => {
+        const hms = (r.time || "").slice(11, 19);
+        const t = new Date(`${day}T${hms}`).getTime() / 1000;
+        if(!isFinite(t) || !hms) return "";
+        return `<div class="tl-dot${r.blocked ? " bad" : ""}" style="left:${pct(t)}%"
+          title="${esc(r.service)} ${hms}${r.blocked ? " [遮断]" : ""}"></div>`;
+      }).join("") + `</div>`;
+  } else {
+    html += `<div class="faint" style="padding:4px 0;font-size:11px">この日の URL アクセス記録はありません。</div>`;
+  }
+  html += `<div class="tl-axis">` +
+    [0,3,6,9,12,15,18,21,24].map(h => `<span style="left:${h/24*100}%">${String(h).padStart(2,"0")}:00</span>`).join("") +
+    `</div></div></div>`;
+  $("#events").innerHTML = html;
+}
+async function deleteEventsDay(){
+  const day = EV_DAY || $("#ev-day").value;
+  if(!day){ toast("日付を選んでください", true); return; }
+  if(!confirm(`${day} のイベント (静止画) をすべて削除します。よろしいですか。`)) return;
+  try{ await api(`/api/captures?day=${encodeURIComponent(day)}`, {method: "DELETE"});
+       toast("削除しました"); loadEvents(); }
+  catch(e){ toast(e.message, true); }
+}
+
+/* ---------------- file manager (疑似 FTP) ---------------- */
+let FM_ROOT = "", FM_PATH = "";
+function fmtBytes(n){
+  if(n == null) return "-";
+  const u = ["B","KB","MB","GB","TB"]; let i = 0;
+  while(n >= 1024 && i < u.length - 1){ n /= 1024; i++; }
+  return `${n.toFixed(i ? 1 : 0)} ${u[i]}`;
+}
+async function loadFiles(){
+  try{
+    const r = await api("/api/files/roots");
+    const labels = {drive: "外部ストレージ", local: "sentinel データ"};
+    if(!r.roots.length){
+      $("#fm-root").innerHTML = "";
+      $("#fm-path").textContent = "";
+      $("#fm-list").innerHTML = `<tr><td class="faint" colspan="4">利用できるストレージがありません</td></tr>`;
+      return;
+    }
+    const keys = r.roots.map(x => x.key).join(",");
+    if($("#fm-root").dataset.sig !== keys){
+      $("#fm-root").dataset.sig = keys;
+      $("#fm-root").innerHTML = r.roots.map(x =>
+        `<option value="${x.key}">${esc(labels[x.key] || x.key)} (${esc(x.path)})</option>`).join("");
+      FM_ROOT = $("#fm-root").value; FM_PATH = "";
+    }
+    await fmRender();
+  }catch(e){}
+}
+function fmSwitchRoot(){ FM_ROOT = $("#fm-root").value; FM_PATH = ""; fmRender(); }
+async function fmRender(){
+  FM_ROOT = FM_ROOT || $("#fm-root").value;
+  if(!FM_ROOT) return;
+  try{
+    const r = await api(`/api/files?root=${encodeURIComponent(FM_ROOT)}&path=${encodeURIComponent(FM_PATH)}`);
+    FM_PATH = r.path;
+    const parts = FM_PATH ? FM_PATH.split("/") : [];
+    let crumb = `<a onclick="fmOpen('')">/</a>`, acc = "";
+    for(const part of parts){
+      acc = acc ? `${acc}/${part}` : part;
+      crumb += ` / <a onclick="fmOpen('${esc(acc)}')">${esc(part)}</a>`;
+    }
+    $("#fm-path").innerHTML = crumb;
+    $("#fm-list").innerHTML = r.entries.map(e => {
+      const full = FM_PATH ? `${FM_PATH}/${e.name}` : e.name;
+      const nameCell = e.is_dir
+        ? `<a onclick="fmOpen('${esc(full)}')">📁 ${esc(e.name)}</a>`
+        : `📄 ${esc(e.name)}`;
+      const actions = e.is_dir
+        ? `<button onclick="fmDelete('${esc(full)}', true)">削除</button>`
+        : `<a href="/api/files/download?root=${encodeURIComponent(FM_ROOT)}&path=${encodeURIComponent(full)}"><button>DL</button></a>
+           <button onclick="fmDelete('${esc(full)}', false)">削除</button>`;
+      return `<tr><td>${nameCell}</td><td class="num faint">${fmtBytes(e.size)}</td>
+        <td class="faint">${new Date(e.mtime*1000).toLocaleString("ja-JP")}</td>
+        <td style="text-align:right;white-space:nowrap">${actions}</td></tr>`;
+    }).join("") || `<tr><td class="faint" colspan="4">空のフォルダです</td></tr>`;
+  }catch(e){ toast(e.message, true); }
+}
+function fmOpen(path){ FM_PATH = path; fmRender(); }
+async function fmMkdir(){
+  const name = prompt("新規フォルダ名を入力してください");
+  if(!name) return;
+  try{ await post("/api/files/mkdir", {root: FM_ROOT, path: FM_PATH, name});
+       toast("作成しました"); fmRender(); }
+  catch(e){ toast(e.message, true); }
+}
+async function fmDelete(path, isDir){
+  let recursive = false;
+  if(isDir){
+    recursive = confirm(`フォルダ「${path}」を中身ごとすべて削除します。よろしいですか。\n(「キャンセル」を押すと、空の場合のみ削除します)`);
+    if(!recursive && !confirm(`空のフォルダとして「${path}」を削除しますか。`)) return;
+  } else if(!confirm(`「${path}」を削除します。よろしいですか。`)){ return; }
+  try{
+    await api(`/api/files?root=${encodeURIComponent(FM_ROOT)}&path=${encodeURIComponent(path)}&recursive=${recursive}`,
+             {method: "DELETE"});
+    toast("削除しました"); fmRender();
+  }catch(e){ toast(e.message, true); }
 }
 
 /* ---------------- network ---------------- */
@@ -942,6 +1138,19 @@ async function saveSettings(){
 }
 const cfg = patch => api("/api/config", {method:"PUT",
   headers:{"Content-Type":"application/json"}, body: JSON.stringify(patch)});
+async function importSettings(file){
+  $("#set-import-file").value = "";
+  if(!file) return;
+  if(!confirm(`「${file.name}」の内容で設定を上書きします。よろしいですか。`)) return;
+  try{
+    const text = await file.text();
+    const patch = JSON.parse(text);
+    const r = await post("/api/config/import", patch);
+    const n = Object.keys(r.changed).length;
+    toast(n ? `設定をインポートしました (${n} 件)` : "変更はありませんでした");
+    loadSettings();
+  }catch(e){ toast(`インポートに失敗しました: ${e.message}`, true); }
+}
 async function testWebhook(){
   $("#set-msg").textContent = "送信中…";
   try{
