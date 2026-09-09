@@ -78,7 +78,17 @@ DEFAULTS: dict[str, Any] = {
     "eco_fps": 0.2,
     "motion_threshold": 25,
     "motion_area_ratio": 0.02,
+    "motion_area_max_ratio": 0.6,         # これ以上は「局所的な動体」ではなく画面
+                                           # 全体の変化 (オートフォーカスの再合焦や
+                                           # 露出/照明の変化) とみなし、動体扱いしない
     "motion_interval": 1.0,
+    "motion_warmup_seconds": 2.0,         # カメラを開いた直後 (再接続・解像度変更を
+                                           # 含む) はオートフォーカスの再合焦が起きや
+                                           # すいため、この秒数は動体判定そのものを
+                                           # スキップする
+    "cam_autofocus": True,                # False でオートフォーカスを無効化 (対応
+                                           # している機種のみ)。合焦動作そのものを
+                                           # 動体と誤検知するカメラ向け
     "save_cooldown": 5.0,
     "retention_days": 14,
     "reconnect_seconds": 3,
@@ -106,9 +116,15 @@ DEFAULTS: dict[str, Any] = {
     "notify_motion": True,
     "notify_motion_grouped": False,       # True: 複数カメラの検知を 1 通にまとめる
                                            # (False: 今までどおりカメラごとに送る)
-    "notify_min_interval": 60.0,          # 即時通知の最短間隔 (秒)。grouped=False
-                                           # では同一カメラ単位、grouped=True では
-                                           # 全カメラ合算のまとめ通知単位で効く。
+    "notify_min_interval": 60.0,          # 即時通知の最短間隔 (秒、下限として働く)
+    "motion_notify_reset_seconds": 45.0,  # この秒数、検知が完全に途切れたら
+                                           # 「動いていない」とみなす。動体が途切れず
+                                           # 続いている間は (notify_min_interval が
+                                           # 経過していても) 再通知しない — 継続中の
+                                           # 同じイベントとして扱う。途切れてからの
+                                           # 次の検知だけが新しいイベントとして通知
+                                           # される。grouped=False では同一カメラ単位、
+                                           # grouped=True では全カメラ合算単位で効く。
     "notify_summary": True,               # 無検知が続いたときの集計通知
     "notify_summary_after": 300.0,        # 無検知がこれだけ続いたら統計を送る (秒)
     "notify_mode_change": True,           # モード遷移 (通常/エコ/緊急) の通知
@@ -216,7 +232,10 @@ _RANGES: dict[str, tuple[float, float]] = {
     "eco_fps": (0.05, 2.0),
     "motion_threshold": (5, 100),
     "motion_area_ratio": (0.001, 0.5),
+    "motion_area_max_ratio": (0.05, 1.0),
     "motion_interval": (0.2, 10.0),
+    "motion_warmup_seconds": (0.0, 30.0),
+    "motion_notify_reset_seconds": (5.0, 1800.0),
     "save_cooldown": (1.0, 300.0),
     "retention_days": (1, 3650),
     "music_volume": (0, 100),

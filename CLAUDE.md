@@ -429,7 +429,11 @@ core/supervisor.py  タスク監督。例外で落ちても指数バックオフ
 modules/camera.py       カメラ (別プロセス)。動体検知 -> MODE.report_motion()
                          個別カメラの上書き設定は config の camera_overrides
                          (カメラID -> {設定キー: 値}) で持つ。camera.py の
-                         effective_settings()/set_overrides() が唯一の窓口
+                         effective_settings()/set_overrides() が唯一の窓口。
+                         オートフォーカスの再合焦を動体と誤検知する機種向けに
+                         cam_autofocus (無効化)・motion_area_max_ratio (画面
+                         全体が一度に変化するケースを上限で除外)・
+                         motion_warmup_seconds (開いた直後は判定を休止) を持つ
 modules/music.py        mpg123 制御、位置復帰、yt-dlp キュー
 modules/thermal.py      温度と CPU -> MODE.report_temperature()
 modules/bluetooth.py    A2DP 接続検知 -> 音楽の退避と復帰。この Pi 自身の
@@ -442,7 +446,12 @@ modules/terminal.py     pty over WebSocket
 modules/netlog.py       AdGuard querylog -> サービス名変換
 modules/notify.py       Discord (レート制限対応キュー)。notify_motion_grouped
                          で「カメラごとに即時送信」と「複数カメラの検知を
-                         1通にまとめる」を切り替えられる
+                         1通にまとめる」を切り替えられる。動体が途切れず
+                         続く間は再通知しない (motion_notify_reset_seconds
+                         秒の無検知で「止まった」とみなし、次の検知だけが
+                         新しいイベントとして通知される) — 以前は
+                         notify_min_interval の周期だけで間引いていたため、
+                         動体が続く限りその間隔で延々と通知が飛び続けていた
 modules/maintenance.py  4 時の定時処理と再起動
 
 web/routes.py           全 HTTP / WebSocket エンドポイント

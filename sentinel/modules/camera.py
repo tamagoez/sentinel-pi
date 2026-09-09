@@ -37,7 +37,8 @@ _DISCOVER_INTERVAL = 15.0
 CAMERA_OVERRIDE_KEYS = (
     "cam_width", "cam_height", "cam_eco_width", "cam_eco_height",
     "jpeg_quality", "live_fps", "normal_fps", "eco_fps",
-    "motion_threshold", "motion_area_ratio", "motion_interval",
+    "motion_threshold", "motion_area_ratio", "motion_area_max_ratio",
+    "motion_interval", "motion_warmup_seconds", "cam_autofocus",
     "save_cooldown", "reconnect_seconds",
 )
 
@@ -201,6 +202,7 @@ def _worker(cid: str, device: str, stop: "Event", cfg: dict) -> None:
     frames = 0
     fps_t0 = time.monotonic()
     applied_res: tuple[int, int] | None = None
+    cam_opened_at = 0.0
 
     def target_res(mode: str) -> tuple[int, int]:
         if mode == NORMAL:
@@ -208,7 +210,7 @@ def _worker(cid: str, device: str, stop: "Event", cfg: dict) -> None:
         return int(cfg["cam_eco_width"]), int(cfg["cam_eco_height"])
 
     def open_cam(mode: str) -> bool:
-        nonlocal cap, applied_res
+        nonlocal cap, applied_res, cam_opened_at, prev
         if cap is not None:
             try:
                 cap.release()
@@ -230,12 +232,22 @@ def _worker(cid: str, device: str, stop: "Event", cfg: dict) -> None:
             c.set(cv2.CAP_PROP_FRAME_WIDTH, w)
             c.set(cv2.CAP_PROP_FRAME_HEIGHT, h)
             c.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+            try:
+                # 対応機種のみ有効。オートフォーカスの再合焦そのものを動体と
+                # 誤検知するカメラ向けに無効化できるようにしている
+                # (CAMERA_OVERRIDE_KEYS の cam_autofocus)。非対応機種では
+                # 単に無視される。
+                c.set(cv2.CAP_PROP_AUTOFOCUS, 1 if cfg.get("cam_autofocus", True) else 0)
+            except Exception:
+                pass
             ok, frame = c.read()
             if not ok or frame is None:
                 c.release()
                 return False
             cap = c
             applied_res = (w, h)
+            cam_opened_at = time.monotonic()
+            prev = None   # 開き直した直後の基準フレームは古いので作り直す
             return True
         except Exception:
             return False
@@ -311,11 +323,23 @@ def _worker(cid: str, device: str, stop: "Event", cfg: dict) -> None:
                 gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
                 small = cv2.GaussianBlur(cv2.resize(gray, (160, 120)), (21, 21), 0)
                 motion = False
-                if prev is not None:
+                # カメラを開いた直後 (再接続・解像度切り替え含む) はオートフォーカス
+                # の再合焦が起きやすく、画面全体がぼけて戻るだけで動体と誤検知
+                # しやすい。この間は判定そのものをスキップし、基準フレームだけ
+                # 更新しておく (ウォームアップが明けた瞬間に古い基準フレームと
+                # 比べて誤検知しないように)。
+                warm = now - cam_opened_at < float(cfg.get("motion_warmup_seconds", 0.0))
+                if not warm and prev is not None:
                     diff = cv2.absdiff(prev, small)
                     _, th = cv2.threshold(diff, int(cfg["motion_threshold"]), 255, cv2.THRESH_BINARY)
                     th = cv2.dilate(th, None, iterations=2)
-                    motion = (cv2.countNonZero(th) / th.size) >= float(cfg["motion_area_ratio"])
+                    ratio = cv2.countNonZero(th) / th.size
+                    lo = float(cfg["motion_area_ratio"])
+                    hi = float(cfg.get("motion_area_max_ratio", 1.0))
+                    # 上限 (motion_area_max_ratio) は、画面のほとんどが一度に
+                    # 変化するケース (オートフォーカスの再合焦・露出/照明の変化)
+                    # を、局所的な物体の動きと区別して除外するためのもの。
+                    motion = lo <= ratio < hi
                 prev = small
                 last_motion_check = now
                 if motion:
