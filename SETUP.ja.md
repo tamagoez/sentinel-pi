@@ -115,7 +115,7 @@ sudo ./setup.sh
 | 2 | ALSA、FFmpeg、Git、Python 3、yt-dlp | 5, 7, 17, 130, 195 |
 | 3 | AdGuard Home + Unbound (1 回の呼び出しで DietPi が両者を連携させ、Unbound はポート 5335 へ移動して AdGuard の上流になる) | 126, 182 |
 | 4 | WiFi ホットスポット。AdGuard の後に入れるのは、その DHCP を後で AdGuard に向けられるようにするため | 60 |
-| 5 | Bluetooth、および APT からの bluez / bluez-alsa-utils / bluez-tools / mpg123 / v4l-utils / python3-opencv | — |
+| 5 | Bluetooth、および APT からの bluez / bluez-alsa-utils / mpg123 / v4l-utils / python3-opencv | — |
 | 6 | 音声を 3.5mm ジャックへ ( `dietpi-set_hardware soundcard rpi-bcm2835-3.5mm` ) | — |
 | 7 | SWAP を無効化 | — |
 

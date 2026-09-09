@@ -2,7 +2,17 @@
 Description=Bluetooth pairing agent (persistent)
 # Previously a one-shot bluetoothctl invocation was used, so the agent
 # disappeared as soon as that process exited and new pairing requests
-# were rejected. Running bt-agent as a persistent service fixes this.
+# were rejected. Running the agent persistently fixes this.
+#
+# ExecStart used to be bluez-tools' "bt-agent --capability=NoInputNoOutput"
+# binary. Since Raspberry Pi OS Bullseye (bluez 5.55+) that binary has a
+# known regression where a NoInputNoOutput agent stops auto-confirming
+# incoming pairing requests (https://github.com/RPi-Distro/repo/issues/291),
+# which iOS reports back as "Pairing Unsuccessful" once its own
+# confirmation prompt times out. sentinel-bt-agent.sh drives bluetoothctl's
+# own built-in agent instead (which does not have this regression) and
+# needs no separate bluez-tools package. **Do not switch this back to
+# bt-agent** - that is the exact regression this fixes.
 Requires=bluetooth.service
 After=bluetooth.service
 # Without this, a burst of restarts (e.g. install.sh re-run without a
@@ -15,10 +25,7 @@ StartLimitIntervalSec=0
 Type=simple
 ExecStartPre=/bin/sleep 3
 ExecStartPre=-/usr/bin/bluetoothctl power on
-ExecStartPre=-/usr/bin/bluetoothctl discoverable on
-ExecStartPre=-/usr/bin/bluetoothctl pairable on
-# NoInputNoOutput: accept incoming pairing requests without a PIN prompt.
-ExecStart=/usr/bin/bt-agent --capability=NoInputNoOutput
+ExecStart=/opt/sentinel/scripts/sentinel-bt-agent.sh
 Restart=always
 RestartSec=5
 

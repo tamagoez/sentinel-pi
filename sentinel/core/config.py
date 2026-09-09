@@ -89,6 +89,12 @@ DEFAULTS: dict[str, Any] = {
     "cam_autofocus": True,                # False でオートフォーカスを無効化 (対応
                                            # している機種のみ)。合焦動作そのものを
                                            # 動体と誤検知するカメラ向け
+    "motion_debug_log": True,             # 動体判定のたびに、判定に使った実際の
+                                           # 数値 (面積比・しきい値・warm 中かどうか
+                                           # など) を tmpfs 上へ記録する。設定タブから
+                                           # まとめて閲覧・コピーでき、次回のやり取りに
+                                           # 貼り付けて調整に使う想定 (無制限には太ら
+                                           # せず、カメラごとに直近分だけ保持する)
     "save_cooldown": 5.0,
     "retention_days": 14,
     "reconnect_seconds": 3,

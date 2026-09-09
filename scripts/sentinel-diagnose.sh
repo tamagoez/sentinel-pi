@@ -63,7 +63,7 @@ run bluetooth.txt bash -c '
 '
 
 run packages.txt bash -c '
-  for p in ffmpeg mpg123 bluez bluez-alsa-utils bluez-tools python3-opencv python3-pil yt-dlp; do
+  for p in ffmpeg mpg123 bluez bluez-alsa-utils python3-opencv python3-pil yt-dlp; do
     printf "%-20s " "$p"
     dpkg -l 2>/dev/null | awk -v p="$p" "\$2==p{print \$3}" || echo "?"
   done

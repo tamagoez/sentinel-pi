@@ -143,13 +143,17 @@ fi
 
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -qq
-# bluez-alsa-utils: the A2DP sink itself / bluez-tools: the persistent bt-agent
+# bluez-alsa-utils: the A2DP sink itself. The persistent pairing agent
+# (scripts/sentinel-bt-agent.sh) drives bluetoothctl directly instead of
+# bluez-tools' bt-agent binary (which has a known NoInputNoOutput
+# regression on Bullseye+ that breaks iOS pairing - see
+# systemd/sentinel-bt-agent.service), so bluez-tools is not installed here.
 # exfatprogs/ntfs-3g: dietpi-drive_manager can mount exFAT/NTFS drives, but
 # without these packages that mount can fail outright. Even with them,
 # such drives have no real Unix ownership - install.sh and Guardian handle
 # that separately by fixing the mount's uid=/gid= options.
 apt-get install -y --no-install-recommends \
-  bluez bluez-alsa-utils bluez-tools \
+  bluez bluez-alsa-utils \
   mpg123 v4l-utils python3-opencv python3-pil python3-venv \
   fonts-dejavu-core fonts-noto-cjk iptables \
   exfatprogs ntfs-3g >/dev/null 2>&1 \
