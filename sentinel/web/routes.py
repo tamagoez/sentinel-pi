@@ -21,7 +21,7 @@ from ..core import config
 from ..core import errors as errors_mod
 from ..core.state import MODE
 from ..core.supervisor import SUPERVISOR
-from ..modules import bluetooth, camera, diagnostics, maintenance, music, netlog, notify, terminal, thermal
+from ..modules import bluetooth, camera, diagnostics, hotspot, maintenance, music, netlog, notify, terminal, thermal
 
 log = logging.getLogger("sentinel.web")
 router = APIRouter()
@@ -203,7 +203,7 @@ async def put_config(request: Request):
     restart_needed = any(k.startswith("cam_") or k in ("jpeg_quality", "motion_threshold",
                                                        "motion_area_ratio", "motion_interval",
                                                        "save_cooldown", "live_fps",
-                                                       "normal_fps", "eco_fps")
+                                                       "normal_fps", "eco_fps", "camera_overrides")
                          for k in changed)
     if restart_needed:
         for w in camera.WORKERS.values():
@@ -237,6 +237,33 @@ async def restart_camera(cid: str, request: Request):
     camera.rt(cid).joinpath("halt").unlink(missing_ok=True)
     await asyncio.to_thread(w.start)
     return {"ok": True}
+
+
+@router.get("/api/camera/{cid}/settings")
+async def camera_get_settings(cid: str, request: Request):
+    require(request)
+    overrides = (config.get("camera_overrides") or {}).get(cid) or {}
+    return {"keys": list(camera.CAMERA_OVERRIDE_KEYS), "overrides": overrides,
+            "effective": camera.effective_settings(cid)}
+
+
+@router.put("/api/camera/{cid}/settings")
+async def camera_put_settings(cid: str, request: Request):
+    """カメラ個別の設定を部分更新する。値が null のキーは共有設定に戻す
+    (削除)。この端点は他のカメラには一切触れない - 「別々に撮影」と
+    「まとめて撮影」を、カメラごとに選べるようにするためのもの。"""
+    require(request)
+    patch = await request.json()
+    if not isinstance(patch, dict):
+        raise HTTPException(400, "JSON オブジェクトが必要です")
+    try:
+        cur = await asyncio.to_thread(camera.set_overrides, cid, patch)
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(400, str(exc))
+    w = camera.WORKERS.get(cid)
+    if w is not None and not w.halted:
+        await asyncio.to_thread(w.start)
+    return {"ok": True, "overrides": cur}
 
 
 @router.get("/api/camera/{cid}/snapshot")
@@ -417,17 +444,12 @@ async def notify_unblock_webhook_host(request: Request):
 
 # ---------------------------------------------------------------- Bluetooth
 
-@router.post("/api/bluetooth/{action}")
-async def bluetooth_action(action: str, request: Request):
-    require(request)
-    if action == "disconnect":
-        await asyncio.to_thread(bluetooth.disconnect)
-    elif action in ("pairable_on", "pairable_off"):
-        await asyncio.to_thread(bluetooth.set_pairable, action == "pairable_on")
-    else:
-        raise HTTPException(400, "不明な操作です")
-    return {"ok": True, "bluetooth": bluetooth.status()}
-
+# 固定パスのルートは、"/{action}" のような可変パスのルートより必ず先に
+# 登録すること。FastAPI/Starlette はルートを登録順に試すため、後から
+# 登録すると "/api/bluetooth/alias" や ".../volume" も action="alias" 等
+# として先に "/api/bluetooth/{action}" 側に食われてしまい、常に
+# 「不明な操作です」になって新しいエンドポイントに一生届かない
+# (実際に踏んだ不具合)。**この順序を入れ替えないでください。**
 
 @router.get("/api/bluetooth/devices")
 async def bluetooth_devices(request: Request):
@@ -459,6 +481,52 @@ async def bluetooth_volume(request: Request):
     volume = int(body.get("volume") or 0)
     await asyncio.to_thread(bluetooth.set_device_volume, addr, volume)
     return {"ok": True}
+
+
+@router.get("/api/bluetooth/local_name")
+async def bluetooth_local_name(request: Request):
+    require(request)
+    name = await asyncio.to_thread(bluetooth.local_name)
+    return {"name": name}
+
+
+@router.post("/api/bluetooth/local_name")
+async def bluetooth_set_local_name(request: Request):
+    require(request)
+    body = await request.json()
+    name = str(body.get("name") or "")
+    ok, message = await asyncio.to_thread(bluetooth.set_local_name, name)
+    return {"ok": ok, "message": message}
+
+
+@router.post("/api/bluetooth/{action}")
+async def bluetooth_action(action: str, request: Request):
+    require(request)
+    if action == "disconnect":
+        await asyncio.to_thread(bluetooth.disconnect)
+    elif action in ("pairable_on", "pairable_off"):
+        await asyncio.to_thread(bluetooth.set_pairable, action == "pairable_on")
+    else:
+        raise HTTPException(400, "不明な操作です")
+    return {"ok": True, "bluetooth": bluetooth.status()}
+
+
+# ----------------------------------------------------------------- Hotspot
+
+@router.get("/api/hotspot/ssid")
+async def hotspot_get_ssid(request: Request):
+    require(request)
+    ssid = await asyncio.to_thread(hotspot.current_ssid)
+    return {"ssid": ssid}
+
+
+@router.post("/api/hotspot/ssid")
+async def hotspot_set_ssid(request: Request):
+    require(request)
+    body = await request.json()
+    ssid = str(body.get("ssid") or "")
+    ok, message = await asyncio.to_thread(hotspot.set_ssid, ssid)
+    return {"ok": ok, "message": message}
 
 
 # ---------------------------------------------------------------- ネットログ
@@ -576,9 +644,13 @@ async def files_upload(request: Request, root: str = Query(...), path: str = "",
     # ストリーム書き込みする単純な方式にしている (python-multipart 等の
     # 追加依存を避けるため - CLAUDE.md「依存を増やさない」)。1GB RAM 機
     # でも、ボディ全体をメモリに載せずに済む。
-    with dest.open("wb") as f:
-        async for chunk in request.stream():
-            f.write(chunk)
+    try:
+        with dest.open("wb") as f:
+            async for chunk in request.stream():
+                f.write(chunk)
+    except Exception:
+        dest.unlink(missing_ok=True)
+        raise
     return {"ok": True, "name": name}
 
 
@@ -592,10 +664,17 @@ async def files_write_content(request: Request, root: str = Query(...), path: st
     p = _fm_resolve(root, path)
     if p.is_dir():
         raise HTTPException(400, "フォルダには書き込めません")
-    body = await request.body()
-    if len(body) > _MAX_EDIT_BYTES:
-        raise HTTPException(413, f"{_MAX_EDIT_BYTES // 1_000_000}MB を超えるファイルはこの編集欄では保存できません")
-    p.write_bytes(body)
+    # ボディ全体を先に body() でメモリへ確保すると、上限チェックの前に
+    # 巨大なファイルがまるごと RAM に載ってしまう (1GB 機での OOM リスク)。
+    # ストリームで少しずつ受け取り、上限を超えた時点で即座に打ち切る。
+    chunks: list[bytes] = []
+    total = 0
+    async for chunk in request.stream():
+        total += len(chunk)
+        if total > _MAX_EDIT_BYTES:
+            raise HTTPException(413, f"{_MAX_EDIT_BYTES // 1_000_000}MB を超えるファイルはこの編集欄では保存できません")
+        chunks.append(chunk)
+    p.write_bytes(b"".join(chunks))
     return {"ok": True}
 
 

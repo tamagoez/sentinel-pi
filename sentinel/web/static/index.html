@@ -104,13 +104,26 @@ td.num{text-align:right;font-variant-numeric:tabular-nums}
 .ev-cam-group{margin-bottom:18px}
 .ev-cam-group h4{font-size:12px;color:var(--dim);margin:0 0 8px;font-weight:600}
 
-.tl-list{display:flex;flex-direction:column;gap:1px}
-.tl-item{display:flex;align-items:center;gap:10px;padding:5px 8px;background:var(--panel);border-bottom:1px solid var(--row-line)}
-.tl-item:hover{background:var(--hover)}
-.tl-time{flex:none;width:64px;font-size:11px;color:var(--faint);font-variant-numeric:tabular-nums}
-.tl-item img{flex:none;width:64px;height:48px;object-fit:cover;background:var(--bg-deep);cursor:pointer;border-radius:3px}
-.tl-item-net .tl-net-badge{flex:none;font-size:11px;padding:2px 7px;border-radius:9px;background:var(--bg-deep);color:var(--dim)}
-.tl-item-net .tl-net-badge.bad{color:var(--bad)}
+/* Windows Recall 風: カメラごと + URL アクセスの列を横に並べ、選択した
+   項目を右側に大きくプレビューする */
+.recall-wrap{display:flex;gap:12px;align-items:flex-start}
+.recall-cols{display:flex;gap:8px;flex:1;overflow-x:auto;padding-bottom:4px}
+.recall-col{flex:none;width:150px;display:flex;flex-direction:column;background:var(--panel);border-radius:8px;overflow:hidden;max-height:74vh}
+.recall-col h4{margin:0;padding:7px 9px;font-size:11px;color:var(--dim);background:var(--bg-deep);position:sticky;top:0;display:flex;justify-content:space-between;gap:6px}
+.recall-col .list{overflow-y:auto;flex:1}
+.recall-item{display:flex;flex-direction:column;gap:3px;padding:6px 8px;cursor:pointer;border-bottom:1px solid var(--row-line)}
+.recall-item:hover{background:var(--hover)}
+.recall-item.sel{background:var(--acc-dim,var(--hover));box-shadow:inset 3px 0 var(--acc)}
+.recall-item img{width:100%;height:72px;object-fit:cover;border-radius:4px;background:var(--bg-deep)}
+.recall-item .t{font-size:10px;color:var(--faint);font-variant-numeric:tabular-nums}
+.recall-item .net-line{font-size:11.5px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.recall-item .net-line.bad{color:var(--bad)}
+.recall-preview{flex:none;width:300px;position:sticky;top:0;background:var(--panel);border-radius:8px;padding:12px;max-height:74vh;overflow:auto}
+.recall-preview img{width:100%;border-radius:6px;display:block;cursor:pointer;background:var(--bg-deep)}
+@media (max-width:900px){
+  .recall-wrap{flex-direction:column}
+  .recall-preview{width:100%}
+}
 
 .row{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
 .field{margin-bottom:9px}
@@ -135,6 +148,8 @@ pre.log{background:var(--bg-deep);border:1px solid var(--line);padding:10px;font
 #overlay{position:fixed;inset:0;background:var(--overlay);display:none;align-items:center;justify-content:center;z-index:50}
 #overlay.on{display:flex}
 #overlay img{max-width:94vw;max-height:92vh}
+.overlay-panel{position:fixed;inset:0;background:var(--overlay);display:none;align-items:center;justify-content:center;z-index:50}
+.overlay-panel.on{display:flex}
 #login{position:fixed;inset:0;background:var(--bg);display:none;align-items:center;justify-content:center;z-index:60}
 #login.on{display:flex}
 #login .box{width:300px;background:var(--panel);border:1px solid var(--line);padding:20px}
@@ -226,7 +241,6 @@ try{
         <table><thead><tr><th>タスク</th><th>状態</th><th class="num">再起動</th><th class="num">稼働</th></tr></thead>
         <tbody id="tasks"></tbody></table></div></div>
       <div class="card"><h3>スロットリング</h3><div class="body" id="throttle"></div></div>
-      <div class="card"><h3>Bluetooth</h3><div class="body" id="bt-card"></div></div>
     </div>
   </section>
 
@@ -246,7 +260,7 @@ try{
       <select id="ev-view" style="width:auto" onchange="renderEvents()">
         <option value="grid">グリッド表示</option>
         <option value="camera">カメラ別表示</option>
-        <option value="timeline">時系列一覧 (画像 + URL アクセス)</option>
+        <option value="timeline">Recall 風表示 (カメラ別 + URL / プレビュー)</option>
       </select>
       <button onclick="loadEvents()">更新</button>
       <button onclick="deleteEventsDay()">この日のイベントを消去</button>
@@ -391,6 +405,18 @@ try{
       <button class="d" onclick="doReboot()">今すぐ再起動</button>
       <span class="faint" id="set-msg"></span>
     </div>
+    <div class="grid g2" style="margin-bottom:12px">
+      <div class="card"><h3>Bluetooth</h3><div class="body" id="bt-card"></div></div>
+      <div class="card"><h3>WiFi ホットスポット</h3><div class="body" id="hotspot-card">
+        <div class="row"><b>SSID (表示名)</b></div>
+        <div class="row" style="margin-top:6px">
+          <input type="text" id="hotspot-ssid" maxlength="32" style="flex:1" placeholder="Sentinel">
+          <button onclick="hotspotSetSsid()">変更</button>
+        </div>
+        <div class="faint" style="margin-top:6px;font-size:12px">変更後は hostapd の再起動を伴います。接続中の端末は一時的に切れます。</div>
+        <div class="faint" id="hotspot-msg" style="margin-top:6px"></div>
+      </div></div>
+    </div>
     <div class="grid g2" id="settings"></div>
   </section>
 
@@ -427,6 +453,15 @@ try{
 
 <div id="overlay" onclick="this.classList.remove('on');document.getElementById('ov-img').src=''">
   <img id="ov-img"></div>
+<div id="cam-set-overlay" class="overlay-panel" onclick="closeCamSettings()">
+  <div class="card" style="width:min(420px,92vw)" onclick="event.stopPropagation()">
+    <h3 style="display:flex;align-items:center;gap:8px">
+      <span style="flex:1" id="cam-set-title">カメラ設定</span>
+      <a onclick="closeCamSettings()" style="cursor:pointer">✕</a>
+    </h3>
+    <div class="body" id="cam-set-body"></div>
+  </div>
+</div>
 <div id="toast"></div>
 
 <script src="https://cdn.jsdelivr.net/npm/xterm@5.3.0/lib/xterm.js"></script>
@@ -486,7 +521,7 @@ function go(p){
   if(p==="arc") loadArchive();
   if(p==="fm") loadFiles();
   if(p==="err") loadErrors();
-  if(p==="set") loadSettings();
+  if(p==="set"){ loadSettings(); ensureHotspotSsidLoaded(); }
   if(p==="log") loadLogs();
   if(p==="music") loadMusic();
   if(p==="term" && FIT) setTimeout(()=>FIT.fit(), 60);
@@ -496,7 +531,7 @@ document.addEventListener("keydown", e => {
   if(/^(INPUT|SELECT|TEXTAREA)$/.test(e.target.tagName) || e.target.closest("#term")) return;
   const hit = PAGES.find(x => x[2] === e.key);
   if(hit) go(hit[0]);
-  if(e.key === "Escape") $("#overlay").classList.remove("on");
+  if(e.key === "Escape"){ $("#overlay").classList.remove("on"); closeCamSettings(); }
 });
 
 function toast(msg, bad){
@@ -514,6 +549,8 @@ async function api(url, opt){
   return r.status === 204 ? null : r.json();
 }
 const post = (url, body) => api(url, {method:"POST", headers:{"Content-Type":"application/json"},
+  body: JSON.stringify(body || {})});
+const putJson = (url, body) => api(url, {method:"PUT", headers:{"Content-Type":"application/json"},
   body: JSON.stringify(body || {})});
 
 async function doLogin(){
@@ -603,11 +640,13 @@ function render(){
 
 /* ---------------- bluetooth ---------------- */
 let BT_VOL_ADDR = null;
+let BT_LOCAL_NAME = "";
+let BT_LOCAL_NAME_LOADED = false;
 function renderBluetooth(){
   const card = $("#bt-card");
   if(!card) return;
   const focused = document.activeElement;
-  if(focused && (focused.id === "bt-alias-input" || focused.id === "bt-vol")) return;
+  if(focused && (focused.id === "bt-alias-input" || focused.id === "bt-vol" || focused.id === "bt-local-name-input")) return;
   const b = DATA.bluetooth || {};
   let html;
   if(!b.available){
@@ -632,13 +671,40 @@ function renderBluetooth(){
         <button onclick="btAction('pairable_off')">ペアリングを禁止</button>
       </div>`;
   }
-  card.innerHTML = html;
+  const localHtml = b.available ? `
+    <div class="row" style="margin-bottom:10px">
+      <input id="bt-local-name-input" placeholder="この Pi の表示名" value="${esc(BT_LOCAL_NAME)}" style="flex:1">
+      <button onclick="btSetLocalName()">変更</button>
+    </div>
+    <div class="faint" style="font-size:10.5px;margin-bottom:10px">相手端末から見える、この Pi 自身の Bluetooth 名です (接続相手の表示名とは別)。</div>` : "";
+  card.innerHTML = localHtml + html;
+  if(b.available && !BT_LOCAL_NAME_LOADED){
+    BT_LOCAL_NAME_LOADED = true;
+    loadBtLocalName();
+  }
   if(b.connected && BT_VOL_ADDR !== b.device_addr){
     BT_VOL_ADDR = b.device_addr;
     fetchBtVolume(b.device_addr);
   }else if(!b.connected){
     BT_VOL_ADDR = null;
   }
+}
+async function loadBtLocalName(){
+  try{
+    const r = await api("/api/bluetooth/local_name");
+    BT_LOCAL_NAME = r.name || "";
+    renderBluetooth();
+  }catch(e){}
+}
+async function btSetLocalName(){
+  const el = $("#bt-local-name-input");
+  const name = el ? el.value.trim() : "";
+  if(!name) return;
+  try{
+    const r = await post("/api/bluetooth/local_name", {name});
+    toast(r.message, !r.ok);
+    if(r.ok) BT_LOCAL_NAME = name;
+  }catch(e){ toast(e.message, true); }
 }
 async function fetchBtVolume(addr){
   try{
@@ -674,6 +740,27 @@ async function btSetVolume(v){
   catch(e){ toast(e.message, true); }
 }
 
+/* ---------------- wifi hotspot ---------------- */
+let HOTSPOT_SSID_LOADED = false;
+function ensureHotspotSsidLoaded(){
+  if(HOTSPOT_SSID_LOADED) return;
+  HOTSPOT_SSID_LOADED = true;
+  api("/api/hotspot/ssid").then(r => {
+    const el = $("#hotspot-ssid");
+    if(el && document.activeElement !== el) el.value = r.ssid || "";
+  }).catch(()=>{});
+}
+async function hotspotSetSsid(){
+  const el = $("#hotspot-ssid");
+  const ssid = el ? el.value.trim() : "";
+  if(!ssid) return;
+  try{
+    const r = await post("/api/hotspot/ssid", {ssid});
+    const m = $("#hotspot-msg"); if(m) m.textContent = r.message || "";
+    toast(r.message, !r.ok);
+  }catch(e){ toast(e.message, true); }
+}
+
 /* ---------------- cameras ---------------- */
 function renderCams(){
   const cams = DATA.cameras || [];
@@ -695,6 +782,7 @@ function renderCams(){
           <span>再接続 ${c.reconnects ?? 0}</span><span>視聴 ${c.clients ?? 0}</span>
           ${c.motion ? '<span style="color:var(--warn)">動体</span>' : ""}
           <span class="spacer" style="flex:1"></span>
+          <a onclick="openCamSettings('${esc(c.id)}')" style="cursor:pointer">個別設定</a>
           <a onclick="restartCam('${esc(c.id)}')" style="cursor:pointer">再起動</a>
         </div>
       </div>`).join("");
@@ -715,6 +803,77 @@ async function restartCam(id){
   catch(e){ toast(e.message, true); }
 }
 function reloadCams(){ $("#cams").dataset.sig = ""; renderCams(); }
+
+/* ---------------- per-camera settings ---------------- */
+const CAM_SETTING_LABELS = {
+  cam_width:"通常時の幅", cam_height:"通常時の高さ", cam_eco_width:"エコ時の幅",
+  cam_eco_height:"エコ時の高さ", jpeg_quality:"JPEG 品質", live_fps:"ライブ視聴時の FPS",
+  normal_fps:"通常時の FPS", eco_fps:"エコ時の FPS", motion_threshold:"動体の輝度差閾値",
+  motion_area_ratio:"動体の面積比", motion_interval:"判定間隔 (秒)",
+  save_cooldown:"保存の間隔 (秒)", reconnect_seconds:"再接続間隔 (秒)",
+};
+let CAM_SET_ID = null;
+async function openCamSettings(id){
+  CAM_SET_ID = id;
+  $("#cam-set-title").textContent = `カメラ設定 — ${id}`;
+  $("#cam-set-body").innerHTML = `<span class="faint">読み込み中...</span>`;
+  $("#cam-set-overlay").classList.add("on");
+  await loadCamSettings(id);
+}
+function closeCamSettings(){
+  CAM_SET_ID = null;
+  $("#cam-set-overlay").classList.remove("on");
+}
+async function loadCamSettings(id){
+  try{
+    const r = await api(`/api/camera/${encodeURIComponent(id)}/settings`);
+    if(CAM_SET_ID !== id) return;
+    const ov = r.overrides || {}, eff = r.effective || {};
+    $("#cam-set-body").innerHTML = `
+      <div class="faint" style="font-size:12px;margin-bottom:8px">
+        空欄はこのカメラの共有設定 (Settings タブの「カメラ」) をそのまま使います。
+        値を入れると、このカメラだけそれを上書きします。
+      </div>
+      ${r.keys.map(k => `
+        <div class="row" style="margin-top:6px">
+          <span class="faint" style="width:150px;flex:none;font-size:12px">${esc(CAM_SETTING_LABELS[k] || k)}</span>
+          <input data-k="${k}" style="flex:1" placeholder="${esc(String(eff[k]))}"
+                 value="${ov[k] !== undefined ? esc(String(ov[k])) : ""}">
+        </div>`).join("")}
+      <div class="row" style="margin-top:12px">
+        <button onclick="saveCamSettings()">保存</button>
+        <button onclick="clearCamSettings()">すべて共有設定に戻す</button>
+      </div>
+      <div class="faint" id="cam-set-msg" style="margin-top:6px"></div>`;
+  }catch(e){
+    if(CAM_SET_ID === id) $("#cam-set-body").innerHTML = `<span class="faint">読み込みに失敗しました: ${esc(e.message)}</span>`;
+  }
+}
+async function saveCamSettings(){
+  const id = CAM_SET_ID;
+  if(!id) return;
+  const patch = {};
+  $$("#cam-set-body input[data-k]").forEach(inp => {
+    const v = inp.value.trim();
+    patch[inp.dataset.k] = v === "" ? null : v;
+  });
+  try{
+    await putJson(`/api/camera/${encodeURIComponent(id)}/settings`, patch);
+    toast(`${id} の設定を保存しました`);
+    await loadCamSettings(id);
+  }catch(e){ toast(e.message, true); }
+}
+async function clearCamSettings(){
+  const id = CAM_SET_ID;
+  if(!id) return;
+  const patch = {};
+  Object.keys(CAM_SETTING_LABELS).forEach(k => patch[k] = null);
+  try{
+    await putJson(`/api/camera/${encodeURIComponent(id)}/settings`, patch);
+    toast(`${id} を共有設定に戻しました`);
+    await loadCamSettings(id);
+  }catch(e){ toast(e.message, true); }
+}
 
 /* ---------------- chart ---------------- */
 const MODE_TINT = {normal:null, eco:"rgba(91,143,214,.10)", critical:"rgba(196,87,79,.14)"};
@@ -884,7 +1043,7 @@ async function loadEvents(){
 function renderEvents(){
   const view = $("#ev-view").value;
   if(view === "camera") return renderEventsByCamera();
-  if(view === "timeline") return renderEventsTimeline();
+  if(view === "timeline") return renderEventsRecall();
   return renderEventsGrid();
 }
 function renderEventsGrid(){
@@ -909,40 +1068,90 @@ function renderEventsByCamera(){
          <div class="meta"><span class="faint">${esc(i.file)}</span></div></div>`).join("")}</div>
     </div>`).join("") || `<div class="card"><div class="body faint">この日のイベントはありません。</div></div>`;
 }
-function renderEventsTimeline(){
-  // クリックしないと中身が見えない小さなドットではなく、画像も URL も
-  // その場でそのまま見える形で、時刻順に1本のリストへ並べる。
+// Windows の Recall のように、縦にカメラごと (+ URL アクセス) の列を並べ、
+// 選んだ項目を右側に大きくプレビューする表示。時系列の1本のリストだと
+// 件数が多い日は縦に長くなりすぎて見づらかったため、列を分けて横に並べる。
+let REC_COLS = [], REC_SEL = null;
+function renderEventsRecall(){
   const day = EV_DAY || new Date().toISOString().slice(0,10);
-  const merged = [];
-  for(const i of EV_ITEMS) merged.push({t: i.at, type: "img", item: i});
-  for(const r of EV_NET){
+  const camIds = [...new Set(EV_ITEMS.map(i => i.camera))].sort();
+  const cols = camIds.map(cid => ({
+    key: "cam__" + cid, title: camName(cid),
+    items: EV_ITEMS.filter(i => i.camera === cid).sort((a, b) => a.at - b.at)
+      .map(i => ({type: "img", t: i.at, item: i})),
+  }));
+  const netItems = EV_NET.map(r => {
     const hms = (r.time || "").slice(11, 19);
-    if(!hms) continue;
+    if(!hms) return null;
     const t = new Date(`${day}T${hms}`).getTime() / 1000;
-    if(!isFinite(t)) continue;
-    merged.push({t, type: "net", rec: r, hms});
-  }
-  merged.sort((a, b) => a.t - b.t);
-  if(!merged.length){
+    if(!isFinite(t)) return null;
+    return {type: "net", t, hms, rec: r};
+  }).filter(Boolean).sort((a, b) => a.t - b.t);
+  cols.push({key: "net", title: "URL アクセス", items: netItems});
+  REC_COLS = cols;
+
+  if(!EV_ITEMS.length && !EV_NET.length){
     $("#events").innerHTML = `<div class="card"><div class="body faint">この日の記録はありません。</div></div>`;
     return;
   }
-  $("#events").innerHTML = `<div class="card"><div class="tl-list">` + merged.map(e => {
-    if(e.type === "img"){
-      const i = e.item;
-      return `<div class="tl-item">
-        <span class="tl-time">${new Date(e.t*1000).toLocaleTimeString("ja-JP")}</span>
-        <img src="${i.url}" loading="lazy" onclick="$('#ov-img').src='${i.url}';$('#overlay').classList.add('on')">
-        <span class="faint">${esc(camName(i.camera))}</span>
-      </div>`;
-    }
-    const r = e.rec;
-    return `<div class="tl-item tl-item-net">
-      <span class="tl-time">${e.hms}</span>
-      <span class="tl-net-badge${r.blocked ? " bad" : ""}">${esc(r.service)}${r.blocked ? " ⨯" : ""}</span>
-      <span class="faint" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(r.domain||"")}</span>
+
+  const colsHtml = cols.map(c => `
+    <div class="recall-col">
+      <h4>${esc(c.title)} <span class="faint">${c.items.length}</span></h4>
+      <div class="list">${c.items.map((e, idx) => recallRowHtml(c.key, idx, e)).join("")
+        || `<div class="faint" style="padding:8px;font-size:11px">記録なし</div>`}</div>
+    </div>`).join("");
+
+  $("#events").innerHTML = `
+    <div class="recall-wrap">
+      <div class="recall-cols">${colsHtml}</div>
+      <div class="recall-preview" id="recall-preview">
+        <span class="faint">左の一覧から項目を選ぶと、ここに大きく表示されます。</span>
+      </div>
     </div>`;
-  }).join("") + `</div></div>`;
+
+  if(REC_SEL){
+    const col = REC_COLS.find(c => c.key === REC_SEL.key);
+    if(col && col.items[REC_SEL.idx]) selectRecallItem(REC_SEL.key, REC_SEL.idx);
+    else REC_SEL = null;
+  }
+}
+function recallRowHtml(key, idx, e){
+  if(e.type === "img"){
+    return `<div class="recall-item" data-key="${esc(key)}" data-idx="${idx}" onclick="selectRecallItem('${esc(key)}',${idx})">
+      <img src="${e.item.url}" loading="lazy">
+      <span class="t">${new Date(e.t*1000).toLocaleTimeString("ja-JP")}</span>
+    </div>`;
+  }
+  const r = e.rec;
+  return `<div class="recall-item" data-key="${esc(key)}" data-idx="${idx}" onclick="selectRecallItem('${esc(key)}',${idx})">
+    <span class="net-line${r.blocked ? " bad" : ""}">${esc(r.service)}${r.blocked ? " ⨯" : ""}</span>
+    <span class="t">${e.hms}</span>
+  </div>`;
+}
+function selectRecallItem(key, idx){
+  REC_SEL = {key, idx};
+  $$(".recall-item.sel").forEach(el => el.classList.remove("sel"));
+  const row = $(`.recall-item[data-key="${key}"][data-idx="${idx}"]`);
+  if(row) row.classList.add("sel");
+  const col = REC_COLS.find(c => c.key === key);
+  const e = col && col.items[idx];
+  const prev = $("#recall-preview");
+  if(!prev || !e) return;
+  if(e.type === "img"){
+    const i = e.item;
+    prev.innerHTML = `
+      <img src="${i.url}" onclick="$('#ov-img').src='${i.url}';$('#overlay').classList.add('on')">
+      <div style="margin-top:10px;font-size:14px"><b>${esc(camName(i.camera))}</b></div>
+      <div class="faint" style="font-size:12px;margin-top:2px">${new Date(e.t*1000).toLocaleString("ja-JP")}</div>
+      <div class="faint" style="font-size:11px;margin-top:6px;word-break:break-all">${esc(i.file)}</div>`;
+  }else{
+    const r = e.rec;
+    prev.innerHTML = `
+      <div style="font-size:16px"><b>${esc(r.service)}</b>${r.blocked ? ' <span style="color:var(--bad)">(ブロック)</span>' : ""}</div>
+      <div class="faint" style="font-size:12px;margin-top:6px;word-break:break-all">${esc(r.domain || "")}</div>
+      <div class="faint" style="font-size:12px;margin-top:10px">${new Date(e.t*1000).toLocaleString("ja-JP")}</div>`;
+  }
 }
 async function deleteEventsDay(){
   const day = EV_DAY || $("#ev-day").value;
@@ -1215,7 +1424,7 @@ const GROUPS = [
   ["音楽", ["music_enabled","music_autoplay_on_presence","music_volume","music_repeat",
             "music_shuffle","mpg123_buffer_kb","alsa_device"]],
   ["Bluetooth", ["bt_enabled","bt_poll_seconds"]],
-  ["通知 (Discord)", ["discord_webhook","notify_motion","notify_min_interval",
+  ["通知 (Discord)", ["discord_webhook","notify_motion","notify_motion_grouped","notify_min_interval",
                       "notify_summary","notify_summary_after","notify_mode_change",
                       "notify_system_events","notify_motion_title","notify_summary_title",
                       "notify_mode_title"]],
@@ -1241,8 +1450,9 @@ const LABELS = {
   mpg123_buffer_kb:"mpg123 バッファ (KB)", alsa_device:"ALSA デバイス (空欄で既定)",
   bt_enabled:"Bluetooth 連携を有効にする", bt_poll_seconds:"接続確認の間隔 (秒)",
   discord_webhook:"Webhook URL", notify_motion:"動体検知を通知する",
+  notify_motion_grouped:"複数カメラの検知を1通にまとめる (オフ: カメラごとに送る)",
   notify_system_events:"システムイベント (起動・端末など) を通知する",
-  notify_min_interval:"同一カメラの最短通知間隔 (秒)",
+  notify_min_interval:"最短通知間隔 (秒、「まとめる」オンなら全カメラ合算単位)",
   notify_summary:"無検知が続いたら集計を通知する", notify_summary_after:"統計を送るまでの静穏時間 (秒)",
   notify_mode_change:"モード遷移 (通常/エコ/緊急) を通知する",
   notify_motion_title:"動体検知の文面 ({camera} {mode} {temp} {time})",

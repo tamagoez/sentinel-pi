@@ -82,6 +82,9 @@ DEFAULTS: dict[str, Any] = {
     "save_cooldown": 5.0,
     "retention_days": 14,
     "reconnect_seconds": 3,
+    "camera_overrides": {},               # カメラID -> {設定キー: 値, ...}
+                                           # 個別カメラだけ上の共有値を上書きする。
+                                           # キーが無い/空ならそのカメラは共有値を使う。
 
     # --- 音楽 ---
     "music_enabled": True,
@@ -101,7 +104,11 @@ DEFAULTS: dict[str, Any] = {
     # --- 通知 ---
     "discord_webhook": "",
     "notify_motion": True,
-    "notify_min_interval": 60.0,          # 同一カメラの即時通知の最短間隔 (秒)
+    "notify_motion_grouped": False,       # True: 複数カメラの検知を 1 通にまとめる
+                                           # (False: 今までどおりカメラごとに送る)
+    "notify_min_interval": 60.0,          # 即時通知の最短間隔 (秒)。grouped=False
+                                           # では同一カメラ単位、grouped=True では
+                                           # 全カメラ合算のまとめ通知単位で効く。
     "notify_summary": True,               # 無検知が続いたときの集計通知
     "notify_summary_after": 300.0,        # 無検知がこれだけ続いたら統計を送る (秒)
     "notify_mode_change": True,           # モード遷移 (通常/エコ/緊急) の通知
@@ -246,6 +253,15 @@ def _coerce(key: str, value: Any) -> Any:
         value = max(lo, min(hi, value))
         value = int(value) if key in _INT_KEYS else value
     return value
+
+
+def coerce_value(key: str, value: Any) -> Any:
+    """_coerce() の公開ラッパー。カメラごとの上書き設定 (camera_overrides)
+    のように、update() を経由せず個々の値を DEFAULTS と同じ型・範囲に
+    丸めたいモジュールから使う。未知キーや不正値は TypeError/ValueError。"""
+    if key not in DEFAULTS:
+        raise KeyError(key)
+    return _coerce(key, value)
 
 
 def update(patch: dict[str, Any]) -> dict[str, Any]:

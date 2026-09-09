@@ -44,6 +44,11 @@ _window_start: float = 0.0
 _last_motion_any: float = 0.0
 _window_open: bool = False
 
+# notify_motion_grouped=True のときに使う、カメラ横断のまとめ通知の状態。
+# camera_id -> 直近検知時刻。フラッシュ (送信) のたびにクリアする。
+_pending_cameras: dict[str, float] = {}
+_last_group_sent: float = 0.0
+
 STATE = {"sent": 0, "failed": 0, "queued": 0, "last_error": "", "last_sent_at": 0.0}
 
 
@@ -169,7 +174,7 @@ def system_event(title: str, description: str = "", *, level: str = "info",
 
 def on_motion(camera_id: str, capture_path: str = "") -> None:
     """カメラモジュールから呼ばれる (別スレッド)。"""
-    global _window_start, _last_motion_any, _window_open
+    global _window_start, _last_motion_any, _window_open, _last_group_sent
     now = time.time()
     _last_motion_any = now
     _window_counts[camera_id] += 1
@@ -179,6 +184,33 @@ def on_motion(camera_id: str, capture_path: str = "") -> None:
 
     if not config.get("notify_motion"):
         return
+
+    if config.get("notify_motion_grouped"):
+        # カメラが切り替わるたびに 1 通ずつ飛ぶと、複数台がほぼ同時に検知
+        # した場合に通知が連続で溢れる。ここでは検知したカメラを一旦
+        # 貯めておき、最短間隔 (notify_min_interval、この場合は「全カメラ
+        # 合算のまとめ通知」単位で効く) が空いたときにまとめて 1 通にする。
+        _pending_cameras[camera_id] = now
+        if now - _last_group_sent < float(config.get("notify_min_interval")):
+            return
+        _last_group_sent = now
+        cams = sorted(_pending_cameras.keys())
+        _pending_cameras.clear()
+        cam_list = "、".join(cams)
+        fields = [
+            {"name": "検知カメラ", "value": cam_list, "inline": False},
+            {"name": "時刻", "value": datetime.now().strftime("%H:%M:%S"), "inline": True},
+            {"name": "モード", "value": MODE.mode, "inline": True},
+            {"name": "CPU温度", "value": f"{MODE.temperature:.1f}℃", "inline": True},
+        ]
+        title = _fmt("notify_motion_title", "動体を検知しました", {
+            "camera": cam_list, "mode": MODE.mode, "temp": f"{MODE.temperature:.1f}",
+            "time": datetime.now().strftime("%H:%M:%S"),
+        })
+        payload = _embed(title, color=0x5B8DEF, fields=fields)
+        _enqueue_threadsafe(payload)
+        return
+
     if now - _last_sent.get(camera_id, 0.0) < float(config.get("notify_min_interval")):
         return
     _last_sent[camera_id] = now

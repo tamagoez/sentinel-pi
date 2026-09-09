@@ -31,6 +31,45 @@ log = logging.getLogger("sentinel.camera")
 WORKERS: dict[str, "CameraWorker"] = {}
 _DISCOVER_INTERVAL = 15.0
 
+# 個別カメラごとに上書きできる設定キー (config.DEFAULTS のサブセット)。
+# camera_overrides[cid] にこの中のキーがあれば、共有設定 (config.get(key))
+# より優先する。設定 UI 側もこのキー集合をそのまま使う。
+CAMERA_OVERRIDE_KEYS = (
+    "cam_width", "cam_height", "cam_eco_width", "cam_eco_height",
+    "jpeg_quality", "live_fps", "normal_fps", "eco_fps",
+    "motion_threshold", "motion_area_ratio", "motion_interval",
+    "save_cooldown", "reconnect_seconds",
+)
+
+
+def effective_settings(cid: str) -> dict:
+    """カメラ cid に実際に適用される設定 (共有値 + 個別上書き)。"""
+    base = {k: config.get(k) for k in CAMERA_OVERRIDE_KEYS}
+    overrides = (config.get("camera_overrides") or {}).get(cid) or {}
+    base.update({k: v for k, v in overrides.items() if k in CAMERA_OVERRIDE_KEYS})
+    return base
+
+
+def set_overrides(cid: str, patch: dict) -> dict:
+    """cid の個別設定を部分更新する。値が None のキーは削除 (共有値に戻す)。
+    patch が空、または全キー削除の結果 cid の上書きが空になれば
+    camera_overrides から cid ごと取り除く。"""
+    all_overrides = dict(config.get("camera_overrides") or {})
+    cur = dict(all_overrides.get(cid) or {})
+    for k, v in patch.items():
+        if k not in CAMERA_OVERRIDE_KEYS:
+            continue
+        if v is None:
+            cur.pop(k, None)
+            continue
+        cur[k] = config.coerce_value(k, v)
+    if cur:
+        all_overrides[cid] = cur
+    else:
+        all_overrides.pop(cid, None)
+    config.update({"camera_overrides": all_overrides})
+    return cur
+
 # 動体検知イベントを通知モジュールへ渡すためのフック (notify 側が差し込む)
 ON_MOTION = None   # Callable[[str, str], None] -> (camera_id, capture_path)
 
@@ -347,11 +386,7 @@ class CameraWorker:
     def start(self) -> None:
         self.stop()
         self.stop_event = Event()
-        snapshot = {k: config.get(k) for k in (
-            "cam_width", "cam_height", "cam_eco_width", "cam_eco_height",
-            "jpeg_quality", "live_fps", "normal_fps", "eco_fps",
-            "motion_threshold", "motion_area_ratio", "motion_interval",
-            "save_cooldown", "reconnect_seconds")}
+        snapshot = effective_settings(self.id)
         (rt(self.id) / "mode").write_text(MODE.mode)
         self.proc = Process(target=_worker, args=(self.id, self.device, self.stop_event, snapshot),
                             daemon=True, name=f"cam-{self.id}")

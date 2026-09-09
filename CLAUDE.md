@@ -416,18 +416,33 @@ scripts/sentinel-set-governor.sh
                     CPU ガバナを切り替える。root しか書き込めないため
                     sudoers で個別に許可し、core/state.py が sudo 経由で
                     呼ぶ (直接書き込みでは権限エラーで無視される)
+scripts/sentinel-set-hotspot-ssid.sh
+                    WiFi ホットスポットの SSID を実行中に変更する。
+                    /etc/hostapd/hostapd.conf は root しか書き込めないため
+                    sudoers で個別に許可し、modules/hotspot.py が sudo 経由
+                    で呼ぶ (sentinel-set-governor.sh と同じパターン)
 
 core/config.py      設定の唯一の保管場所。型と範囲を強制する
 core/state.py       モード状態機械。「今どのモードか」の唯一の決定者
 core/supervisor.py  タスク監督。例外で落ちても指数バックオフで再起動する
 
 modules/camera.py       カメラ (別プロセス)。動体検知 -> MODE.report_motion()
+                         個別カメラの上書き設定は config の camera_overrides
+                         (カメラID -> {設定キー: 値}) で持つ。camera.py の
+                         effective_settings()/set_overrides() が唯一の窓口
 modules/music.py        mpg123 制御、位置復帰、yt-dlp キュー
 modules/thermal.py      温度と CPU -> MODE.report_temperature()
-modules/bluetooth.py    A2DP 接続検知 -> 音楽の退避と復帰
+modules/bluetooth.py    A2DP 接続検知 -> 音楽の退避と復帰。この Pi 自身の
+                         表示名 (set_local_name、bluetoothctl system-alias)
+                         と相手端末のエイリアス (set_alias、D-Bus 直叩き) は
+                         別物なので混同しないこと
+modules/hotspot.py       WiFi ホットスポット SSID の表示・変更
+                         (sentinel-set-hotspot-ssid.sh を sudo 経由で呼ぶ)
 modules/terminal.py     pty over WebSocket
 modules/netlog.py       AdGuard querylog -> サービス名変換
-modules/notify.py       Discord (レート制限対応キュー)
+modules/notify.py       Discord (レート制限対応キュー)。notify_motion_grouped
+                         で「カメラごとに即時送信」と「複数カメラの検知を
+                         1通にまとめる」を切り替えられる
 modules/maintenance.py  4 時の定時処理と再起動
 
 web/routes.py           全 HTTP / WebSocket エンドポイント

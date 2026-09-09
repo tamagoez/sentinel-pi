@@ -110,11 +110,16 @@ ok "$SVC_USER added to video/audio/bluetooth/plugdev/systemd-journal"
 # governor at all. sudoers can't restrict a wildcarded argument's
 # *value*, so the script itself validates it against the kernel's own
 # governor names before writing anything (see the script for detail).
+#
+# sentinel-set-hotspot-ssid.sh: /etc/hostapd/hostapd.conf is root-writable
+# only. modules/hotspot.py calls it so the WiFi hotspot's SSID can be
+# changed at runtime from the Settings page, not just once via dietpi.txt
+# at image-prep time. Same argument-validation-is-the-boundary pattern.
 cat > /etc/sudoers.d/sentinel <<EOF
-$SVC_USER ALL=(root) NOPASSWD: /sbin/reboot, /sbin/shutdown, /usr/bin/systemctl reboot, $APP_DIR/scripts/sentinel-set-governor.sh *
+$SVC_USER ALL=(root) NOPASSWD: /sbin/reboot, /sbin/shutdown, /usr/bin/systemctl reboot, $APP_DIR/scripts/sentinel-set-governor.sh *, $APP_DIR/scripts/sentinel-set-hotspot-ssid.sh *
 EOF
 chmod 440 /etc/sudoers.d/sentinel
-visudo -cf /etc/sudoers.d/sentinel >/dev/null && ok "sudoers: reboot + CPU governor switch only"
+visudo -cf /etc/sudoers.d/sentinel >/dev/null && ok "sudoers: reboot + CPU governor switch + hotspot SSID"
 
 # ---------------------------------------------------------------- 3. Deploy
 c "STEP 3/9  Deploy application files"

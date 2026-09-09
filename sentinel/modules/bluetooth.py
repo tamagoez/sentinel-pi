@@ -81,6 +81,31 @@ def set_pairable(on: bool) -> None:
         _run(cmd)
 
 
+def local_name() -> str:
+    """この Pi 自身 (ローカルアダプタ) の表示名。`bluetoothctl show` の
+    "Alias:" 行 (未設定なら Name と同じ値になる)。"""
+    out = _run(["bluetoothctl", "show"])
+    m = re.search(r"^\s*Alias:\s*(.+)$", out, re.M)
+    return m.group(1).strip() if m else ""
+
+
+def set_local_name(name: str) -> tuple[bool, str]:
+    """この Pi 自身の表示名を変更する。相手端末から見える名前で、
+    set_alias() が変更する「相手端末側のエイリアス」とは別物。
+    `bluetoothctl system-alias <name>` はローカルアダプタの Alias を
+    BlueZ の永続設定 (/var/lib/bluetooth/<adapter>/settings) へ書き込む
+    ため、reboot 後も残る。"""
+    name = name.strip()
+    if not name:
+        return False, "名前を入力してください"
+    if len(name) > 248 or "\n" in name:
+        return False, "名前が不正です"
+    r = _run(["bluetoothctl", "system-alias", name])
+    if "not available" in r.lower() or "no default controller" in r.lower():
+        return False, "コントローラが見つかりません"
+    return True, "変更しました"
+
+
 def paired_devices() -> list[dict]:
     """ペアリング済み端末の一覧 (接続中かどうかは問わない)。エイリアス /
     音量の設定 UI に、今つながっていない端末も出せるようにするため。"""
