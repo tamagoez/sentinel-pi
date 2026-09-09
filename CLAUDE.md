@@ -412,14 +412,54 @@ UI からは分かりません。SSP を要求する iOS は PIN 認証 (sspmode
 `default-agent` を自分で打った場合はこのリグレッションの影響を受けません。
 そのため `scripts/sentinel-bt-agent.sh` (`sentinel-bt-agent.service` から
 起動) は bt-agent を使わず、`bluetoothctl` の標準入力へ同じコマンド列を
-流し込んで対話セッションを模倣します。`sleep infinity` で標準入力の
-パイプを開いたままにし続けることで、`bluetoothctl` に EOF を渡さず
-エージェント登録を維持し続けます (EOF を渡すとこのファイルの他の一発
-呼び出しの `bluetoothctl <cmd>` パターンと同じく、プロセス終了と同時に
-エージェント登録も消えます — 以前の一発起動の bt-agent 版が同じ理由で
-壊れていました)。**この一連のパターンを bt-agent や sspmode=0 の PIN
-認証方式に戻さないでください** — 同じ "Pairing Unsuccessful" に戻ります
-(bluez-tools パッケージ自体も `bootstrap.sh` から外しています)。
+流し込んで対話セッションを模倣します。**この一連のパターンを bt-agent や
+sspmode=0 の PIN 認証方式に戻さないでください** — 同じ "Pairing
+Unsuccessful" に戻ります (bluez-tools パッケージ自体も `bootstrap.sh` から
+外しています)。
+
+これだけでは不十分でした。実機では「ペアリングはできる (iPhone の設定画面に
+一瞬 Connected と出る) が、直後に接続が切れる」という別の症状が残りました。
+原因は Authorize service (プロファイル接続のたびに毎回聞かれる、ペアリング
+確認とは別の許可要求) です。エージェントの capability (NoInputNoOutput) は
+**ペアリング確認にしか効かず**、Authorize service には別途エージェントの
+応答が要ります。`bluetoothctl` 内蔵のエージェントはこれを標準出力への
+プロンプト + 標準入力からの読み取りで処理しますが、`sleep infinity` で
+入力パイプを埋めているだけの旧版ではこの応答が一切返らず、A2DP などの
+プロファイル接続要求がタイムアウトしてすぐ切断されていました。BlueZ は
+**Trusted な端末にはこの Authorize service 自体を聞きません**。そのため
+`scripts/sentinel-bt-agent.sh` は `bluetoothctl` を bash の `coproc` で
+起動し (書き込み用の標準入力と読み取り用の標準出力を同じプロセスから
+両方掴むため)、標準出力に流れてくるイベント行 (`Device <MAC> ...
+Connected: yes` など) を監視して、端末が現れた瞬間に `trust <MAC>` を
+打ち返します。起動時には既存のペアリング済み端末も一括で trust し直し、
+この修正より前にペアリングして未信頼のまま固まっていた端末も次回起動で
+救済します。**この coproc + 自動 trust の仕組みを外して `sleep infinity`
+だけのパイプに戻さないでください** — 同じ「一瞬繋がってすぐ切れる」に
+戻ります。
+
+### 17. eco モードでのカメラ開き直しは `cam_opened_at` を巻き戻さない
+
+eco/critical で誰も見ておらず、かつフレーム間隔が長いとき、`camera.py` の
+`_worker()` は USB 帯域を空けるため毎サイクル `cap.release()` してから
+次サイクルで開き直します (CLAUDE.md「USB 2.0 ハブを Ethernet と共有」)。
+`motion_warmup_seconds` (#8 dietpi-setup PR で追加、オートフォーカス対策)
+はカメラを開いた時刻 `cam_opened_at` からの経過秒数で判定しますが、この
+意図した毎サイクルの開き直しのたびに `cam_opened_at` を現在時刻へ更新して
+しまうと、eco モードに入った瞬間から二度と `warm` が false に戻らず、
+**eco モードの動体検知が事実上永久に無効化**されます。診断ログ
+(`motion_debug_log`) で実際に踏んだ不具合で、normal モードでは数秒で
+`warm: false` になるのに、eco に切り替わった直後から `warm: true` が
+何分経っても続いていました。
+
+修正は、この「同じ解像度への意図した開き直し」だけ `cam_opened_at` の
+更新をスキップする `skip_warmup_reset` フラグです。本当にカメラが壊れて
+再接続した場合や、モード遷移で解像度が実際に変わった場合は今までどおり
+`cam_opened_at` を更新し、正しくウォームアップが働きます。**この
+`skip_warmup_reset` の判定を外して、毎回無条件に `cam_opened_at` を
+更新するコードに戻さないでください** — 同じ「eco で動体検知が働かない」
+不具合に戻ります。診断ログには `since_open` (直近オープンからの経過秒数)
+と `viewers`/`reconnects` を追加してあります。次に同じ報告が来たら、まず
+これで「毎サイクル 0 付近に戻り続けていないか」を確認してください。
 
 ## モジュール構成
 
