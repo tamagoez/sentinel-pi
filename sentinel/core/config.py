@@ -96,6 +96,7 @@ DEFAULTS: dict[str, Any] = {
     # --- Bluetooth ---
     "bt_enabled": True,
     "bt_poll_seconds": 3.0,
+    "bt_device_volumes": {},              # MAC アドレス -> 音量(%) (接続時に自動適用)
 
     # --- 通知 ---
     "discord_webhook": "",
@@ -187,6 +188,10 @@ def all_values(hide_secrets: bool = True) -> dict[str, Any]:
 _INT_KEYS = {k for k, v in DEFAULTS.items() if isinstance(v, int) and not isinstance(v, bool)}
 _FLOAT_KEYS = {k for k, v in DEFAULTS.items() if isinstance(v, float)}
 _BOOL_KEYS = {k for k, v in DEFAULTS.items() if isinstance(v, bool)}
+# dict 型の既定値を持つキー (例: bt_device_volumes) は、他の型のように
+# 文字列化・数値化しては壊れるので、そのまま (dict であることだけ検証して)
+# 通す。設定 UI の一般入力欄からは編集させず、専用の API からのみ書く前提。
+_DICT_KEYS = {k for k, v in DEFAULTS.items() if isinstance(v, dict)}
 
 # 安全域。範囲外の値でハードウェアを壊さないための制限。
 _RANGES: dict[str, tuple[float, float]] = {
@@ -222,6 +227,10 @@ _RANGES: dict[str, tuple[float, float]] = {
 
 
 def _coerce(key: str, value: Any) -> Any:
+    if key in _DICT_KEYS:
+        if not isinstance(value, dict):
+            raise TypeError(f"{key} には object (dict) が必要です")
+        return value
     if key in _BOOL_KEYS:
         if isinstance(value, str):
             return value.strip().lower() in ("1", "true", "on", "yes")

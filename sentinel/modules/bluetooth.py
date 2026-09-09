@@ -81,6 +81,81 @@ def set_pairable(on: bool) -> None:
         _run(cmd)
 
 
+def paired_devices() -> list[dict]:
+    """ペアリング済み端末の一覧 (接続中かどうかは問わない)。エイリアス /
+    音量の設定 UI に、今つながっていない端末も出せるようにするため。"""
+    out = _run(["bluetoothctl", "devices"])
+    devices = []
+    for line in out.splitlines():
+        m = re.match(r"Device\s+([0-9A-F:]{17})\s+(.*)", line.strip(), re.I)
+        if m:
+            devices.append({"addr": m.group(1), "name": m.group(2).strip()})
+    return devices
+
+
+def _card() -> str | None:
+    out = _run(["aplay", "-l"])
+    m = re.search(r"^card\s+(\d+)", out, re.M)
+    return m.group(1) if m else None
+
+
+def _apply_volume(addr: str) -> None:
+    """その端末向けに保存済みの音量があれば ALSA の再生音量へ反映する。
+    mpg123 の音量 (music_volume, ソフトウェア側のゲイン) とは別物 -
+    Bluetooth から流れてくる音声は mpg123 を経由せず bluealsa-aplay が
+    直接 ALSA へ書き込むため、ハードウェア側のミキサーを直接操作する
+    必要がある。numid=1 は bcm2835 サウンドカードの "PCM Playback Volume"
+    (numid=3 の出力ルート選択とは別のコントロール、sentinel-guardian.sh の
+    check_audio() と対になる)。"""
+    vols = config.get("bt_device_volumes") or {}
+    pct = vols.get(addr)
+    if pct is None:
+        return
+    card = _card()
+    if card is None:
+        return
+    _run(["amixer", "-c", card, "cset", "numid=1", f"{int(pct)}%"])
+
+
+def set_device_volume(addr: str, pct: int) -> None:
+    pct = max(0, min(100, int(pct)))
+    vols = dict(config.get("bt_device_volumes") or {})
+    vols[addr] = pct
+    config.update({"bt_device_volumes": vols})
+    if STATE.get("connected") and STATE.get("device_addr") == addr:
+        _apply_volume(addr)
+
+
+def set_alias(addr: str, alias: str) -> tuple[bool, str]:
+    """接続済み/ペアリング済み端末の表示名 (org.bluez.Device1.Alias) を
+    変更する。bluetoothctl の対話コマンドにはこれを変更する手段が無く
+    (device.alias はローカル側=この Pi 自身の名前を変えるだけ)、D-Bus の
+    プロパティを直接書き換える必要がある。dbus-send は BlueZ 自体が
+    D-Bus 無しには動作しない以上 bluez と一緒に必ず入っている
+    (dbus-python のような新規依存の追加ではない)。"""
+    alias = alias.strip()
+    if not alias:
+        return False, "名前を入力してください"
+    if not re.fullmatch(r"[0-9A-Fa-f:]{17}", addr):
+        return False, "MAC アドレスが不正です"
+    path = f"/org/bluez/hci0/dev_{addr.upper().replace(':', '_')}"
+    try:
+        r = subprocess.run(
+            ["dbus-send", "--system", "--print-reply", "--dest=org.bluez", path,
+             "org.freedesktop.DBus.Properties.Set",
+             "string:org.bluez.Device1", "string:Alias",
+             f"variant:string:{alias}"],
+            capture_output=True, text=True, timeout=5)
+    except Exception as exc:
+        return False, str(exc)
+    if r.returncode != 0:
+        tail = (r.stderr or r.stdout or "").strip().splitlines()
+        return False, tail[-1] if tail else "変更に失敗しました"
+    if STATE.get("device_addr") == addr:
+        STATE["device_name"] = alias
+    return True, "変更しました"
+
+
 async def loop() -> None:
     if shutil.which("bluetoothctl") is None:
         STATE["error"] = "bluetoothctl が見つかりません"
@@ -105,6 +180,7 @@ async def loop() -> None:
                          since=asyncio.get_event_loop().time(), error="")
             log.info("Bluetooth 接続: %s (%s) — BGM を退避します", name, addr)
             await asyncio.to_thread(music.suspend_for_bluetooth)
+            await asyncio.to_thread(_apply_volume, addr)
         elif not connected and STATE["connected"]:
             log.info("Bluetooth 切断: %s — BGM を復帰させます", STATE["device_name"])
             STATE.update(connected=False, device_addr="", device_name="", since=0.0)

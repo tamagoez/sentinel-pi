@@ -20,12 +20,14 @@ import json
 import logging
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from collections import Counter
 from datetime import datetime
 
 from ..core import config
 from ..core.state import CRITICAL, ECO, MODE, NORMAL
+from . import netlog
 
 log = logging.getLogger("sentinel.notify")
 
@@ -55,8 +57,15 @@ def _post(payload: dict) -> float:
     if not url:
         return 0.0
     data = json.dumps(payload).encode("utf-8")
-    req = urllib.request.Request(url, data=data,
-                                 headers={"Content-Type": "application/json"})
+    # Discord は Cloudflare の裏にあり、User-Agent が無い (= Python の既定
+    # "Python-urllib/3.x") リクエストは Discord 側に届く前に Cloudflare が
+    # 403 で弾く (エラーコード 1010)。これは実際に踏んだ不具合で、AdGuard
+    # のブロックとは無関係に起こる。webhook URL 自体が正しくても、この
+    # ヘッダが無いだけで毎回 403 になる。
+    req = urllib.request.Request(url, data=data, headers={
+        "Content-Type": "application/json",
+        "User-Agent": "SentinelPi (https://github.com/tamagoez/sentinel-pi, 1.0)",
+    })
     try:
         with urllib.request.urlopen(req, timeout=15) as resp:
             remaining = resp.headers.get("X-RateLimit-Remaining")
@@ -85,6 +94,12 @@ def _post(payload: dict) -> float:
             STATE["last_error"] = "Webhook が存在しません (404)。設定を確認してください。"
             log.error(STATE["last_error"])
             return 60.0
+        if exc.code == 403:
+            STATE["last_error"] = ("HTTP 403 (Discord/Cloudflare 側に拒否されました)。"
+                                   "Webhook URL が正しいか、AdGuard Home がブロックして"
+                                   "いないか確認してください。")
+            log.error(STATE["last_error"])
+            return 30.0
         STATE["last_error"] = f"HTTP {exc.code}"
         return 2.0
     except Exception as exc:
@@ -210,11 +225,51 @@ def on_mode_change(new: str, old: str) -> None:
     ))
 
 
-def send_test() -> tuple[bool, str]:
-    """設定タブの「テスト送信」用。キューを経由せず即座に 1 通送り、結果を
-    そのまま返す - Webhook の動作が Web UI から目に見えるようにする。"""
-    if not str(config.get("discord_webhook") or "").strip():
+def _webhook_host() -> str:
+    url = str(config.get("discord_webhook") or "").strip()
+    try:
+        return urllib.parse.urlparse(url).hostname or ""
+    except Exception:
+        return ""
+
+
+def diagnose_webhook() -> dict:
+    """403 などの失敗時に、AdGuard Home が Webhook の宛先ドメインを
+    ブロックしていないか実際に確認する。AdGuard の /control/filtering/
+    check_host は「そのドメインへの問い合わせが今どう判定されるか」を
+    そのまま返すため、推測ではなく実際の状態を見て切り分けられる。"""
+    host = _webhook_host()
+    out = {"host": host, "adguard_checked": False, "adguard_blocked": False, "adguard_rule": ""}
+    if not host:
+        return out
+    info = netlog.check_host_blocked(host)
+    if info is None:
+        return out
+    reason = str(info.get("reason") or "")
+    out["adguard_checked"] = True
+    out["adguard_blocked"] = reason.startswith("Filtered")
+    out["adguard_rule"] = str(info.get("rule") or "")
+    return out
+
+
+def unblock_webhook_host() -> tuple[bool, str]:
+    """診断で見つかった、Webhook 宛先ドメインをブロックしている AdGuard
+    のルールだけを、例外ルール (@@||host^) の追加で打ち消す。他のドメイン
+    のブロックには一切触れない - 403 の原因だけを狙って取り除く。"""
+    host = _webhook_host()
+    if not host:
         return False, "Webhook URL が設定されていません"
+    if netlog.allow_host(host):
+        return True, f"AdGuard Home で {host} を許可しました。もう一度テスト送信してください。"
+    return False, "AdGuard Home への接続に失敗しました。URL/認証情報を確認してください。"
+
+
+def send_test() -> tuple[bool, str, dict]:
+    """設定タブの「テスト送信」用。キューを経由せず即座に 1 通送り、結果を
+    そのまま返す - Webhook の動作が Web UI から目に見えるようにする。
+    失敗時は AdGuard によるブロックかどうかも合わせて調べて返す。"""
+    if not str(config.get("discord_webhook") or "").strip():
+        return False, "Webhook URL が設定されていません", {}
     payload = _embed(
         "テスト通知です", "Sentinel の設定タブから送信しました。",
         color=0x5B8DEF,
@@ -223,8 +278,13 @@ def send_test() -> tuple[bool, str]:
     )
     wait = _post(payload)
     if STATE["last_error"]:
-        return False, STATE["last_error"]
-    return True, "送信しました"
+        diag = diagnose_webhook()
+        message = STATE["last_error"]
+        if diag["adguard_blocked"]:
+            message += (f" — AdGuard Home が {diag['host']} をブロックしています"
+                       f" (ルール: {diag['adguard_rule']})。下のボタンで解除できます。")
+        return False, message, diag
+    return True, "送信しました", {}
 
 
 # ---------------------------------------------------------------- ループ

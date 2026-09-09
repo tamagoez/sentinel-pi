@@ -104,17 +104,13 @@ td.num{text-align:right;font-variant-numeric:tabular-nums}
 .ev-cam-group{margin-bottom:18px}
 .ev-cam-group h4{font-size:12px;color:var(--dim);margin:0 0 8px;font-weight:600}
 
-.tl{position:relative}
-.tl-row{position:relative;height:34px;margin-bottom:4px;background:var(--bg-deep);border-radius:5px;overflow:hidden}
-.tl-row .tl-label{position:absolute;left:6px;top:0;bottom:0;display:flex;align-items:center;font-size:11px;color:var(--dim);z-index:2;pointer-events:none;text-shadow:0 0 4px var(--bg-deep)}
-.tl-row .tl-dot{position:absolute;top:5px;width:6px;height:24px;border-radius:3px;background:var(--acc);cursor:pointer;transform:translateX(-3px)}
-.tl-row.tl-net{height:20px}
-.tl-row.tl-net .tl-dot{top:3px;width:3px;height:14px;border-radius:2px;background:var(--dim2,#8892a6)}
-.tl-row.tl-net .tl-dot.bad{background:var(--bad)}
-.tl-axis{position:relative;height:16px;font-size:10px;color:var(--dim)}
-.tl-axis span{position:absolute;top:0;transform:translateX(-50%)}
-.tl-wrap{overflow-x:auto}
-.tl-inner{min-width:900px}
+.tl-list{display:flex;flex-direction:column;gap:1px}
+.tl-item{display:flex;align-items:center;gap:10px;padding:5px 8px;background:var(--panel);border-bottom:1px solid var(--row-line)}
+.tl-item:hover{background:var(--hover)}
+.tl-time{flex:none;width:64px;font-size:11px;color:var(--faint);font-variant-numeric:tabular-nums}
+.tl-item img{flex:none;width:64px;height:48px;object-fit:cover;background:var(--bg-deep);cursor:pointer;border-radius:3px}
+.tl-item-net .tl-net-badge{flex:none;font-size:11px;padding:2px 7px;border-radius:9px;background:var(--bg-deep);color:var(--dim)}
+.tl-item-net .tl-net-badge.bad{color:var(--bad)}
 
 .row{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
 .field{margin-bottom:9px}
@@ -142,6 +138,11 @@ pre.log{background:var(--bg-deep);border:1px solid var(--line);padding:10px;font
 #login{position:fixed;inset:0;background:var(--bg);display:none;align-items:center;justify-content:center;z-index:60}
 #login.on{display:flex}
 #login .box{width:300px;background:var(--panel);border:1px solid var(--line);padding:20px}
+#fm-editor{position:fixed;inset:0;background:var(--overlay);display:none;align-items:center;justify-content:center;z-index:55;padding:20px}
+#fm-editor.on{display:flex}
+.fm-editor-box{width:min(900px,100%);height:min(640px,90vh);background:var(--panel);border:1px solid var(--line);padding:12px;display:flex;flex-direction:column}
+#fm-editor-text{flex:1;width:100%;resize:none;background:var(--bg-deep);border:1px solid var(--line2);color:var(--fg);font:12.5px/1.5 var(--mono);padding:8px}
+#fm-list a,#fm-list button,#fm-list td{-webkit-user-select:none;user-select:none}
 #toast{position:fixed;right:16px;bottom:16px;z-index:70;display:flex;flex-direction:column;gap:6px}
 #toast div{background:var(--panel2);border:1px solid var(--line2);border-left:2px solid var(--acc);padding:7px 12px;font-size:12px;max-width:360px}
 #toast div.bad{border-left-color:var(--bad)}
@@ -225,6 +226,7 @@ try{
         <table><thead><tr><th>タスク</th><th>状態</th><th class="num">再起動</th><th class="num">稼働</th></tr></thead>
         <tbody id="tasks"></tbody></table></div></div>
       <div class="card"><h3>スロットリング</h3><div class="body" id="throttle"></div></div>
+      <div class="card"><h3>Bluetooth</h3><div class="body" id="bt-card"></div></div>
     </div>
   </section>
 
@@ -244,7 +246,7 @@ try{
       <select id="ev-view" style="width:auto" onchange="renderEvents()">
         <option value="grid">グリッド表示</option>
         <option value="camera">カメラ別表示</option>
-        <option value="timeline">タイムライン表示 (URL アクセス重ね)</option>
+        <option value="timeline">時系列一覧 (画像 + URL アクセス)</option>
       </select>
       <button onclick="loadEvents()">更新</button>
       <button onclick="deleteEventsDay()">この日のイベントを消去</button>
@@ -335,20 +337,37 @@ try{
 
   <!-- ================= file manager ================= -->
   <section class="page" id="p-fm">
-    <div class="row" style="margin-bottom:12px">
+    <div class="row" style="margin-bottom:8px">
       <select id="fm-root" style="width:auto" onchange="fmSwitchRoot()"></select>
       <button onclick="loadFiles()">更新</button>
       <button onclick="fmMkdir()">新規フォルダ</button>
+      <button onclick="$('#fm-upload-file').click()">アップロード</button>
+      <input type="file" id="fm-upload-file" style="display:none" onchange="fmUpload(this.files[0])">
       <span class="faint" style="font-size:11px">
         本体の書き込み負荷を抑えるため、フォルダの合計サイズやプレビュー画像の生成は行いません。
       </span>
     </div>
-    <div class="faint" id="fm-path" style="font-size:12px;margin-bottom:8px"></div>
+    <div class="row" style="margin-bottom:8px">
+      <span class="faint" id="fm-path" style="font-size:12px"></span>
+      <input id="fm-path-input" placeholder="パスを直接入力して Enter で移動"
+        style="flex:1;min-width:200px" onkeydown="if(event.key==='Enter') fmGoToInput()">
+    </div>
     <div class="card"><div class="body" style="padding:0">
       <table><thead><tr><th>名前</th><th class="num">サイズ</th><th>更新日時</th><th></th></tr></thead>
       <tbody id="fm-list"></tbody></table>
     </div></div>
   </section>
+
+  <div id="fm-editor">
+    <div class="fm-editor-box">
+      <div class="row" style="margin-bottom:8px">
+        <b id="fm-editor-name" class="faint" style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"></b>
+        <button class="p" onclick="fmSaveEdit()">保存</button>
+        <button onclick="fmCloseEdit()">閉じる</button>
+      </div>
+      <textarea id="fm-editor-text" spellcheck="false"></textarea>
+    </div>
+  </div>
 
   <!-- ================= terminal ================= -->
   <section class="page" id="p-term">
@@ -577,8 +596,82 @@ function render(){
       : `<div><i class="dot ok"></i>異常なし (${esc(th.raw || "0x0")})</div>`;
 
   renderCams();
+  renderBluetooth();
   if(CUR === "music") renderMusic();
   if(CUR === "dash") drawChart();
+}
+
+/* ---------------- bluetooth ---------------- */
+let BT_VOL_ADDR = null;
+function renderBluetooth(){
+  const card = $("#bt-card");
+  if(!card) return;
+  const focused = document.activeElement;
+  if(focused && (focused.id === "bt-alias-input" || focused.id === "bt-vol")) return;
+  const b = DATA.bluetooth || {};
+  let html;
+  if(!b.available){
+    html = `<span class="faint">利用できません${b.error ? ": " + esc(b.error) : ""}</span>`;
+  }else if(b.connected){
+    html = `<div><i class="dot ok"></i>${esc(b.device_name)} <span class="faint">(${esc(b.device_addr)})</span></div>
+      <div class="row" style="margin-top:10px">
+        <input id="bt-alias-input" placeholder="表示名を変更" value="${esc(b.device_name)}" style="flex:1">
+        <button onclick="btSetAlias()">変更</button>
+      </div>
+      <div class="row" style="margin-top:8px">
+        <span class="faint" style="font-size:11px;width:44px">音量</span>
+        <input type="range" min="0" max="100" id="bt-vol" style="flex:1;padding:0" onchange="btSetVolume(this.value)">
+        <span id="bt-vol-v" class="faint" style="width:34px;text-align:right">-</span>
+      </div>
+      <div class="faint" style="font-size:10.5px;margin-top:4px">この端末の音量として保存し、次回接続時にも自動適用します。</div>
+      <button style="margin-top:10px" onclick="btDisconnect()">切断</button>`;
+  }else{
+    html = `<span class="faint">未接続です</span>
+      <div class="row" style="margin-top:8px">
+        <button onclick="btAction('pairable_on')">ペアリングを許可</button>
+        <button onclick="btAction('pairable_off')">ペアリングを禁止</button>
+      </div>`;
+  }
+  card.innerHTML = html;
+  if(b.connected && BT_VOL_ADDR !== b.device_addr){
+    BT_VOL_ADDR = b.device_addr;
+    fetchBtVolume(b.device_addr);
+  }else if(!b.connected){
+    BT_VOL_ADDR = null;
+  }
+}
+async function fetchBtVolume(addr){
+  try{
+    const r = await api("/api/bluetooth/devices");
+    const d = (r.devices || []).find(x => x.addr === addr);
+    const v = (d && d.volume != null) ? d.volume : 100;
+    const el = $("#bt-vol"); if(el) el.value = v;
+    const lv = $("#bt-vol-v"); if(lv) lv.textContent = v + "%";
+  }catch(e){}
+}
+async function btAction(action){
+  try{ await api(`/api/bluetooth/${action}`, {method: "POST"}); }
+  catch(e){ toast(e.message, true); }
+}
+async function btDisconnect(){
+  try{ await api("/api/bluetooth/disconnect", {method: "POST"}); toast("切断しました"); }
+  catch(e){ toast(e.message, true); }
+}
+async function btSetAlias(){
+  const alias = $("#bt-alias-input").value.trim();
+  const addr = (DATA.bluetooth || {}).device_addr;
+  if(!alias || !addr) return;
+  try{
+    const r = await post("/api/bluetooth/alias", {addr, alias});
+    toast(r.message, !r.ok);
+  }catch(e){ toast(e.message, true); }
+}
+async function btSetVolume(v){
+  const addr = (DATA.bluetooth || {}).device_addr;
+  const lv = $("#bt-vol-v"); if(lv) lv.textContent = v + "%";
+  if(!addr) return;
+  try{ await post("/api/bluetooth/volume", {addr, volume: +v}); }
+  catch(e){ toast(e.message, true); }
 }
 
 /* ---------------- cameras ---------------- */
@@ -644,7 +737,7 @@ async function drawChart(){
   const plotW = W - padL - padR, plotY0 = padT, plotY1 = H - padB;
   const t0 = pts[0].t, t1 = pts[pts.length-1].t || t0+1;
   const px = p => padL + (p.t - t0) / Math.max(1, t1 - t0) * plotW;
-  const tempMax = 90, cpuMax = 100;
+  const tempMin = 30, tempMax = 80, cpuMax = 100;
 
   // モードごとの背景帯: 連続する同一モード区間をまとめて塗る
   let segStart = 0;
@@ -668,7 +761,7 @@ async function drawChart(){
   for(let i=0;i<=3;i++){
     const y = plotY0 + i*(plotY1-plotY0)/3;
     x.beginPath(); x.moveTo(padL,y); x.lineTo(W-padR,y); x.stroke();
-    const tempV = Math.round(tempMax * (1 - i/3));
+    const tempV = Math.round(tempMax - (tempMax - tempMin) * i/3);
     const cpuV = Math.round(cpuMax * (1 - i/3));
     x.textAlign = "right"; x.fillStyle = colBad; x.fillText(tempV+"°", padL-4, y);
     x.textAlign = "left"; x.fillStyle = colAcc; x.fillText(cpuV+"%", W-padR+4, y);
@@ -681,16 +774,17 @@ async function drawChart(){
     x.fillText(lbl, padL + plotW*f, plotY1+3);
   });
 
-  const line = (key, max, color) => {
+  const line = (key, min, max, color) => {
     x.strokeStyle = color; x.lineWidth = 1.5; x.beginPath();
     pts.forEach((p,i) => {
-      const y = plotY1 - Math.min(1, p[key]/max) * (plotY1-plotY0);
+      const frac = Math.max(0, Math.min(1, (p[key]-min)/(max-min)));
+      const y = plotY1 - frac * (plotY1-plotY0);
       i ? x.lineTo(px(p), y) : x.moveTo(px(p), y);
     });
     x.stroke();
   };
-  line("temp", tempMax, colBad);
-  line("cpu", cpuMax, colAcc);
+  line("temp", tempMin, tempMax, colBad);
+  line("cpu", 0, cpuMax, colAcc);
 }
 
 /* ---------------- mode ---------------- */
@@ -816,37 +910,39 @@ function renderEventsByCamera(){
     </div>`).join("") || `<div class="card"><div class="body faint">この日のイベントはありません。</div></div>`;
 }
 function renderEventsTimeline(){
+  // クリックしないと中身が見えない小さなドットではなく、画像も URL も
+  // その場でそのまま見える形で、時刻順に1本のリストへ並べる。
   const day = EV_DAY || new Date().toISOString().slice(0,10);
-  const dayStart = new Date(`${day}T00:00:00`).getTime() / 1000;
-  const pct = t => Math.max(0, Math.min(100, (t - dayStart) / 864));
-  const groups = {};
-  for(const i of EV_ITEMS){ (groups[i.camera] = groups[i.camera] || []).push(i); }
-  const ids = Object.keys(groups).sort();
-  let html = `<div class="tl-wrap"><div class="tl-inner tl">`;
-  for(const id of ids){
-    html += `<div class="tl-row"><span class="tl-label">${esc(camName(id))}</span>` +
-      groups[id].map(i => `<div class="tl-dot" style="left:${pct(i.at)}%"
-        title="${esc(camName(id))} ${new Date(i.at*1000).toLocaleTimeString('ja-JP')}"
-        onclick="$('#ov-img').src='${i.url}';$('#overlay').classList.add('on')"></div>`).join("") +
-      `</div>`;
+  const merged = [];
+  for(const i of EV_ITEMS) merged.push({t: i.at, type: "img", item: i});
+  for(const r of EV_NET){
+    const hms = (r.time || "").slice(11, 19);
+    if(!hms) continue;
+    const t = new Date(`${day}T${hms}`).getTime() / 1000;
+    if(!isFinite(t)) continue;
+    merged.push({t, type: "net", rec: r, hms});
   }
-  if(!ids.length) html += `<div class="faint" style="padding:8px 0 4px;font-size:12px">この日のイベントはありません。</div>`;
-  if(EV_NET.length){
-    html += `<div class="tl-row tl-net"><span class="tl-label">URL アクセス</span>` +
-      EV_NET.map(r => {
-        const hms = (r.time || "").slice(11, 19);
-        const t = new Date(`${day}T${hms}`).getTime() / 1000;
-        if(!isFinite(t) || !hms) return "";
-        return `<div class="tl-dot${r.blocked ? " bad" : ""}" style="left:${pct(t)}%"
-          title="${esc(r.service)} ${hms}${r.blocked ? " [遮断]" : ""}"></div>`;
-      }).join("") + `</div>`;
-  } else {
-    html += `<div class="faint" style="padding:4px 0;font-size:11px">この日の URL アクセス記録はありません。</div>`;
+  merged.sort((a, b) => a.t - b.t);
+  if(!merged.length){
+    $("#events").innerHTML = `<div class="card"><div class="body faint">この日の記録はありません。</div></div>`;
+    return;
   }
-  html += `<div class="tl-axis">` +
-    [0,3,6,9,12,15,18,21,24].map(h => `<span style="left:${h/24*100}%">${String(h).padStart(2,"0")}:00</span>`).join("") +
-    `</div></div></div>`;
-  $("#events").innerHTML = html;
+  $("#events").innerHTML = `<div class="card"><div class="tl-list">` + merged.map(e => {
+    if(e.type === "img"){
+      const i = e.item;
+      return `<div class="tl-item">
+        <span class="tl-time">${new Date(e.t*1000).toLocaleTimeString("ja-JP")}</span>
+        <img src="${i.url}" loading="lazy" onclick="$('#ov-img').src='${i.url}';$('#overlay').classList.add('on')">
+        <span class="faint">${esc(camName(i.camera))}</span>
+      </div>`;
+    }
+    const r = e.rec;
+    return `<div class="tl-item tl-item-net">
+      <span class="tl-time">${e.hms}</span>
+      <span class="tl-net-badge${r.blocked ? " bad" : ""}">${esc(r.service)}${r.blocked ? " ⨯" : ""}</span>
+      <span class="faint" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(r.domain||"")}</span>
+    </div>`;
+  }).join("") + `</div></div>`;
 }
 async function deleteEventsDay(){
   const day = EV_DAY || $("#ev-day").value;
@@ -858,28 +954,35 @@ async function deleteEventsDay(){
 }
 
 /* ---------------- file manager (疑似 FTP) ---------------- */
-let FM_ROOT = "", FM_PATH = "";
+let FM_ROOT = "", FM_PATH = "", FM_BASES = {}, FM_EDIT = null;
+const FM_LABELS = {drive: "外部ストレージ", local: "sentinel データ", root: "本体全体"};
+// テキストとして開いて安全な拡張子だけ「編集」ボタンを出す (バイナリを
+// テキストエリアへ丸ごと読み込んで壊すことを避けるため)。それ以外の
+// 拡張子は端末で nano を使って開ける。
+const FM_TEXT_EXT = /\.(txt|md|log|jsonl?|ya?ml|toml|ini|cfg|conf|sh|py|js|html?|css|csv|env|service|timer)$/i;
 function fmtBytes(n){
   if(n == null) return "-";
   const u = ["B","KB","MB","GB","TB"]; let i = 0;
   while(n >= 1024 && i < u.length - 1){ n /= 1024; i++; }
   return `${n.toFixed(i ? 1 : 0)} ${u[i]}`;
 }
+function shQuote(s){ return "'" + String(s).replace(/'/g, "'\\''") + "'"; }
 async function loadFiles(){
   try{
     const r = await api("/api/files/roots");
-    const labels = {drive: "外部ストレージ", local: "sentinel データ"};
     if(!r.roots.length){
       $("#fm-root").innerHTML = "";
       $("#fm-path").textContent = "";
       $("#fm-list").innerHTML = `<tr><td class="faint" colspan="4">利用できるストレージがありません</td></tr>`;
       return;
     }
+    FM_BASES = {};
+    r.roots.forEach(x => FM_BASES[x.key] = x.path);
     const keys = r.roots.map(x => x.key).join(",");
     if($("#fm-root").dataset.sig !== keys){
       $("#fm-root").dataset.sig = keys;
       $("#fm-root").innerHTML = r.roots.map(x =>
-        `<option value="${x.key}">${esc(labels[x.key] || x.key)} (${esc(x.path)})</option>`).join("");
+        `<option value="${x.key}">${esc(FM_LABELS[x.key] || x.key)} (${esc(x.path)})</option>`).join("");
       FM_ROOT = $("#fm-root").value; FM_PATH = "";
     }
     await fmRender();
@@ -892,6 +995,7 @@ async function fmRender(){
   try{
     const r = await api(`/api/files?root=${encodeURIComponent(FM_ROOT)}&path=${encodeURIComponent(FM_PATH)}`);
     FM_PATH = r.path;
+    $("#fm-path-input").value = FM_PATH;
     const parts = FM_PATH ? FM_PATH.split("/") : [];
     let crumb = `<a onclick="fmOpen('')">/</a>`, acc = "";
     for(const part of parts){
@@ -904,17 +1008,35 @@ async function fmRender(){
       const nameCell = e.is_dir
         ? `<a onclick="fmOpen('${esc(full)}')">📁 ${esc(e.name)}</a>`
         : `📄 ${esc(e.name)}`;
-      const actions = e.is_dir
-        ? `<button onclick="fmDelete('${esc(full)}', true)">削除</button>`
-        : `<a href="/api/files/download?root=${encodeURIComponent(FM_ROOT)}&path=${encodeURIComponent(full)}"><button>DL</button></a>
+      let actions;
+      if(e.is_dir){
+        actions = `<button onclick="fmOpenNano('${esc(full)}')" title="端末 (nano) で開く">端末</button>
+           <button onclick="fmDelete('${esc(full)}', true)">削除</button>`;
+      }else{
+        const dl = `<a href="/api/files/download?root=${encodeURIComponent(FM_ROOT)}&path=${encodeURIComponent(full)}"><button>DL</button></a>`;
+        const editBtn = FM_TEXT_EXT.test(e.name)
+          ? `<button onclick="fmEdit('${esc(full)}')">編集</button>` : "";
+        actions = `${dl}${editBtn}
+           <button onclick="fmOpenNano('${esc(full)}')" title="端末 (nano) で開く">端末</button>
            <button onclick="fmDelete('${esc(full)}', false)">削除</button>`;
+      }
       return `<tr><td>${nameCell}</td><td class="num faint">${fmtBytes(e.size)}</td>
         <td class="faint">${new Date(e.mtime*1000).toLocaleString("ja-JP")}</td>
         <td style="text-align:right;white-space:nowrap">${actions}</td></tr>`;
     }).join("") || `<tr><td class="faint" colspan="4">空のフォルダです</td></tr>`;
+    if(r.truncated)
+      // ブラウザ側に数万行の表を一度に描画させると、そこで重くなる/固まる
+      // 原因になっていた。表示件数に上限を設け (サーバー側 /api/files も
+      // 同じ上限で切っている)、代わりにパスを絞り込むよう促す。
+      $("#fm-list").innerHTML += `<tr><td class="faint" colspan="4">
+        ⚠ ${r.total} 件中 ${r.entries.length} 件のみ表示しています。パスを絞り込んでください。</td></tr>`;
   }catch(e){ toast(e.message, true); }
 }
 function fmOpen(path){ FM_PATH = path; fmRender(); }
+function fmGoToInput(){
+  FM_PATH = $("#fm-path-input").value.trim().replace(/^\/+/, "").replace(/\/+$/, "");
+  fmRender();
+}
 async function fmMkdir(){
   const name = prompt("新規フォルダ名を入力してください");
   if(!name) return;
@@ -933,6 +1055,51 @@ async function fmDelete(path, isDir){
              {method: "DELETE"});
     toast("削除しました"); fmRender();
   }catch(e){ toast(e.message, true); }
+}
+async function fmUpload(file){
+  if(!file) return;
+  try{
+    const url = `/api/files/upload?root=${encodeURIComponent(FM_ROOT)}&path=${encodeURIComponent(FM_PATH)}&name=${encodeURIComponent(file.name)}`;
+    await api(url, {method: "PUT", body: file});
+    toast(`アップロードしました: ${file.name}`); fmRender();
+  }catch(e){ toast(e.message, true); }
+  $("#fm-upload-file").value = "";
+}
+async function fmEdit(path){
+  try{
+    const url = `/api/files/download?root=${encodeURIComponent(FM_ROOT)}&path=${encodeURIComponent(path)}`;
+    const r = await fetch(url);
+    if(!r.ok) throw new Error("読み込みに失敗しました");
+    const text = await r.text();
+    FM_EDIT = {root: FM_ROOT, path};
+    $("#fm-editor-name").textContent = path;
+    $("#fm-editor-text").value = text;
+    $("#fm-editor").classList.add("on");
+  }catch(e){ toast(e.message, true); }
+}
+function fmCloseEdit(){ $("#fm-editor").classList.remove("on"); FM_EDIT = null; }
+async function fmSaveEdit(){
+  if(!FM_EDIT) return;
+  try{
+    const url = `/api/files/content?root=${encodeURIComponent(FM_EDIT.root)}&path=${encodeURIComponent(FM_EDIT.path)}`;
+    await api(url, {method: "PUT", body: $("#fm-editor-text").value});
+    toast("保存しました"); fmCloseEdit(); fmRender();
+  }catch(e){ toast(e.message, true); }
+}
+function fmOpenNano(path){
+  const base = (FM_BASES[FM_ROOT] || "").replace(/\/+$/, "");
+  openInTerminal("nano " + shQuote(`${base}/${path}`));
+}
+function openInTerminal(cmd){
+  go("term");
+  const send = () => TWS.send(JSON.stringify({type: "in", data: cmd + "\n"}));
+  if(TWS && TWS.readyState === 1){ send(); return; }
+  termStart();
+  let tries = 0;
+  const wait = setInterval(() => {
+    if(TWS && TWS.readyState === 1){ clearInterval(wait); setTimeout(send, 250); }
+    else if(++tries > 40){ clearInterval(wait); }
+  }, 150);
 }
 
 /* ---------------- network ---------------- */
@@ -1087,7 +1254,7 @@ const LABELS = {
   maintenance_enabled:"定時処理を有効にする", maintenance_hour:"実行時 (時)",
   maintenance_minute:"実行時 (分)", reboot_after_maintenance:"処理後に再起動する",
   timelapse_fps:"タイムラプスの FPS", timelapse_tile_width:"タイル1枚の幅 (px)",
-  ticker_enabled:"アクセスログをテロップにする",
+  ticker_enabled:"動画に時刻とアクセスログを重ねる",
   terminal_enabled:"端末を有効にする", terminal_shell:"シェル", terminal_notify:"セッションを通知する",
   host:"待ち受けアドレス", port:"ポート", password:"Web UI のパスワード (空で無効)",
   session_hours:"ログインの有効時間 (時)",
@@ -1155,9 +1322,19 @@ async function testWebhook(){
   $("#set-msg").textContent = "送信中…";
   try{
     const r = await post("/api/notify/test", {});
-    $("#set-msg").textContent = r.message;
+    let html = esc(r.message);
+    if(!r.ok && r.diagnosis && r.diagnosis.adguard_blocked)
+      html += ` <button onclick="unblockWebhookHost()">AdGuard のブロックを解除</button>`;
+    $("#set-msg").innerHTML = html;
     toast(r.ok ? "テスト通知を送信しました。Discord を確認してください" : `送信失敗: ${r.message}`, !r.ok);
   }catch(e){ $("#set-msg").textContent = ""; toast(e.message, true); }
+}
+async function unblockWebhookHost(){
+  try{
+    const r = await post("/api/notify/unblock-webhook-host", {});
+    toast(r.message, !r.ok);
+    if(r.ok) testWebhook();
+  }catch(e){ toast(e.message, true); }
 }
 
 /* ---------------- logs ---------------- */
