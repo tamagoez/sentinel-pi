@@ -231,6 +231,17 @@ def _worker(cid: str, device: str, stop: "Event", cfg: dict) -> None:
     fps_t0 = time.monotonic()
     applied_res: tuple[int, int] | None = None
     cam_opened_at = 0.0
+    # eco/critical で誰も見ていないとき、このループは毎サイクル cap を
+    # release してから開き直す (下の「USB 2.0 ハブを Ethernet と共有」
+    # 対策のコメント参照)。これは同じ解像度への意図した開き直しであり、
+    # 実機でオートフォーカスの再合焦が起きたとしても、これ自体が原因で
+    # ウォームアップの基準時刻を毎サイクル現在時刻へ巻き戻してしまうと、
+    # motion_warmup_seconds の間ずっと "warm" のまま固定され続け、eco
+    # モードの動体検知が事実上永久に働かなくなる (実際に診断ログで踏んだ
+    # 不具合: eco 突入後は warm が二度と false に戻らなかった)。
+    # この意図した開き直しの直後だけウォームアップ基準時刻を更新しない
+    # ようにするためのフラグ。
+    skip_warmup_reset = False
 
     def target_res(mode: str) -> tuple[int, int]:
         if mode == NORMAL:
@@ -238,7 +249,7 @@ def _worker(cid: str, device: str, stop: "Event", cfg: dict) -> None:
         return int(cfg["cam_eco_width"]), int(cfg["cam_eco_height"])
 
     def open_cam(mode: str) -> bool:
-        nonlocal cap, applied_res, cam_opened_at, prev
+        nonlocal cap, applied_res, prev
         if cap is not None:
             try:
                 cap.release()
@@ -274,7 +285,6 @@ def _worker(cid: str, device: str, stop: "Event", cfg: dict) -> None:
                 return False
             cap = c
             applied_res = (w, h)
-            cam_opened_at = time.monotonic()
             prev = None   # 開き直した直後の基準フレームは古いので作り直す
             return True
         except Exception:
@@ -309,6 +319,9 @@ def _worker(cid: str, device: str, stop: "Event", cfg: dict) -> None:
                 if open_cam(mode):
                     failures = 0
                     reconnects += 1
+                    if not skip_warmup_reset:
+                        cam_opened_at = time.monotonic()
+                    skip_warmup_reset = False
                     emit_status(state="online", reconnects=reconnects, clients=viewers)
                 else:
                     failures += 1
@@ -317,11 +330,13 @@ def _worker(cid: str, device: str, stop: "Event", cfg: dict) -> None:
                     time.sleep(delay)
                     continue
 
-            # モードが変わって解像度が変わるべきなら開き直す
+            # モードが変わって解像度が変わるべきなら開き直す (真の解像度変更
+            # なので、こちらは毎回ウォームアップ基準時刻を更新してよい)
             if applied_res != target_res(mode):
                 open_cam(mode)
                 if cap is None:
                     continue
+                cam_opened_at = time.monotonic()
 
             t0 = time.monotonic()
             ok, frame = cap.read()
@@ -372,12 +387,16 @@ def _worker(cid: str, device: str, stop: "Event", cfg: dict) -> None:
                 prev = small
                 last_motion_check = now
                 if cfg.get("motion_debug_log", True):
+                    # since_open: 直近のカメラオープンからの経過秒数。warm が
+                    # 解消しない不具合 (eco で毎サイクル 0 付近に戻り続ける、
+                    # など) をログだけから追えるようにするために入れている。
                     _log_motion_debug(cid, {
                         "t": datetime.now().strftime("%H:%M:%S"),
-                        "mode": mode, "warm": warm,
+                        "mode": mode, "viewers": viewers, "warm": warm,
+                        "since_open": round(now - cam_opened_at, 2),
                         "ratio": round(ratio, 4) if ratio is not None else None,
                         "lo": lo, "hi": hi, "threshold": int(cfg["motion_threshold"]),
-                        "motion": motion,
+                        "motion": motion, "reconnects": reconnects,
                     })
                 if motion:
                     emit_status(motion=True, last_motion=time.time())
@@ -417,6 +436,11 @@ def _worker(cid: str, device: str, stop: "Event", cfg: dict) -> None:
                     pass
                 cap = None
                 applied_res = None
+                # 意図した開き直し (同じ解像度への再オープン) であり、次に
+                # cap is None から reopen したときにウォームアップ基準時刻を
+                # 巻き戻さない。巻き戻すと eco の動体検知が永久に "warm" の
+                # ままになる (上のコメント参照)。
+                skip_warmup_reset = True
 
             rest = interval - (time.monotonic() - t0)
             if rest > 0:

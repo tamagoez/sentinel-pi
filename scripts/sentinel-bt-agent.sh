@@ -16,19 +16,58 @@
 # "agent NoInputNoOutput" + "default-agent" in an interactive bluetoothctl
 # session has always worked. So instead of the separate bt-agent binary,
 # this script drives bluetoothctl the same way an interactive session
-# would, then keeps its stdin pipe open forever (via `sleep infinity`)
-# so bluetoothctl never sees EOF and never exits - which would tear the
-# agent registration down exactly like the one-shot `bluetoothctl <cmd>`
-# invocations elsewhere in this project already do.
+# would.
+#
+# Fixing the pairing prompt was not enough on its own: phones would still
+# pair (bond) successfully but then show a connection that drops again
+# within a second or two (iOS: briefly shows "Connected" in Settings, then
+# reverts; Windows: fails outright). The agent's capability only covers
+# the *pairing* confirmation - a later per-profile "Authorize service"
+# request (asked again on every connection, e.g. for the A2DP sink) is a
+# separate step that is NOT auto-answered by NoInputNoOutput, and
+# bluetoothctl's own agent prints that prompt to stdout and waits to read
+# an answer from stdin. In a piped, non-interactive session nothing ever
+# answers it, so the service-level connection just times out right after
+# the bond succeeds - exactly the "connects then immediately disconnects"
+# symptom. BlueZ skips this prompt entirely for devices already marked
+# Trusted, so this script drives bluetoothctl via a `coproc` (giving it
+# both a writable stdin and a readable stdout in the same process) and
+# watches its output for "Connected: yes" / "Paired: yes" lines, sending
+# `trust <MAC>` back the moment a device appears - before the phone's own
+# connection attempt has a chance to time out. It also trusts every
+# already-paired device once at startup, since a device paired before
+# this fix existed is stuck in exactly this same never-trusted state.
 #
 # This needs no extra package: bluetoothctl is part of bluez, already a
 # hard dependency (CLAUDE.md "依存を増やさない").
 set -uo pipefail
 
-{
-  printf 'agent NoInputNoOutput\n'
-  printf 'default-agent\n'
-  printf 'discoverable on\n'
-  printf 'pairable on\n'
-  exec sleep infinity
-} | exec bluetoothctl
+coproc BTCTL { bluetoothctl; }
+
+send() { printf '%s\n' "$1" >&"${BTCTL[1]}"; }
+
+send "agent NoInputNoOutput"
+send "default-agent"
+send "power on"
+send "discoverable on"
+send "pairable on"
+
+# 既にペアリング済みだが、この修正より前に接続していたため未信頼のままに
+# なっている端末を、起動のたびに救済する。
+for mac in $(bluetoothctl devices Paired 2>/dev/null | awk '{print $2}'); do
+  send "trust $mac"
+done
+
+# bluetoothctl 自身のイベント出力 ("[CHG] Device XX:.. Connected: yes" 等)
+# を監視し、端末が現れた瞬間に trust を打ち返す。journalctl にもそのまま
+# 出力を残し、切り分けに使えるようにする。
+while IFS= read -r line <&"${BTCTL[0]}"; do
+  echo "$line"
+  if [[ "$line" =~ Device\ ([0-9A-Fa-f:]{17})\ .*(Connected:\ yes|Paired:\ yes|Bonded:\ yes) ]]; then
+    send "trust ${BASH_REMATCH[1]}"
+  fi
+done
+
+# bluetoothctl 側が終了 (D-Bus 切断や bluetoothd の再起動など) すると上の
+# read ループが抜けてここに来る。Restart=always (systemd unit 側) に
+# 任せてそのまま終了する - 中途半端に居座らない。
