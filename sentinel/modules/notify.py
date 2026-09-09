@@ -49,6 +49,13 @@ _window_open: bool = False
 _pending_cameras: dict[str, float] = {}
 _last_group_sent: float = 0.0
 
+# 「動体の1エピソード (継続中の同じ動き)」の境界判定に使う、通知専用の
+# 直近検知時刻。grouped=False ではカメラID、grouped=True では "__all__" を
+# キーにする。動体が途切れずに続いている間はここが更新され続けるだけで、
+# motion_notify_reset_seconds 以上の空白ができて初めて次の検知が
+# 「新しいエピソード」= 通知対象になる。
+_last_motion_seen: dict[str, float] = {}
+
 STATE = {"sent": 0, "failed": 0, "queued": 0, "last_error": "", "last_sent_at": 0.0}
 
 
@@ -185,16 +192,28 @@ def on_motion(camera_id: str, capture_path: str = "") -> None:
     if not config.get("notify_motion"):
         return
 
-    if config.get("notify_motion_grouped"):
+    # 動体が途切れずに続いている間は、周期的に何度も「検知しました」を
+    # 送らない。この秒数、完全に無検知が続いて初めて「止まった」とみなし、
+    # その次の検知だけを新しいイベントとして通知する。以前は
+    # notify_min_interval の周期だけで間引いていたため、動体が続く限り
+    # その間隔で延々と通知が飛び続けていた (実際に報告された不具合)。
+    reset_gap = float(config.get("motion_notify_reset_seconds"))
+    grouped = bool(config.get("notify_motion_grouped"))
+    episode_key = "__all__" if grouped else camera_id
+    is_new_episode = (now - _last_motion_seen.get(episode_key, 0.0)) >= reset_gap
+    _last_motion_seen[episode_key] = now
+
+    if grouped:
         # カメラが切り替わるたびに 1 通ずつ飛ぶと、複数台がほぼ同時に検知
-        # した場合に通知が連続で溢れる。ここでは検知したカメラを一旦
-        # 貯めておき、最短間隔 (notify_min_interval、この場合は「全カメラ
-        # 合算のまとめ通知」単位で効く) が空いたときにまとめて 1 通にする。
+        # した場合に通知が連続で溢れるため、検知したカメラを一旦貯めておき
+        # まとめて 1 通にする。
         _pending_cameras[camera_id] = now
+        if not is_new_episode:
+            return
         if now - _last_group_sent < float(config.get("notify_min_interval")):
             return
         _last_group_sent = now
-        cams = sorted(_pending_cameras.keys())
+        cams = sorted(cid for cid, ts in _pending_cameras.items() if now - ts < reset_gap) or [camera_id]
         _pending_cameras.clear()
         cam_list = "、".join(cams)
         fields = [
@@ -211,6 +230,8 @@ def on_motion(camera_id: str, capture_path: str = "") -> None:
         _enqueue_threadsafe(payload)
         return
 
+    if not is_new_episode:
+        return
     if now - _last_sent.get(camera_id, 0.0) < float(config.get("notify_min_interval")):
         return
     _last_sent[camera_id] = now

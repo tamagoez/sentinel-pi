@@ -200,11 +200,12 @@ async def put_config(request: Request):
                                   "temp_critical_c", "temp_recover_c",
                                   "mode_override")):
         MODE.evaluate()
-    restart_needed = any(k.startswith("cam_") or k in ("jpeg_quality", "motion_threshold",
-                                                       "motion_area_ratio", "motion_interval",
-                                                       "save_cooldown", "live_fps",
-                                                       "normal_fps", "eco_fps", "camera_overrides")
-                         for k in changed)
+    # motion_notify_reset_seconds は notify.py 側だけで使う値なので対象外
+    # (カメラワーカーの再起動は不要)。
+    restart_needed = any(
+        ((k.startswith("cam_") or k.startswith("motion_")) and k != "motion_notify_reset_seconds")
+        or k in ("jpeg_quality", "save_cooldown", "live_fps", "normal_fps", "eco_fps", "camera_overrides")
+        for k in changed)
     if restart_needed:
         for w in camera.WORKERS.values():
             if not w.halted:

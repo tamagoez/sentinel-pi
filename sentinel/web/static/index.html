@@ -809,9 +809,24 @@ const CAM_SETTING_LABELS = {
   cam_width:"通常時の幅", cam_height:"通常時の高さ", cam_eco_width:"エコ時の幅",
   cam_eco_height:"エコ時の高さ", jpeg_quality:"JPEG 品質", live_fps:"ライブ視聴時の FPS",
   normal_fps:"通常時の FPS", eco_fps:"エコ時の FPS", motion_threshold:"動体の輝度差閾値",
-  motion_area_ratio:"動体の面積比", motion_interval:"判定間隔 (秒)",
+  motion_area_ratio:"動体の面積比 (下限)", motion_area_max_ratio:"動体の面積比 (上限)",
+  motion_interval:"判定間隔 (秒)", motion_warmup_seconds:"起動直後の判定休止 (秒)",
+  cam_autofocus:"オートフォーカス",
   save_cooldown:"保存の間隔 (秒)", reconnect_seconds:"再接続間隔 (秒)",
 };
+const CAM_BOOL_KEYS = new Set(["cam_autofocus"]);
+function camSettingInputHtml(k, ov, eff){
+  if(CAM_BOOL_KEYS.has(k)){
+    const cur = ov[k] !== undefined ? String(ov[k]) : "";
+    const opt = (v, label) => `<option value="${v}" ${cur===v?"selected":""}>${label}</option>`;
+    return `<select data-k="${k}" style="flex:1">
+      ${opt("", `共有設定を使用 (${eff[k] ? "有効" : "無効"})`)}
+      ${opt("true", "有効")}${opt("false", "無効")}
+    </select>`;
+  }
+  return `<input data-k="${k}" style="flex:1" placeholder="${esc(String(eff[k]))}"
+                 value="${ov[k] !== undefined ? esc(String(ov[k])) : ""}">`;
+}
 let CAM_SET_ID = null;
 async function openCamSettings(id){
   CAM_SET_ID = id;
@@ -837,8 +852,7 @@ async function loadCamSettings(id){
       ${r.keys.map(k => `
         <div class="row" style="margin-top:6px">
           <span class="faint" style="width:150px;flex:none;font-size:12px">${esc(CAM_SETTING_LABELS[k] || k)}</span>
-          <input data-k="${k}" style="flex:1" placeholder="${esc(String(eff[k]))}"
-                 value="${ov[k] !== undefined ? esc(String(ov[k])) : ""}">
+          ${camSettingInputHtml(k, ov, eff)}
         </div>`).join("")}
       <div class="row" style="margin-top:12px">
         <button onclick="saveCamSettings()">保存</button>
@@ -853,7 +867,7 @@ async function saveCamSettings(){
   const id = CAM_SET_ID;
   if(!id) return;
   const patch = {};
-  $$("#cam-set-body input[data-k]").forEach(inp => {
+  $$("#cam-set-body input[data-k], #cam-set-body select[data-k]").forEach(inp => {
     const v = inp.value.trim();
     patch[inp.dataset.k] = v === "" ? null : v;
   });
@@ -1419,8 +1433,9 @@ const GROUPS = [
   ["モード制御", ["eco_idle_minutes","temp_eco_c","temp_critical_c","temp_recover_c",
                   "mode_override","normal_governor","eco_governor"]],
   ["カメラ", ["cam_width","cam_height","cam_eco_width","cam_eco_height","jpeg_quality",
-              "live_fps","normal_fps","eco_fps","motion_threshold","motion_area_ratio",
-              "motion_interval","save_cooldown","retention_days","reconnect_seconds"]],
+              "live_fps","normal_fps","eco_fps","retention_days","reconnect_seconds"]],
+  ["動体検知", ["motion_threshold","motion_area_ratio","motion_area_max_ratio","motion_interval",
+                "motion_warmup_seconds","cam_autofocus","save_cooldown","motion_notify_reset_seconds"]],
   ["音楽", ["music_enabled","music_autoplay_on_presence","music_volume","music_repeat",
             "music_shuffle","mpg123_buffer_kb","alsa_device"]],
   ["Bluetooth", ["bt_enabled","bt_poll_seconds"]],
@@ -1442,8 +1457,14 @@ const LABELS = {
   cam_width:"通常時の幅", cam_height:"通常時の高さ", cam_eco_width:"エコ時の幅",
   cam_eco_height:"エコ時の高さ", jpeg_quality:"JPEG 品質", live_fps:"ライブ視聴時の FPS",
   normal_fps:"通常時の FPS", eco_fps:"エコ時の FPS", motion_threshold:"動体の輝度差閾値",
-  motion_area_ratio:"動体の面積比", motion_interval:"判定間隔 (秒)",
-  save_cooldown:"保存の間隔 (秒)", retention_days:"静止画の保存日数",
+  motion_area_ratio:"動体の面積比 (下限、これ未満は無視)",
+  motion_area_max_ratio:"動体の面積比 (上限、これ以上は画面全体の変化として無視)",
+  motion_interval:"判定間隔 (秒)",
+  motion_warmup_seconds:"起動直後の判定休止 (秒、オートフォーカス対策)",
+  cam_autofocus:"オートフォーカスを有効にする (対応機種のみ)",
+  save_cooldown:"保存の間隔 (秒)",
+  motion_notify_reset_seconds:"無検知でこの秒数経過したら「止まった」とみなす (この間は再通知しない)",
+  retention_days:"静止画の保存日数",
   reconnect_seconds:"再接続の基準間隔 (秒)",
   music_enabled:"常時再生を有効にする", music_autoplay_on_presence:"人を検知したら自動再生",
   music_volume:"音量 (%)", music_repeat:"繰り返し", music_shuffle:"シャッフル",
