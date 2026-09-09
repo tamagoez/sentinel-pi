@@ -396,6 +396,31 @@ numid を使わないでください。端末ごとの音量は `bt_device_volum
 一般の設定 UI (GROUPS/LABELS) には追加しないでください** — dict を
 テキスト入力欄で編集させる作りにはなっていません。
 
+### 16. ペアリングエージェントは bluez-tools の bt-agent を使わない (bluetoothctl 内蔵のものを使う)
+
+`bt-agent --capability=NoInputNoOutput` (bluez-tools) は、Raspberry Pi OS
+Bullseye 以降の bluez (5.55+) で「NoInputNoOutput を指定しても着信ペアリング
+要求を自動承認しなくなる」既知のリグレッションを抱えています
+([RPi-Distro/repo#291](https://github.com/RPi-Distro/repo/issues/291))。
+bt-agent は確認応答を返さないまま待ち続け、iPhone 側はこの確認応答の
+タイムアウトを **"Pairing Unsuccessful"** としてそのまま表示します —
+PIN/パスキーの入力画面にすらならず、原因がエージェント側にあることが
+UI からは分かりません。SSP を要求する iOS は PIN 認証 (sspmode=0) へは
+フォールバックしないため、「PIN 認証に倒す」回避策も iPhone には使えません。
+
+`bluetoothctl` を対話セッションで使い `agent NoInputNoOutput` /
+`default-agent` を自分で打った場合はこのリグレッションの影響を受けません。
+そのため `scripts/sentinel-bt-agent.sh` (`sentinel-bt-agent.service` から
+起動) は bt-agent を使わず、`bluetoothctl` の標準入力へ同じコマンド列を
+流し込んで対話セッションを模倣します。`sleep infinity` で標準入力の
+パイプを開いたままにし続けることで、`bluetoothctl` に EOF を渡さず
+エージェント登録を維持し続けます (EOF を渡すとこのファイルの他の一発
+呼び出しの `bluetoothctl <cmd>` パターンと同じく、プロセス終了と同時に
+エージェント登録も消えます — 以前の一発起動の bt-agent 版が同じ理由で
+壊れていました)。**この一連のパターンを bt-agent や sspmode=0 の PIN
+認証方式に戻さないでください** — 同じ "Pairing Unsuccessful" に戻ります
+(bluez-tools パッケージ自体も `bootstrap.sh` から外しています)。
+
 ## モジュール構成
 
 各モジュールは疎結合で、`core/state.py` の `MODE` を購読するだけです。
@@ -421,6 +446,11 @@ scripts/sentinel-set-hotspot-ssid.sh
                     /etc/hostapd/hostapd.conf は root しか書き込めないため
                     sudoers で個別に許可し、modules/hotspot.py が sudo 経由
                     で呼ぶ (sentinel-set-governor.sh と同じパターン)
+scripts/sentinel-bt-agent.sh
+                    sentinel-bt-agent.service から起動される、永続的な
+                    ペアリングエージェント。bt-agent (bluez-tools) の
+                    NoInputNoOutput リグレッションを避けるため bluetoothctl
+                    を直接駆動する (CLAUDE.md #16)
 
 core/config.py      設定の唯一の保管場所。型と範囲を強制する
 core/state.py       モード状態機械。「今どのモードか」の唯一の決定者

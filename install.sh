@@ -221,11 +221,11 @@ else
   w "bluealsa not found; Bluetooth-speaker feature will be unavailable."
 fi
 
-if command -v bt-agent >/dev/null; then
+if command -v bluetoothctl >/dev/null; then
   install -m644 "$SRC/systemd/sentinel-bt-agent.service" /etc/systemd/system/
-  ok "Persistent pairing agent (bt-agent) registered"
+  ok "Persistent pairing agent registered"
 else
-  w "bt-agent missing (apt install bluez-tools); new pairings may fail."
+  w "bluetoothctl missing (apt install bluez); new pairings may fail."
 fi
 
 if [[ -f /etc/bluetooth/main.conf ]]; then
@@ -294,7 +294,7 @@ done
 systemctl daemon-reload
 UNITS=(sentinel.service sentinel-guardian.timer)
 [[ -n "$BA" ]] && UNITS+=(sentinel-bluealsa.service sentinel-bluealsa-aplay.service)
-command -v bt-agent >/dev/null && UNITS+=(sentinel-bt-agent.service)
+command -v bluetoothctl >/dev/null && UNITS+=(sentinel-bt-agent.service)
 systemctl enable "${UNITS[@]}" >/dev/null 2>&1
 ok "Enabled: ${UNITS[*]}"
 # Clear any "failed (start-limit-hit)" left over from before this script

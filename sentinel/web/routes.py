@@ -267,6 +267,20 @@ async def camera_put_settings(cid: str, request: Request):
     return {"ok": True, "overrides": cur}
 
 
+@router.get("/api/motion/debug_log")
+async def motion_debug_log(request: Request):
+    """全カメラ分の動体判定の診断ログをカメラごとに見出しをつけて
+    1本のテキストにまとめて返す。設定タブの「診断ログを取得」からコピーし、
+    次回のやり取りに貼り付けて調整に使う想定。"""
+    require(request)
+    parts = []
+    for cid in sorted(camera.WORKERS.keys()):
+        text = await asyncio.to_thread(camera.read_motion_debug_log, cid)
+        if text.strip():
+            parts.append(f"==== {cid} ====\n{text.strip()}")
+    return {"text": "\n\n".join(parts)}
+
+
 @router.get("/api/camera/{cid}/snapshot")
 async def snapshot(cid: str, request: Request):
     require(request)

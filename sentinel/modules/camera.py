@@ -167,6 +167,34 @@ def live_clients(cid: str) -> int:
     return _read_int(rt(cid) / "live")
 
 
+# --------------------------------------------------------- 動体検知の診断ログ
+
+# motion_debug_log 有効時、判定のたびに実際の数値を残す。tmpfs 上とはいえ
+# 無制限に太らせない (1GB RAM 機での既定方針)。追記のたびにファイルサイズだけ
+# 安く確認し、超えたときだけ直近分を残して巻き戻す。
+_MOTION_DEBUG_MAX_BYTES = 200_000
+_MOTION_DEBUG_KEEP_LINES = 300
+
+
+def _log_motion_debug(cid: str, entry: dict) -> None:
+    path = rt(cid) / "motion_debug.jsonl"
+    try:
+        with path.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+        if path.stat().st_size > _MOTION_DEBUG_MAX_BYTES:
+            lines = path.read_text(encoding="utf-8").splitlines()[-_MOTION_DEBUG_KEEP_LINES:]
+            _write_atomic(path, ("\n".join(lines) + "\n").encode("utf-8"))
+    except Exception:
+        pass
+
+
+def read_motion_debug_log(cid: str) -> str:
+    try:
+        return (rt(cid) / "motion_debug.jsonl").read_text(encoding="utf-8")
+    except Exception:
+        return ""
+
+
 # ---------------------------------------------------------------- ワーカー
 
 def _worker(cid: str, device: str, stop: "Event", cfg: dict) -> None:
@@ -323,6 +351,9 @@ def _worker(cid: str, device: str, stop: "Event", cfg: dict) -> None:
                 gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
                 small = cv2.GaussianBlur(cv2.resize(gray, (160, 120)), (21, 21), 0)
                 motion = False
+                ratio = None
+                lo = float(cfg["motion_area_ratio"])
+                hi = float(cfg.get("motion_area_max_ratio", 1.0))
                 # カメラを開いた直後 (再接続・解像度切り替え含む) はオートフォーカス
                 # の再合焦が起きやすく、画面全体がぼけて戻るだけで動体と誤検知
                 # しやすい。この間は判定そのものをスキップし、基準フレームだけ
@@ -334,14 +365,20 @@ def _worker(cid: str, device: str, stop: "Event", cfg: dict) -> None:
                     _, th = cv2.threshold(diff, int(cfg["motion_threshold"]), 255, cv2.THRESH_BINARY)
                     th = cv2.dilate(th, None, iterations=2)
                     ratio = cv2.countNonZero(th) / th.size
-                    lo = float(cfg["motion_area_ratio"])
-                    hi = float(cfg.get("motion_area_max_ratio", 1.0))
                     # 上限 (motion_area_max_ratio) は、画面のほとんどが一度に
                     # 変化するケース (オートフォーカスの再合焦・露出/照明の変化)
                     # を、局所的な物体の動きと区別して除外するためのもの。
                     motion = lo <= ratio < hi
                 prev = small
                 last_motion_check = now
+                if cfg.get("motion_debug_log", True):
+                    _log_motion_debug(cid, {
+                        "t": datetime.now().strftime("%H:%M:%S"),
+                        "mode": mode, "warm": warm,
+                        "ratio": round(ratio, 4) if ratio is not None else None,
+                        "lo": lo, "hi": hi, "threshold": int(cfg["motion_threshold"]),
+                        "motion": motion,
+                    })
                 if motion:
                     emit_status(motion=True, last_motion=time.time())
                     (d / "motion_flag").write_text(str(time.time()))

@@ -417,6 +417,28 @@ try{
         <div class="faint" id="hotspot-msg" style="margin-top:6px"></div>
       </div></div>
     </div>
+    <div class="card" style="margin-bottom:12px"><h3>動体検知の調整</h3><div class="body">
+      <div class="row">
+        <button onclick="applyRecommendedMotion()">推奨設定を適用</button>
+        <span class="faint" style="font-size:12px">
+          オートフォーカスの誤検知や通知の連発を抑える方向の値に一括設定します
+          (オートフォーカス無効化・起動直後の判定休止を延長・面積比の下限を
+          引き上げ・再通知までの間隔を延長、など)。適用後カメラは再起動されます。
+        </span>
+      </div>
+      <div class="row" style="margin-top:12px">
+        <button onclick="loadMotionDebugLog()">診断ログを取得</button>
+        <button onclick="copyMotionDebugLog()">コピー</button>
+        <span class="faint" style="font-size:12px">
+          カメラごとの動体判定の詳細 (輝度差・面積比の実測値・しきい値・
+          ウォームアップ中かどうか) です。まだ検知が多すぎる/少なすぎる場合、
+          取得してコピーし、次回のやり取りに貼り付けてください。
+        </span>
+      </div>
+      <textarea id="motion-debug-log" readonly spellcheck="false"
+        style="width:100%;height:180px;margin-top:8px;resize:vertical;background:var(--bg-deep);border:1px solid var(--line2);color:var(--fg);font:11.5px/1.5 var(--mono);padding:8px"
+        placeholder="「診断ログを取得」を押すとここに表示されます"></textarea>
+    </div></div>
     <div class="grid g2" id="settings"></div>
   </section>
 
@@ -759,6 +781,50 @@ async function hotspotSetSsid(){
     const m = $("#hotspot-msg"); if(m) m.textContent = r.message || "";
     toast(r.message, !r.ok);
   }catch(e){ toast(e.message, true); }
+}
+
+/* ---------------- motion detection tuning ---------------- */
+// オートフォーカスの誤検知や通知の連発への対処として、一括で寄せる値。
+// 万能な正解ではなく「まずここから様子を見る」出発点として用意している。
+const MOTION_RECOMMENDED = {
+  motion_threshold: 30,
+  motion_area_ratio: 0.03,
+  motion_area_max_ratio: 0.55,
+  motion_interval: 1.0,
+  motion_warmup_seconds: 4.0,
+  cam_autofocus: false,
+  save_cooldown: 8.0,
+  motion_notify_reset_seconds: 90.0,
+};
+async function applyRecommendedMotion(){
+  if(!confirm("動体検知の推奨設定を適用します。現在の値は上書きされ、カメラは再起動されます。よろしいですか。")) return;
+  try{
+    const r = await cfg(MOTION_RECOMMENDED);
+    toast(`推奨設定を適用しました (${Object.keys(r.changed).length} 件)`);
+    if(CUR === "set") loadSettings();
+  }catch(e){ toast(e.message, true); }
+}
+async function loadMotionDebugLog(){
+  const ta = $("#motion-debug-log");
+  if(ta) ta.value = "取得中...";
+  try{
+    const r = await api("/api/motion/debug_log");
+    if(ta) ta.value = r.text || "(まだ記録がありません。設定で「動体判定の診断ログを記録する」が有効か確認してください)";
+  }catch(e){
+    if(ta) ta.value = "取得に失敗しました: " + e.message;
+  }
+}
+async function copyMotionDebugLog(){
+  const ta = $("#motion-debug-log");
+  if(!ta || !ta.value) return;
+  try{
+    await navigator.clipboard.writeText(ta.value);
+    toast("クリップボードにコピーしました");
+  }catch(e){
+    ta.focus(); ta.select();
+    try{ document.execCommand("copy"); toast("クリップボードにコピーしました"); }
+    catch(e2){ toast("コピーに失敗しました。手動で選択してコピーしてください", true); }
+  }
 }
 
 /* ---------------- cameras ---------------- */
@@ -1435,7 +1501,8 @@ const GROUPS = [
   ["カメラ", ["cam_width","cam_height","cam_eco_width","cam_eco_height","jpeg_quality",
               "live_fps","normal_fps","eco_fps","retention_days","reconnect_seconds"]],
   ["動体検知", ["motion_threshold","motion_area_ratio","motion_area_max_ratio","motion_interval",
-                "motion_warmup_seconds","cam_autofocus","save_cooldown","motion_notify_reset_seconds"]],
+                "motion_warmup_seconds","cam_autofocus","save_cooldown","motion_notify_reset_seconds",
+                "motion_debug_log"]],
   ["音楽", ["music_enabled","music_autoplay_on_presence","music_volume","music_repeat",
             "music_shuffle","mpg123_buffer_kb","alsa_device"]],
   ["Bluetooth", ["bt_enabled","bt_poll_seconds"]],
@@ -1464,6 +1531,7 @@ const LABELS = {
   cam_autofocus:"オートフォーカスを有効にする (対応機種のみ)",
   save_cooldown:"保存の間隔 (秒)",
   motion_notify_reset_seconds:"無検知でこの秒数経過したら「止まった」とみなす (この間は再通知しない)",
+  motion_debug_log:"動体判定の診断ログを記録する (下の「診断ログを取得」用)",
   retention_days:"静止画の保存日数",
   reconnect_seconds:"再接続の基準間隔 (秒)",
   music_enabled:"常時再生を有効にする", music_autoplay_on_presence:"人を検知したら自動再生",

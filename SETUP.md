@@ -113,7 +113,7 @@ because the order matters:
 | 2 | ALSA, FFmpeg, Git, Python 3, yt-dlp | 5, 7, 17, 130, 195 |
 | 3 | AdGuard Home + Unbound (one call, so DietPi wires them together: Unbound moves to port 5335 and becomes AdGuard's upstream) | 126, 182 |
 | 4 | WiFi Hotspot, after AdGuard so its DHCP can be pointed at it | 60 |
-| 5 | Bluetooth, plus bluez / bluez-alsa-utils / bluez-tools / mpg123 / v4l-utils / python3-opencv from APT | — |
+| 5 | Bluetooth, plus bluez / bluez-alsa-utils / mpg123 / v4l-utils / python3-opencv from APT | — |
 | 6 | Audio routed to the 3.5mm jack (`dietpi-set_hardware soundcard rpi-bcm2835-3.5mm`) | — |
 | 7 | SWAP disabled | — |
 
