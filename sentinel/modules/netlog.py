@@ -18,6 +18,7 @@ import json
 import logging
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from collections import Counter
 from datetime import datetime, timedelta
@@ -128,6 +129,54 @@ def _fetch_querylog(limit: int = 200) -> list[dict]:
     with urllib.request.urlopen(req, timeout=10) as resp:
         payload = json.loads(resp.read().decode("utf-8"))
     return payload.get("data") or []
+
+
+def _adguard_call(path: str, *, method: str = "GET", params: dict | None = None,
+                  json_body: dict | None = None) -> dict:
+    """AdGuard Home の /control API を叩く共通ヘルパ (querylog 専用だった
+    従来の _fetch_querylog とは別に、check_host / set_rules など他の
+    エンドポイントもここから呼べるようにする)。"""
+    base = str(config.get("adguard_url") or "").rstrip("/")
+    if not base:
+        raise RuntimeError("AdGuard Home の URL が設定されていません")
+    url = f"{base}/control/{path}"
+    if params:
+        url += "?" + urllib.parse.urlencode(params)
+    data = json.dumps(json_body).encode("utf-8") if json_body is not None else None
+    req = urllib.request.Request(url, data=data, method=method, headers=_auth_header())
+    if json_body is not None:
+        req.add_header("Content-Type", "application/json")
+    with urllib.request.urlopen(req, timeout=10) as resp:
+        body = resp.read()
+    return json.loads(body) if body else {}
+
+
+def check_host_blocked(domain: str) -> dict | None:
+    """指定ドメインが AdGuard で今どう判定されるかを実際に問い合わせる。
+    未設定・未到達なら None (「わからない」) を返す — 呼び出し側はこれを
+    「ブロックされていない」と誤解しないよう区別すること。"""
+    try:
+        return _adguard_call("filtering/check_host", params={"name": domain})
+    except Exception as exc:
+        log.debug("AdGuard check_host に失敗 (%s): %s", domain, exc)
+        return None
+
+
+def allow_host(domain: str) -> bool:
+    """そのドメインだけを対象にした例外ルール (@@||domain^) をユーザー
+    ルールへ追加する。他の既存ルールには一切触れない — ブロックの原因に
+    なっている項目だけをピンポイントで打ち消す。"""
+    try:
+        status = _adguard_call("filtering/status")
+        rules = list((status or {}).get("user_rules") or [])
+        rule = f"@@||{domain}^"
+        if rule not in rules:
+            rules.append(rule)
+            _adguard_call("filtering/set_rules", method="POST", json_body={"rules": rules})
+        return True
+    except Exception as exc:
+        log.warning("AdGuard の許可ルール追加に失敗 (%s): %s", domain, exc)
+        return False
 
 
 def _log_path(day: datetime | None = None) -> Path:

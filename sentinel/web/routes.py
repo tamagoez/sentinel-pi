@@ -404,7 +404,14 @@ async def delete_track(request: Request, name: str = Query(...)):
 @router.post("/api/notify/test")
 async def notify_test(request: Request):
     require(request)
-    ok, message = await asyncio.to_thread(notify.send_test)
+    ok, message, diagnosis = await asyncio.to_thread(notify.send_test)
+    return {"ok": ok, "message": message, "diagnosis": diagnosis}
+
+
+@router.post("/api/notify/unblock-webhook-host")
+async def notify_unblock_webhook_host(request: Request):
+    require(request)
+    ok, message = await asyncio.to_thread(notify.unblock_webhook_host)
     return {"ok": ok, "message": message}
 
 
@@ -420,6 +427,38 @@ async def bluetooth_action(action: str, request: Request):
     else:
         raise HTTPException(400, "不明な操作です")
     return {"ok": True, "bluetooth": bluetooth.status()}
+
+
+@router.get("/api/bluetooth/devices")
+async def bluetooth_devices(request: Request):
+    require(request)
+    devices = await asyncio.to_thread(bluetooth.paired_devices)
+    volumes = config.get("bt_device_volumes") or {}
+    for d in devices:
+        d["volume"] = volumes.get(d["addr"])
+    return {"devices": devices}
+
+
+@router.post("/api/bluetooth/alias")
+async def bluetooth_alias(request: Request):
+    require(request)
+    body = await request.json()
+    addr = str(body.get("addr") or "")
+    alias = str(body.get("alias") or "")
+    ok, message = await asyncio.to_thread(bluetooth.set_alias, addr, alias)
+    return {"ok": ok, "message": message, "bluetooth": bluetooth.status()}
+
+
+@router.post("/api/bluetooth/volume")
+async def bluetooth_volume(request: Request):
+    require(request)
+    body = await request.json()
+    addr = str(body.get("addr") or "")
+    if not addr:
+        raise HTTPException(400, "addr が必要です")
+    volume = int(body.get("volume") or 0)
+    await asyncio.to_thread(bluetooth.set_device_volume, addr, volume)
+    return {"ok": True}
 
 
 # ---------------------------------------------------------------- ネットログ
@@ -456,6 +495,11 @@ async def netlog_delete_day(day: str, request: Request):
 FILE_ROOTS = {
     "drive": config.EXTERNAL_STORAGE,   # 外部ストレージ全体 (マウントされていなければ使えない)
     "local": config.DATA_ROOT,          # sentinel のデータ本体
+    # 本体ファイルシステム全体。web 端末 (/ws/terminal) が認証済みユーザーに
+    # 素の `sentinel` ユーザー権限のシェルをすでに渡しているため、ここを
+    # "/" に開放しても実質的な権限は増えない (シェルで到達できる場所と
+    # 同じ範囲になるだけ)。
+    "root": Path("/"),
 }
 
 
@@ -476,6 +520,13 @@ async def files_roots(request: Request):
     return {"roots": [{"key": k, "path": str(b)} for k, b in FILE_ROOTS.items() if b.is_dir()]}
 
 
+_FM_MAX_ENTRIES = 2000   # "root" (本体全体) の追加で /proc や大きな
+                        # パッケージディレクトリにも入れるようになった。
+                        # 上限なしに全件返すと、閲覧している側のブラウザが
+                        # 数万行の表を一度に描画することになり、実際に
+                        # そこで重くなる/固まる原因になっていた。
+
+
 @router.get("/api/files")
 async def files_list(request: Request, root: str = Query(...), path: str = ""):
     require(request)
@@ -483,6 +534,7 @@ async def files_list(request: Request, root: str = Query(...), path: str = ""):
     if not p.is_dir():
         raise HTTPException(404, "ディレクトリが見つかりません")
     entries = []
+    total = 0
     with os.scandir(p) as it:
         for e in it:
             try:
@@ -490,11 +542,15 @@ async def files_list(request: Request, root: str = Query(...), path: str = ""):
                 st = e.stat(follow_symlinks=False)
             except OSError:
                 continue
+            total += 1
             entries.append({"name": e.name, "is_dir": is_dir,
                             "size": None if is_dir else st.st_size,
                             "mtime": st.st_mtime})
     entries.sort(key=lambda x: (not x["is_dir"], x["name"].lower()))
-    return {"root": root, "path": path, "entries": entries}
+    truncated = len(entries) > _FM_MAX_ENTRIES
+    entries = entries[:_FM_MAX_ENTRIES]
+    return {"root": root, "path": path, "entries": entries,
+            "total": total, "truncated": truncated}
 
 
 @router.get("/api/files/download")
@@ -504,6 +560,43 @@ async def files_download(request: Request, root: str = Query(...), path: str = Q
     if not p.is_file():
         raise HTTPException(404, "ファイルが見つかりません")
     return FileResponse(p, filename=p.name)
+
+
+@router.put("/api/files/upload")
+async def files_upload(request: Request, root: str = Query(...), path: str = "",
+                       name: str = Query(...)):
+    require(request)
+    p = _fm_resolve(root, path)
+    if not p.is_dir():
+        raise HTTPException(404, "ディレクトリが見つかりません")
+    if not name or "/" in name or name in (".", ".."):
+        raise HTTPException(400, "ファイル名が不正です")
+    dest = p / name
+    # multipart/form-data ではなく、リクエストボディをそのままファイルへ
+    # ストリーム書き込みする単純な方式にしている (python-multipart 等の
+    # 追加依存を避けるため - CLAUDE.md「依存を増やさない」)。1GB RAM 機
+    # でも、ボディ全体をメモリに載せずに済む。
+    with dest.open("wb") as f:
+        async for chunk in request.stream():
+            f.write(chunk)
+    return {"ok": True, "name": name}
+
+
+_MAX_EDIT_BYTES = 2_000_000   # テキスト編集で書き戻せる上限 (誤って巨大/
+                              # バイナリファイルを丸ごと書き換えさせないための保険)
+
+
+@router.put("/api/files/content")
+async def files_write_content(request: Request, root: str = Query(...), path: str = Query(...)):
+    require(request)
+    p = _fm_resolve(root, path)
+    if p.is_dir():
+        raise HTTPException(400, "フォルダには書き込めません")
+    body = await request.body()
+    if len(body) > _MAX_EDIT_BYTES:
+        raise HTTPException(413, f"{_MAX_EDIT_BYTES // 1_000_000}MB を超えるファイルはこの編集欄では保存できません")
+    p.write_bytes(body)
+    return {"ok": True}
 
 
 @router.post("/api/files/mkdir")
