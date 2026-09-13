@@ -49,11 +49,14 @@ _window_open: bool = False
 _pending_cameras: dict[str, float] = {}
 _last_group_sent: float = 0.0
 
-# 「動体の1エピソード (継続中の同じ動き)」の境界判定に使う、通知専用の
-# 直近検知時刻。grouped=False ではカメラID、grouped=True では "__all__" を
-# キーにする。動体が途切れずに続いている間はここが更新され続けるだけで、
-# motion_notify_reset_seconds 以上の空白ができて初めて次の検知が
-# 「新しいエピソード」= 通知対象になる。
+# 「動体の1エピソード (検知開始〜落ち着きましたで対応する1組)」の境界判定
+# に使う、通知専用の直近検知時刻。grouped=False ではカメラID、grouped=True
+# では "__all__" をキーにする。動体が途切れずに続いている間はここが更新
+# され続けるだけで、notify_summary_after 以上の空白ができて初めて次の検知
+# が「新しいエピソード」= 開始通知の対象になる。summary_loop() が同じ
+# notify_summary_after を使って終了 (「検知が落ち着きました」) を判定して
+# いるのと必ず同じ秒数にすること - ずれると開始だけが何度も届き、終了が
+# 追いつかない不具合に戻る。
 _last_motion_seen: dict[str, float] = {}
 
 STATE = {"sent": 0, "failed": 0, "queued": 0, "last_error": "", "last_sent_at": 0.0}
@@ -192,12 +195,18 @@ def on_motion(camera_id: str, capture_path: str = "") -> None:
     if not config.get("notify_motion"):
         return
 
-    # 動体が途切れずに続いている間は、周期的に何度も「検知しました」を
-    # 送らない。この秒数、完全に無検知が続いて初めて「止まった」とみなし、
-    # その次の検知だけを新しいイベントとして通知する。以前は
-    # notify_min_interval の周期だけで間引いていたため、動体が続く限り
-    # その間隔で延々と通知が飛び続けていた (実際に報告された不具合)。
-    reset_gap = float(config.get("motion_notify_reset_seconds"))
+    # 「検知しました」(開始) と「検知が落ち着きました」(終了、summary_loop
+    # が送る) は 1 組の括弧として対応していなければならない。以前は開始側を
+    # 別の秒数 (motion_notify_reset_seconds) で、終了側を notify_summary_after
+    # で、それぞれ独立に判定していたため、この 2 つの秒数がずれている限り
+    # 「終了」が 1 回も届かないうちに「開始」だけ何度も届く、という
+    # 報告どおりの不具合になっていた (例: 45 秒動きが止まれば次の検知が
+    # 新しい開始として即時通知される一方、終了は 300 秒動きが止まらないと
+    # 送られない — 45〜300 秒の間隔で動体が散発すると、開始だけが積み上がる)。
+    # 開始・終了を同じ秒数 (notify_summary_after) で判定することで、
+    # 「その秒数以上静かだった後の検知」だけが新しい開始になり、常に
+    # 開始 1 回 -> (その間の検知はまとめる) -> 終了 1 回、で対応する。
+    reset_gap = float(config.get("notify_summary_after"))
     grouped = bool(config.get("notify_motion_grouped"))
     episode_key = "__all__" if grouped else camera_id
     is_new_episode = (now - _last_motion_seen.get(episode_key, 0.0)) >= reset_gap

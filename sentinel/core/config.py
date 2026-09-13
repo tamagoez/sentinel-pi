@@ -123,16 +123,13 @@ DEFAULTS: dict[str, Any] = {
     "notify_motion_grouped": False,       # True: 複数カメラの検知を 1 通にまとめる
                                            # (False: 今までどおりカメラごとに送る)
     "notify_min_interval": 60.0,          # 即時通知の最短間隔 (秒、下限として働く)
-    "motion_notify_reset_seconds": 45.0,  # この秒数、検知が完全に途切れたら
-                                           # 「動いていない」とみなす。動体が途切れず
-                                           # 続いている間は (notify_min_interval が
-                                           # 経過していても) 再通知しない — 継続中の
-                                           # 同じイベントとして扱う。途切れてからの
-                                           # 次の検知だけが新しいイベントとして通知
-                                           # される。grouped=False では同一カメラ単位、
-                                           # grouped=True では全カメラ合算単位で効く。
     "notify_summary": True,               # 無検知が続いたときの集計通知
-    "notify_summary_after": 300.0,        # 無検知がこれだけ続いたら統計を送る (秒)
+    "notify_summary_after": 300.0,        # 無検知がこれだけ続いたら統計を送る (秒)。
+                                           # 「検知しました」(開始) の再通知を
+                                           # 抑える境界秒数もこれと同じにして
+                                           # ある — 開始と終了が別の秒数だと、
+                                           # 終了が届く前に開始だけ何度も届く
+                                           # (notify.py on_motion() 参照)。
     "notify_mode_change": True,           # モード遷移 (通常/エコ/緊急) の通知
     "notify_system_events": True,
     # プレースホルダ: {camera} {mode} {temp} {time} (動体) /
@@ -241,7 +238,6 @@ _RANGES: dict[str, tuple[float, float]] = {
     "motion_area_max_ratio": (0.05, 1.0),
     "motion_interval": (0.2, 10.0),
     "motion_warmup_seconds": (0.0, 30.0),
-    "motion_notify_reset_seconds": (5.0, 1800.0),
     "save_cooldown": (1.0, 300.0),
     "retention_days": (1, 3650),
     "music_volume": (0, 100),
