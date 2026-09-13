@@ -239,9 +239,22 @@ def _worker(cid: str, device: str, stop: "Event", cfg: dict) -> None:
     # motion_warmup_seconds の間ずっと "warm" のまま固定され続け、eco
     # モードの動体検知が事実上永久に働かなくなる (実際に診断ログで踏んだ
     # 不具合: eco 突入後は warm が二度と false に戻らなかった)。
-    # この意図した開き直しの直後だけウォームアップ基準時刻を更新しない
-    # ようにするためのフラグ。
+    # 同じ理由で比較用の基準フレーム prev も毎回作り直してはいけない —
+    # eco はフレーム間隔が長く (>=2.0s)、1 サイクルにつき1回しか
+    # cap.read() しないため、prev をここで毎回 None に戻すと
+    # 「前フレームと比較できる状態」に一生ならず、warm が解消したあとも
+    # ratio が常に null のまま動体を検知できなくなる (実際に踏んだ不具合:
+    # warm は正しく false になるのに ratio が never 計算されなかった)。
+    # この意図した開き直しの直後だけ、基準時刻と基準フレームの両方の
+    # 更新をスキップするためのフラグ。
     skip_warmup_reset = False
+    # open_cam() 自身が「本当に読めるカメラか」を確認するために 1 フレーム
+    # 読む。以前はこれを検証用に使い捨てていたが、eco では毎サイクル
+    # open_cam() が呼ばれるため、そのたびに 1 枚を無駄にすると、ただでさえ
+    # 疎な eco のフレームの半分が動体判定に一切使われないまま捨てられる
+    # ことになる。ここに保持しておき、直後のループ本体でそのまま動体判定
+    # に使う (使い切ったら None に戻す)。
+    pending_frame = None
 
     def target_res(mode: str) -> tuple[int, int]:
         if mode == NORMAL:
@@ -249,7 +262,7 @@ def _worker(cid: str, device: str, stop: "Event", cfg: dict) -> None:
         return int(cfg["cam_eco_width"]), int(cfg["cam_eco_height"])
 
     def open_cam(mode: str) -> bool:
-        nonlocal cap, applied_res, prev
+        nonlocal cap, applied_res, pending_frame
         if cap is not None:
             try:
                 cap.release()
@@ -285,7 +298,7 @@ def _worker(cid: str, device: str, stop: "Event", cfg: dict) -> None:
                 return False
             cap = c
             applied_res = (w, h)
-            prev = None   # 開き直した直後の基準フレームは古いので作り直す
+            pending_frame = frame
             return True
         except Exception:
             return False
@@ -321,6 +334,7 @@ def _worker(cid: str, device: str, stop: "Event", cfg: dict) -> None:
                     reconnects += 1
                     if not skip_warmup_reset:
                         cam_opened_at = time.monotonic()
+                        prev = None
                     skip_warmup_reset = False
                     emit_status(state="online", reconnects=reconnects, clients=viewers)
                 else:
@@ -331,15 +345,24 @@ def _worker(cid: str, device: str, stop: "Event", cfg: dict) -> None:
                     continue
 
             # モードが変わって解像度が変わるべきなら開き直す (真の解像度変更
-            # なので、こちらは毎回ウォームアップ基準時刻を更新してよい)
+            # なので、こちらは毎回ウォームアップ基準時刻・基準フレームの
+            # 両方を更新してよい — というより解像度が変わる以上、古い prev
+            # は shape が合わず比較できないので更新しなければならない)
             if applied_res != target_res(mode):
                 open_cam(mode)
                 if cap is None:
                     continue
                 cam_opened_at = time.monotonic()
+                prev = None
 
             t0 = time.monotonic()
-            ok, frame = cap.read()
+            if pending_frame is not None:
+                # このサイクルで open_cam() が確認のために読んだフレームを
+                # そのまま使う (上のコメント参照) - 捨てて読み直さない。
+                ok, frame = True, pending_frame
+                pending_frame = None
+            else:
+                ok, frame = cap.read()
             if not ok or frame is None:
                 failures += 1
                 emit_status(state="reconnecting", errors=failures)
