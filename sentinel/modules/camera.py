@@ -216,10 +216,19 @@ def read_motion_debug_log(cid: str) -> str:
 # に残り続けるだけになる)。画面全体が均一に暗い/白飛びしているだけの
 # 正常なシーン (全バンドが揃って平坦) は誤検知しないよう除外している。
 # 破損が短時間に連発する場合は、UVC セッションが詰まっている可能性を
-# 考えて一度だけ強制的に再接続する (それでも直らなければ帯域不足そのもの
-# が原因なので、これ以上ソフト側でできることはない — その場合のために
-# corrupt_frames を status.json 経由で公開し、どのカメラが慢性的に
-# 破損しているかを UI から特定できるようにしている)。
+# 考えて再接続する (直らなければ間隔を倍々に伸ばして無意味な再接続の
+# 連発を避ける)。それでも直らなければ帯域不足そのものが原因なので、
+# これ以上ソフト側でできることはない — その場合のために corrupt_frames
+# を status.json 経由で公開し、どのカメラが慢性的に破損しているかを
+# UI から特定できるようにしている。
+#
+# ただし「毎回まったく同じ位置」が引っかかり続ける場合は話が別で、破損
+# ではなくレターボックス/ビネットなどカメラ本来の絵である可能性が高い
+# (真の帯域不足なら途切れる位置は毎回ばらつくはず)。実際に「再接続しても
+# 直らず、破損カウントが際限なく増え続ける」という報告があり、これは
+# まさにこのケースだった可能性が高い。同じ位置が _CORRUPT_LEARN_STREAK
+# 回連続したら「そのカメラの通常の絵」として学習し、以後は破損として
+# 扱わない (known_ok_patterns)。
 _CORRUPT_BANDS = 8
 _CORRUPT_FLAT_STD = 3.0
 _CORRUPT_MIN_RUN = 3          # 8 バンド中 3 (37.5%) 以上が連続で平坦なら疑う
@@ -227,12 +236,24 @@ _CORRUPT_CONTRAST_MULT = 4.0  # 平坦バンドと非平坦バンドの標準偏
 _CORRUPT_HIST_LEN = 20
 _CORRUPT_RATE_THRESHOLD = 0.5
 _CORRUPT_RECONNECT_COOLDOWN = 20.0
+_CORRUPT_RECONNECT_MAX_BACKOFF = 300.0
+# 「毎回まったく同じ位置のバンドだけが平坦」という判定が何フレーム連続
+# したら、それを破損ではなくカメラ本来の絵 (レターボックス/ビネット/
+# オンスクリーン表示の黒帯など) とみなして以後は許容するか。真の USB
+# 帯域不足による破損は転送が途切れる瞬間ごとに位置・範囲が変わるはずで、
+# 毎回寸分違わず同じ位置になるとは考えにくいため、この一致を「破損では
+# ない」ことの強い手がかりとして使う。
+_CORRUPT_LEARN_STREAK = 8
 
 
-def _frame_corruption_ratio(frame) -> float | None:
+def _frame_corruption_ratio(frame) -> tuple[float, tuple[bool, ...]] | None:
     """粗い縦バンドの標準偏差から、フレームの一部だけが不自然に単色で
-    埋まっていないかを調べる。破損していなければ None、破損していれば
-    「平坦なバンドの割合」(0〜1、診断用) を返す。"""
+    埋まっていないかを調べる。破損していなければ None、破損の疑いが
+    あれば (平坦なバンドの割合, バンドごとの平坦フラグのタプル) を返す。
+    後者は _worker() 側で「同じ位置が毎回引っかかっていないか」(=
+    レターボックスやビネットなどカメラ本来の絵である可能性) を追跡する
+    ために使う。64x48 に正規化してから判定するため、解像度が変わっても
+    バンド位置 (画面の上から何割目か) の意味は変わらない。"""
     import cv2
     try:
         small = cv2.resize(frame, (64, 48), interpolation=cv2.INTER_AREA)
@@ -253,7 +274,7 @@ def _frame_corruption_ratio(frame) -> float | None:
     non_flat = [s for s, f in zip(stds, flat) if not f]
     if not non_flat or max(non_flat) < _CORRUPT_FLAT_STD * _CORRUPT_CONTRAST_MULT:
         return None  # 画面全体が単に平坦なだけ (正常なシーン) は対象外
-    return best_run / _CORRUPT_BANDS
+    return best_run / _CORRUPT_BANDS, tuple(flat)
 
 
 # ---------------------------------------------------------------- ワーカー
@@ -317,8 +338,13 @@ def _worker(cid: str, device: str, stop: "Event", cfg: dict) -> None:
     # に使う (使い切ったら None に戻す)。
     pending_frame = None
     corrupt_frames = 0
+    corrupt_tolerated = 0
     corrupt_hist: deque = deque(maxlen=_CORRUPT_HIST_LEN)
     last_corrupt_reconnect = 0.0
+    corrupt_reconnect_backoff = _CORRUPT_RECONNECT_COOLDOWN
+    known_ok_patterns: set = set()
+    last_corrupt_pattern = None
+    corrupt_pattern_streak = 0
 
     def target_res(mode: str) -> tuple[int, int]:
         if mode == NORMAL:
@@ -369,7 +395,7 @@ def _worker(cid: str, device: str, stop: "Event", cfg: dict) -> None:
 
     emit_status(device=device, state="starting", started=time.time(),
                 reconnects=0, errors=0, fps=0, motion=False,
-                corrupt_frames=0, last_corrupt=0)
+                corrupt_frames=0, corrupt_tolerated=0, last_corrupt=0)
 
     while not stop.is_set():
         try:
@@ -442,21 +468,56 @@ def _worker(cid: str, device: str, stop: "Event", cfg: dict) -> None:
             failures = 0
             frames += 1
 
-            corrupt_ratio = _frame_corruption_ratio(frame)
-            corrupt_hist.append(corrupt_ratio is not None)
-            if corrupt_ratio is not None:
+            corrupt_result = _frame_corruption_ratio(frame)
+            if corrupt_result is not None:
+                _, corrupt_pattern = corrupt_result
+                # 同じ位置のバンドだけが何度も引っかかる場合は、破損では
+                # なくカメラ本来の絵 (レターボックス/ビネットなど) の可能性が
+                # 高い。実際に「再起動しても直らず、破損カウントが際限なく
+                # 増え続ける」報告があり、真の USB 帯域不足による破損なら
+                # 転送が途切れる位置は毎回ばらつくはずなので、毎回寸分違わず
+                # 同じ位置になる場合はこちらの可能性が高いと判断している。
+                if corrupt_pattern == last_corrupt_pattern:
+                    corrupt_pattern_streak += 1
+                else:
+                    last_corrupt_pattern = corrupt_pattern
+                    corrupt_pattern_streak = 1
+                if (corrupt_pattern_streak >= _CORRUPT_LEARN_STREAK
+                        and corrupt_pattern not in known_ok_patterns):
+                    known_ok_patterns.add(corrupt_pattern)
+                    log.warning(
+                        "カメラ %s: 同じ位置が %d フレーム連続で平坦だったため、"
+                        "破損ではなくカメラ本来の絵 (レターボックス/ビネット等) と判断し、"
+                        "以後はこのパターンを破損として扱いません。",
+                        cid, corrupt_pattern_streak)
+                if corrupt_pattern in known_ok_patterns:
+                    corrupt_tolerated += 1
+                    corrupt_result = None
+            else:
+                last_corrupt_pattern = None
+                corrupt_pattern_streak = 0
+
+            corrupt_hist.append(corrupt_result is not None)
+            if corrupt_result is not None:
                 corrupt_frames += 1
                 now_c = time.monotonic()
                 rate = sum(corrupt_hist) / len(corrupt_hist)
                 forced_reconnect = (
                     len(corrupt_hist) >= 10 and rate >= _CORRUPT_RATE_THRESHOLD
-                    and now_c - last_corrupt_reconnect >= _CORRUPT_RECONNECT_COOLDOWN)
+                    and now_c - last_corrupt_reconnect >= corrupt_reconnect_backoff)
                 if forced_reconnect:
                     log.warning(
                         "カメラ %s: 直近 %d 枚中 %.0f%% が破損フレーム (単色ブロック/"
-                        "フレーム混在) のため再接続します。USB 帯域不足の可能性があります。",
-                        cid, len(corrupt_hist), rate * 100)
+                        "フレーム混在) のため再接続します (次回リトライまで %.0f 秒)。"
+                        "USB 帯域不足の可能性があります。",
+                        cid, len(corrupt_hist), rate * 100, corrupt_reconnect_backoff)
                     last_corrupt_reconnect = now_c
+                    # 再接続しても直らない場合、20 秒おきに際限なく再接続を
+                    # 繰り返すのは USB をさらに揺らすだけで無意味なので、
+                    # 直らないたびに間隔を倍々に伸ばす (上限あり)。正常な
+                    # フレームが 1 枚でも来れば下の else 節でリセットされる。
+                    corrupt_reconnect_backoff = min(
+                        _CORRUPT_RECONNECT_MAX_BACKOFF, corrupt_reconnect_backoff * 2)
                     corrupt_hist.clear()
                     try:
                         cap.release()
@@ -465,7 +526,8 @@ def _worker(cid: str, device: str, stop: "Event", cfg: dict) -> None:
                     cap = None
                     applied_res = None
                 emit_status(state="reconnecting" if forced_reconnect else "corrupt",
-                            corrupt_frames=corrupt_frames, last_corrupt=time.time())
+                            corrupt_frames=corrupt_frames, corrupt_tolerated=corrupt_tolerated,
+                            last_corrupt=time.time())
                 # 破損フレームは latest.jpg に書かない・動体判定にも使わない・
                 # 保存もしない。直前の正常なフレームがそのまま残るだけにする
                 # ことが、見た目の不具合を確実に消す唯一の手段 (上のコメント参照)。
@@ -473,6 +535,7 @@ def _worker(cid: str, device: str, stop: "Event", cfg: dict) -> None:
                 if rest > 0:
                     time.sleep(rest)
                 continue
+            corrupt_reconnect_backoff = _CORRUPT_RECONNECT_COOLDOWN
 
             q = int(cfg["jpeg_quality"]) if mode == NORMAL else max(35, int(cfg["jpeg_quality"]) - 20)
             ok, jpg = cv2.imencode(".jpg", frame, [int(cv2.IMWRITE_JPEG_QUALITY), q])
@@ -537,7 +600,7 @@ def _worker(cid: str, device: str, stop: "Event", cfg: dict) -> None:
                 emit_status(fps=round(frames / elapsed, 2), clients=viewers,
                             state="online", mode=mode,
                             resolution=f"{applied_res[0]}x{applied_res[1]}" if applied_res else "",
-                            corrupt_frames=corrupt_frames)
+                            corrupt_frames=corrupt_frames, corrupt_tolerated=corrupt_tolerated)
                 frames = 0
                 fps_t0 = time.monotonic()
 
