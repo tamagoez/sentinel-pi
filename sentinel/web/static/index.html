@@ -104,22 +104,42 @@ td.num{text-align:right;font-variant-numeric:tabular-nums}
 .ev-cam-group{margin-bottom:18px}
 .ev-cam-group h4{font-size:12px;color:var(--dim);margin:0 0 8px;font-weight:600}
 
-/* Windows Recall 風: カメラごと + URL アクセスの列を横に並べ、選択した
-   項目を右側に大きくプレビューする */
+/* Windows Recall 風タイムライン: カメラごと + URL アクセスのトラックを、
+   実時刻に基づく単一の共有スケールに沿って横に並べる。選択した項目は
+   右側に大きくプレビューする。詳細は renderEventsRecall() 以下を参照。 */
 .recall-wrap{display:flex;gap:12px;align-items:flex-start}
-.recall-cols{display:flex;gap:8px;flex:1;overflow-x:auto;padding-bottom:4px}
-.recall-col{flex:none;width:150px;display:flex;flex-direction:column;background:var(--panel);border-radius:8px;overflow:hidden;max-height:74vh}
-.recall-col h4{margin:0;padding:7px 9px;font-size:11px;color:var(--dim);background:var(--bg-deep);position:sticky;top:0;display:flex;justify-content:space-between;gap:6px}
-.recall-col .list{overflow-y:auto;flex:1}
-.recall-item{display:flex;flex-direction:column;gap:3px;padding:6px 8px;cursor:pointer;border-bottom:1px solid var(--row-line)}
-.recall-item:hover{background:var(--hover)}
-.recall-item.sel{background:var(--acc-dim,var(--hover));box-shadow:inset 3px 0 var(--acc)}
-.recall-item img{width:100%;height:72px;object-fit:cover;border-radius:4px;background:var(--bg-deep)}
-.recall-item .t{font-size:10px;color:var(--faint);font-variant-numeric:tabular-nums}
-.recall-item .net-line{font-size:11.5px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.recall-item .net-line.bad{color:var(--bad)}
 .recall-preview{flex:none;width:300px;position:sticky;top:0;background:var(--panel);border-radius:8px;padding:12px;max-height:74vh;overflow:auto}
 .recall-preview img{width:100%;border-radius:6px;display:block;cursor:pointer;background:var(--bg-deep)}
+.recall-preview .cluster-list{display:grid;grid-template-columns:repeat(auto-fill,minmax(64px,1fr));gap:6px;margin-top:8px}
+.recall-preview .cluster-list img{height:56px;object-fit:cover;cursor:pointer}
+
+.tl{flex:1;min-width:0;background:var(--panel);border-radius:8px;overflow:hidden;display:flex;flex-direction:column;max-height:74vh}
+.tl-ctrl{display:flex;align-items:center;gap:10px;flex-wrap:wrap;padding:7px 10px;border-bottom:1px solid var(--line);font-size:11px;color:var(--dim);background:var(--bg-deep)}
+.tl-ctrl label{display:flex;align-items:center;gap:4px;cursor:pointer;width:auto}
+.tl-ctrl input[type=number]{width:52px;padding:2px 5px}
+.tl-ctrl .zoom-btn{padding:2px 8px;font-size:11px}
+.tl-body{display:flex;overflow:hidden;flex:1}
+.tl-labels{flex:none;width:108px;display:flex;flex-direction:column;border-right:1px solid var(--line)}
+.tl-labels .tl-axis-sp{height:26px;flex:none;border-bottom:1px solid var(--line)}
+.tl-label{height:52px;flex:none;display:flex;align-items:center;padding:0 8px;font-size:11px;color:var(--dim);border-bottom:1px solid var(--row-line);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.tl-scroll{flex:1;overflow-x:auto;overflow-y:hidden;position:relative}
+.tl-axis{height:26px;position:relative;border-bottom:1px solid var(--line);background:var(--bg-deep)}
+.tl-tick{position:absolute;top:0;bottom:0;border-left:1px solid var(--row-line);padding-left:3px;font-size:10px;color:var(--faint);white-space:nowrap;display:flex;align-items:center}
+.tl-gapmark{position:absolute;top:0;bottom:0;display:flex;align-items:center;justify-content:center;font-size:9.5px;color:var(--faint);background:repeating-linear-gradient(135deg,var(--row-line),var(--row-line) 3px,transparent 3px,transparent 7px);white-space:nowrap;transition:left .25s ease,width .25s ease}
+.tl-track{height:52px;position:relative;border-bottom:1px solid var(--row-line)}
+.tl-track .tl-gapmark{background:repeating-linear-gradient(135deg,var(--bg-deep),var(--bg-deep) 3px,transparent 3px,transparent 7px)}
+.tl-item{position:absolute;top:6px;width:40px;height:40px;border-radius:5px;overflow:hidden;cursor:pointer;transition:left .25s ease;box-shadow:0 0 0 1px var(--line2)}
+.tl-item img{width:100%;height:100%;object-fit:cover;display:block;background:var(--bg-deep)}
+.tl-item.net{background:var(--p-bg);display:flex;align-items:center;justify-content:center;font-size:9px;color:var(--dim);text-align:center;padding:2px}
+.tl-item.net.blocked{background:var(--d-border);color:var(--d-fg)}
+.tl-item.cluster::after{content:attr(data-n);position:absolute;right:-3px;bottom:-3px;background:var(--acc);color:#fff;font-size:9px;line-height:1;padding:2px 3px;border-radius:8px;min-width:13px;text-align:center}
+.tl-item.sel{box-shadow:0 0 0 2px var(--acc)}
+.tl-item.echo{box-shadow:0 0 0 2px var(--warn)}
+.tl-item:hover{filter:brightness(1.15)}
+.tl-cursor{position:absolute;top:0;bottom:0;width:0;border-left:1px dashed var(--acc);pointer-events:none;z-index:3;transition:left .12s linear}
+.tl-cursor .tl-cursor-t{position:absolute;top:1px;left:3px;font-size:10px;color:var(--acc);white-space:nowrap}
+.tl-cursor.now{border-left:1px solid var(--bad)}
+.tl-cursor.now .tl-cursor-t{color:var(--bad)}
 @media (max-width:900px){
   .recall-wrap{flex-direction:column}
   .recall-preview{width:100%}
@@ -260,7 +280,7 @@ try{
       <select id="ev-view" style="width:auto" onchange="renderEvents()">
         <option value="grid">グリッド表示</option>
         <option value="camera">カメラ別表示</option>
-        <option value="timeline">Recall 風表示 (カメラ別 + URL / プレビュー)</option>
+        <option value="timeline">タイムライン表示 (共有時間軸 + プレビュー)</option>
       </select>
       <button onclick="loadEvents()">更新</button>
       <button onclick="deleteEventsDay()">この日のイベントを消去</button>
@@ -1109,6 +1129,7 @@ async function loadEvents(){
       $("#ev-day").innerHTML = r.days.map(d => `<option ${d===r.day?"selected":""}>${d}</option>`).join("")
         || `<option>${r.day}</option>`;
     EV_ITEMS = r.items; EV_DAY = r.day;
+    REC_SEL = null; TL_SEL_T = null; // 日付が変わったら選択・カーソルは破棄する
     $("#ev-sum").textContent = `${r.items.length} 件`;
     EV_NET = [];
     if($("#ev-view").value === "timeline"){
@@ -1147,91 +1168,333 @@ function renderEventsByCamera(){
          <div class="meta"><span class="faint">${esc(i.file)}</span></div></div>`).join("")}</div>
     </div>`).join("") || `<div class="card"><div class="body faint">この日のイベントはありません。</div></div>`;
 }
-// Windows の Recall のように、縦にカメラごと (+ URL アクセス) の列を並べ、
-// 選んだ項目を右側に大きくプレビューする表示。時系列の1本のリストだと
-// 件数が多い日は縦に長くなりすぎて見づらかったため、列を分けて横に並べる。
+// Windows の Recall のように、カメラごと + URL アクセスの「トラック」を
+// 単一の実時間軸に重ねて表示する。以前はトラックごとに独立した縦リスト
+// (インデックス順に並べるだけ) だったため、同じ時刻の出来事が横に揃わず、
+// イベント間の実際の間隔も無視されていた。ここでは必ず buildTlScale() が
+// 返す 1 つの共有スケール (toX/xToT) だけを使って軸・全トラックの座標を
+// 算出する — 各トラックが勝手に自分の座標系を持つことは絶対にしない。
 let REC_COLS = [], REC_SEL = null;
-function renderEventsRecall(){
+let TL_SCALE = null, TL_REGISTRY = new Map();
+let TL_GAP_ON = false, TL_GAP_MIN = 15, TL_PXMIN = 4, TL_SEL_T = null;
+const TL_GAP_PX = 40;       // 折り畳んだ空白区間の固定幅 (px)
+const TL_CLUSTER_PX = 26;   // これより近い項目は 1 つのクラスタにまとめる
+
+// EV_ITEMS / EV_NET (loadEvents が取得済み) を、トラック配列
+// [{key,title,kind,items:[{t,...}]}] に正規化するだけの処理。
+function buildTlTracks(){
   const day = EV_DAY || new Date().toISOString().slice(0,10);
   const camIds = [...new Set(EV_ITEMS.map(i => i.camera))].sort();
-  const cols = camIds.map(cid => ({
-    key: "cam__" + cid, title: camName(cid),
+  const tracks = camIds.map(cid => ({
+    key: "cam__" + cid, title: camName(cid), kind: "img",
     items: EV_ITEMS.filter(i => i.camera === cid).sort((a, b) => a.at - b.at)
-      .map(i => ({type: "img", t: i.at, item: i})),
+      .map(i => ({t: i.at, item: i})),
   }));
   const netItems = EV_NET.map(r => {
     const hms = (r.time || "").slice(11, 19);
     if(!hms) return null;
     const t = new Date(`${day}T${hms}`).getTime() / 1000;
     if(!isFinite(t)) return null;
-    return {type: "net", t, hms, rec: r};
+    return {t, hms, rec: r};
   }).filter(Boolean).sort((a, b) => a.t - b.t);
-  cols.push({key: "net", title: "URL アクセス", items: netItems});
-  REC_COLS = cols;
+  tracks.push({key: "net", title: "URL アクセス", kind: "net", items: netItems});
+  return tracks;
+}
 
+// 全トラックの時刻を 1 本にマージしてから隣接間隔を見る。どれか 1 つの
+// トラックにでもイベントがあればその区間は「空白」扱いにならない。
+function computeTlGaps(tracks, thresholdMin){
+  const all = [];
+  for(const tr of tracks) for(const it of tr.items) all.push(it.t);
+  all.sort((a, b) => a - b);
+  const thresholdSec = thresholdMin * 60;
+  const gaps = [];
+  for(let i = 1; i < all.length; i++){
+    const d = all[i] - all[i - 1];
+    if(d >= thresholdSec) gaps.push([all[i - 1], all[i]]);
+  }
+  return gaps;
+}
+
+// useTimelineScale 相当。実時間区間 (px/分の線形スケール) と、折り畳んだ
+// 空白区間 (固定幅 TL_GAP_PX) を 1 本の座標系に合成し、toX(時刻→px) と
+// xToT(px→時刻) を返す。イベント配列のインデックスは一切使わない。
+function buildTlScale(tracks){
+  const all = [];
+  for(const tr of tracks) for(const it of tr.items) all.push(it.t);
+  all.sort((a, b) => a - b);
+  let minT, maxT;
+  if(all.length){
+    const pad = Math.max(120, (all[all.length - 1] - all[0]) * 0.03);
+    minT = all[0] - pad; maxT = all[all.length - 1] + pad;
+  }else{
+    const day = EV_DAY || new Date().toISOString().slice(0,10);
+    minT = new Date(`${day}T00:00:00`).getTime() / 1000;
+    maxT = minT + 86400;
+  }
+  const gaps = TL_GAP_ON ? computeTlGaps(tracks, TL_GAP_MIN).filter(([s, e]) => e > minT && s < maxT) : [];
+  const segs = [];
+  let cursor = minT;
+  for(const [gs, ge] of gaps){
+    if(gs > cursor) segs.push({type: "real", t0: cursor, t1: gs});
+    segs.push({type: "gap", t0: gs, t1: ge});
+    cursor = ge;
+  }
+  if(cursor < maxT || !segs.length) segs.push({type: "real", t0: cursor, t1: maxT});
+  let x = 0;
+  for(const s of segs){
+    s.x0 = x;
+    s.w = s.type === "gap" ? TL_GAP_PX : Math.max(2, (s.t1 - s.t0) / 60 * TL_PXMIN);
+    x += s.w;
+  }
+  const totalW = x;
+  function toX(t){
+    for(const s of segs){
+      if(t >= s.t0 && t <= s.t1){
+        if(s.type === "gap") return s.x0 + s.w / 2;
+        const frac = s.t1 > s.t0 ? (t - s.t0) / (s.t1 - s.t0) : 0;
+        return s.x0 + frac * s.w;
+      }
+    }
+    return t < minT ? 0 : totalW;
+  }
+  function xToT(x){
+    for(const s of segs){
+      if(x >= s.x0 && x <= s.x0 + s.w){
+        if(s.type === "gap") return (s.t0 + s.t1) / 2;
+        const frac = s.w ? (x - s.x0) / s.w : 0;
+        return s.t0 + frac * (s.t1 - s.t0);
+      }
+    }
+    return x <= 0 ? minT : maxT;
+  }
+  return {segs, totalW, minT, maxT, toX, xToT};
+}
+
+// 目盛り間隔 (分) は、いまのズーム倍率で目盛り同士が最低 46px あくように
+// きりのいい候補から選ぶ。
+const TL_TICK_CANDIDATES = [1, 2, 5, 10, 15, 30, 60, 120, 180, 360, 720, 1440];
+function tlTickMinutes(){
+  for(const m of TL_TICK_CANDIDATES) if(m * TL_PXMIN >= 46) return m;
+  return TL_TICK_CANDIDATES[TL_TICK_CANDIDATES.length - 1];
+}
+function fmtHM(t){
+  const d = new Date(t * 1000);
+  return `${String(d.getHours()).padStart(2,"0")}:${String(d.getMinutes()).padStart(2,"0")}`;
+}
+function fmtDur(sec){
+  sec = Math.round(sec);
+  const h = Math.floor(sec / 3600), m = Math.floor(sec % 3600 / 60);
+  return h ? `${h}時間${m}分` : `${Math.max(1, m)}分`;
+}
+
+function renderTlAxis(scale){
+  const parts = [];
+  const tickMin = tlTickMinutes() * 60;
+  for(const s of scale.segs){
+    if(s.type === "gap"){
+      parts.push(`<div class="tl-gapmark" style="left:${s.x0}px;width:${s.w}px" title="${fmtDur(s.t1 - s.t0)}をスキップ">▍▍ ${fmtDur(s.t1 - s.t0)}スキップ ▍▍</div>`);
+      continue;
+    }
+    for(let t = Math.ceil(s.t0 / tickMin) * tickMin; t <= s.t1; t += tickMin){
+      parts.push(`<div class="tl-tick" style="left:${scale.toX(t)}px">${fmtHM(t)}</div>`);
+    }
+  }
+  return parts.join("");
+}
+
+// x 座標でソートした上で、直前の項目との画面上の距離が TL_CLUSTER_PX 未満
+// なら同じクラスタにまとめる (密集区間の代表サムネイル化)。
+function clusterTlItems(items, scale){
+  const withX = items.map(it => ({...it, x: scale.toX(it.t)})).sort((a, b) => a.x - b.x);
+  const clusters = [];
+  for(const it of withX){
+    const last = clusters[clusters.length - 1];
+    if(last && it.x - last.x < TL_CLUSTER_PX) last.items.push(it);
+    else clusters.push({x: it.x, items: [it]});
+  }
+  return clusters;
+}
+
+function renderTlTrack(track, scale){
+  const parts = [];
+  for(const s of scale.segs){
+    if(s.type === "gap") parts.push(`<div class="tl-gapmark" style="left:${s.x0}px;width:${s.w}px"></div>`);
+  }
+  clusterTlItems(track.items, scale).forEach((c, ci) => {
+    const id = `${track.key}__${ci}`;
+    TL_REGISTRY.set(id, {track, cluster: c});
+    const first = c.items[0], n = c.items.length;
+    const left = Math.max(0, c.x - 20);
+    const selClass = REC_SEL && REC_SEL.id === id ? " sel" : "";
+    const ttl = `${new Date(first.t*1000).toLocaleTimeString("ja-JP")}${n>1?` 他 ${n-1} 件`:""}`;
+    if(track.kind === "img"){
+      parts.push(`<div class="tl-item${n>1?" cluster":""}${selClass}" data-id="${esc(id)}" style="left:${left}px"${n>1?` data-n="${n}"`:""} onclick="selectTlItem('${esc(id)}')" title="${esc(ttl)}">
+        <img src="${first.item.url}" loading="lazy"></div>`);
+    }else{
+      const blocked = c.items.some(it => it.rec.blocked);
+      parts.push(`<div class="tl-item net${blocked?" blocked":""}${n>1?" cluster":""}${selClass}" data-id="${esc(id)}" style="left:${left}px"${n>1?` data-n="${n}"`:""} onclick="selectTlItem('${esc(id)}')" title="${esc(ttl)}">${esc((first.rec.service||"").slice(0,10))}</div>`);
+    }
+  });
+  return parts.join("");
+}
+
+function renderEventsRecall(){
   if(!EV_ITEMS.length && !EV_NET.length){
     $("#events").innerHTML = `<div class="card"><div class="body faint">この日の記録はありません。</div></div>`;
     return;
   }
+  REC_COLS = buildTlTracks();
+  TL_REGISTRY = new Map();
+  TL_SCALE = buildTlScale(REC_COLS);
+  const scale = TL_SCALE;
 
-  const colsHtml = cols.map(c => `
-    <div class="recall-col">
-      <h4>${esc(c.title)} <span class="faint">${c.items.length}</span></h4>
-      <div class="list">${c.items.map((e, idx) => recallRowHtml(c.key, idx, e)).join("")
-        || `<div class="faint" style="padding:8px;font-size:11px">記録なし</div>`}</div>
-    </div>`).join("");
+  const labelsHtml = REC_COLS.map(tr => `<div class="tl-label">${esc(tr.title)} <span class="faint">${tr.items.length}</span></div>`).join("");
+  const tracksHtml = REC_COLS.map(tr => `<div class="tl-track" style="width:${scale.totalW}px" data-key="${esc(tr.key)}">${renderTlTrack(tr, scale)}</div>`).join("");
+
+  const today = new Date().toISOString().slice(0,10);
+  const nowX = (EV_DAY || today) === today ? scale.toX(Date.now()/1000) : null;
 
   $("#events").innerHTML = `
     <div class="recall-wrap">
-      <div class="recall-cols">${colsHtml}</div>
+      <div class="tl">
+        <div class="tl-ctrl">
+          <label><input type="checkbox" style="width:auto" ${TL_GAP_ON?"checked":""} onchange="tlToggleGap(this.checked)"> 空白区間を省略</label>
+          <label>閾値 <input type="number" min="1" max="720" value="${TL_GAP_MIN}" onchange="tlSetGapMin(this.value)"> 分</label>
+          <span class="spacer"></span>
+          <button class="zoom-btn" onclick="tlZoom(0.6)">縮小 −</button>
+          <button class="zoom-btn" onclick="tlZoom(1.6666)">拡大 +</button>
+        </div>
+        <div class="tl-body">
+          <div class="tl-labels"><div class="tl-axis-sp"></div>${labelsHtml}</div>
+          <div class="tl-scroll" id="tl-scroll" onclick="tlScrollClick(event)">
+            <div class="tl-axis" style="width:${scale.totalW}px">${renderTlAxis(scale)}</div>
+            ${tracksHtml}
+            ${nowX!=null?`<div class="tl-cursor now" style="left:${nowX}px"><span class="tl-cursor-t">現在</span></div>`:""}
+          </div>
+        </div>
+      </div>
       <div class="recall-preview" id="recall-preview">
-        <span class="faint">左の一覧から項目を選ぶと、ここに大きく表示されます。</span>
+        <span class="faint">タイムライン上の項目、または軸をクリックすると、ここに表示されます。</span>
       </div>
     </div>`;
 
+  tlApplySelection();
+}
+
+// クリック/選択のたびに全体を再描画すると重く、横スクロール位置も失われる
+// ため、選択のハイライト・縦カーソル線の移動は DOM を直接書き換える
+// (トグル・ズームなど「軸そのもの」が変わる操作だけ renderEventsRecall で
+// 再構築する)。
+function tlApplySelection(){
+  $$(".tl-item.sel").forEach(el => el.classList.remove("sel"));
+  $$(".tl-item.echo").forEach(el => el.classList.remove("echo"));
   if(REC_SEL){
-    const col = REC_COLS.find(c => c.key === REC_SEL.key);
-    if(col && col.items[REC_SEL.idx]) selectRecallItem(REC_SEL.key, REC_SEL.idx);
-    else REC_SEL = null;
+    const el = document.querySelector(`.tl-item[data-id="${CSS.escape(REC_SEL.id)}"]`);
+    if(el) el.classList.add("sel");
+  }
+  const scroll = $("#tl-scroll");
+  let cur = document.getElementById("tl-cursor");
+  if(TL_SEL_T == null || !TL_SCALE || !scroll){
+    if(cur) cur.remove();
+    return;
+  }
+  if(!cur){
+    cur = document.createElement("div");
+    cur.id = "tl-cursor"; cur.className = "tl-cursor";
+    cur.innerHTML = `<span class="tl-cursor-t"></span>`;
+    scroll.appendChild(cur);
+  }
+  cur.style.left = TL_SCALE.toX(TL_SEL_T) + "px";
+  cur.querySelector(".tl-cursor-t").textContent = fmtHM(TL_SEL_T);
+
+  // 時刻の相互参照: 選択時刻に最も近いイベントを、他のトラックでも
+  // 許容誤差内であればハイライトする。
+  const tolSec = Math.max(30, 300 / TL_PXMIN);
+  for(const tr of REC_COLS){
+    let best = null, bestD = Infinity;
+    for(const it of tr.items){
+      const d = Math.abs(it.t - TL_SEL_T);
+      if(d < bestD){ bestD = d; best = it; }
+    }
+    if(!best || bestD > tolSec) continue;
+    for(const [id, reg] of TL_REGISTRY){
+      if(reg.track.key === tr.key && reg.cluster.items.includes(best)){
+        const el = document.querySelector(`.tl-item[data-id="${CSS.escape(id)}"]`);
+        if(el && !el.classList.contains("sel")) el.classList.add("echo");
+        break;
+      }
+    }
   }
 }
-function recallRowHtml(key, idx, e){
-  if(e.type === "img"){
-    return `<div class="recall-item" data-key="${esc(key)}" data-idx="${idx}" onclick="selectRecallItem('${esc(key)}',${idx})">
-      <img src="${e.item.url}" loading="lazy">
-      <span class="t">${new Date(e.t*1000).toLocaleTimeString("ja-JP")}</span>
-    </div>`;
-  }
-  const r = e.rec;
-  return `<div class="recall-item" data-key="${esc(key)}" data-idx="${idx}" onclick="selectRecallItem('${esc(key)}',${idx})">
-    <span class="net-line${r.blocked ? " bad" : ""}">${esc(r.service)}${r.blocked ? " ⨯" : ""}</span>
-    <span class="t">${e.hms}</span>
-  </div>`;
-}
-function selectRecallItem(key, idx){
-  REC_SEL = {key, idx};
-  $$(".recall-item.sel").forEach(el => el.classList.remove("sel"));
-  const row = $(`.recall-item[data-key="${key}"][data-idx="${idx}"]`);
-  if(row) row.classList.add("sel");
-  const col = REC_COLS.find(c => c.key === key);
-  const e = col && col.items[idx];
+
+function selectTlItem(id){
+  const reg = TL_REGISTRY.get(id);
+  if(!reg) return;
+  REC_SEL = {id};
+  TL_SEL_T = reg.cluster.items[0].t;
+  tlApplySelection();
   const prev = $("#recall-preview");
-  if(!prev || !e) return;
-  if(e.type === "img"){
-    const i = e.item;
-    prev.innerHTML = `
-      <img src="${i.url}" onclick="$('#ov-img').src='${i.url}';$('#overlay').classList.add('on')">
-      <div style="margin-top:10px;font-size:14px"><b>${esc(camName(i.camera))}</b></div>
-      <div class="faint" style="font-size:12px;margin-top:2px">${new Date(e.t*1000).toLocaleString("ja-JP")}</div>
-      <div class="faint" style="font-size:11px;margin-top:6px;word-break:break-all">${esc(i.file)}</div>`;
+  if(!prev) return;
+  const items = reg.cluster.items, n = items.length, first = items[0];
+  if(reg.track.kind === "img"){
+    if(n === 1){
+      const i = first.item;
+      prev.innerHTML = `
+        <img src="${i.url}" onclick="$('#ov-img').src='${i.url}';$('#overlay').classList.add('on')">
+        <div style="margin-top:10px;font-size:14px"><b>${esc(camName(i.camera))}</b></div>
+        <div class="faint" style="font-size:12px;margin-top:2px">${new Date(first.t*1000).toLocaleString("ja-JP")}</div>
+        <div class="faint" style="font-size:11px;margin-top:6px;word-break:break-all">${esc(i.file)}</div>`;
+    }else{
+      prev.innerHTML = `
+        <div style="font-size:13px"><b>${esc(camName(first.item.camera))}</b> · ${n} 件が近接</div>
+        <div class="faint" style="font-size:11px;margin-top:2px">${new Date(first.t*1000).toLocaleTimeString("ja-JP")} 〜 ${new Date(items[n-1].t*1000).toLocaleTimeString("ja-JP")}</div>
+        <div class="cluster-list">${items.map(it => `<img src="${it.item.url}" loading="lazy" onclick="$('#ov-img').src='${it.item.url}';$('#overlay').classList.add('on')" title="${esc(new Date(it.t*1000).toLocaleTimeString('ja-JP'))}">`).join("")}</div>`;
+    }
   }else{
-    const r = e.rec;
-    prev.innerHTML = `
-      <div style="font-size:16px"><b>${esc(r.service)}</b>${r.blocked ? ' <span style="color:var(--bad)">(ブロック)</span>' : ""}</div>
-      <div class="faint" style="font-size:12px;margin-top:6px;word-break:break-all">${esc(r.domain || "")}</div>
-      <div class="faint" style="font-size:12px;margin-top:10px">${new Date(e.t*1000).toLocaleString("ja-JP")}</div>`;
+    if(n === 1){
+      const r = first.rec;
+      prev.innerHTML = `
+        <div style="font-size:16px"><b>${esc(r.service)}</b>${r.blocked ? ' <span style="color:var(--bad)">(ブロック)</span>' : ""}</div>
+        <div class="faint" style="font-size:12px;margin-top:6px;word-break:break-all">${esc(r.domain || "")}</div>
+        <div class="faint" style="font-size:12px;margin-top:10px">${new Date(first.t*1000).toLocaleString("ja-JP")}</div>`;
+    }else{
+      prev.innerHTML = `
+        <div style="font-size:13px"><b>URL アクセス</b> · ${n} 件が近接</div>
+        <div style="margin-top:8px;display:flex;flex-direction:column;gap:5px">${items.map(it =>
+          `<div class="faint" style="font-size:11.5px">${esc(new Date(it.t*1000).toLocaleTimeString("ja-JP"))} — ${esc(it.rec.service)}${it.rec.blocked?" ⨯":""}</div>`).join("")}</div>`;
+    }
   }
 }
+
+function tlScrollClick(e){
+  if(e.target.closest(".tl-item")) return;
+  const scroll = $("#tl-scroll");
+  if(!scroll || !TL_SCALE) return;
+  const rect = scroll.getBoundingClientRect();
+  const x = e.clientX - rect.left + scroll.scrollLeft;
+  TL_SEL_T = TL_SCALE.xToT(x);
+  REC_SEL = null;
+  tlApplySelection();
+  const prev = $("#recall-preview");
+  if(prev) prev.innerHTML = `<span class="faint">選択時刻: ${esc(new Date(TL_SEL_T*1000).toLocaleString("ja-JP"))}</span>`;
+}
+
+// トグル / 閾値変更 / ズームは軸の幅そのものが変わるため、renderEventsRecall
+// で全体を再構築する。その際、画面中央に映っている「時刻」を先に読み取って
+// おき、再描画後に同じ時刻が中央に来るよう scrollLeft を復元することで、
+// 見ている場所を見失わないようにする (CSS 側の transition で滑らかに動く)。
+function tlRerenderKeepingCenterTime(){
+  const el = $("#tl-scroll");
+  let centerT = null;
+  if(el && TL_SCALE) centerT = TL_SCALE.xToT(el.scrollLeft + el.clientWidth / 2);
+  renderEventsRecall();
+  const el2 = $("#tl-scroll");
+  if(el2 && TL_SCALE && centerT != null) el2.scrollLeft = Math.max(0, TL_SCALE.toX(centerT) - el2.clientWidth / 2);
+}
+function tlToggleGap(checked){ TL_GAP_ON = !!checked; tlRerenderKeepingCenterTime(); }
+function tlSetGapMin(v){ const n = parseInt(v, 10); if(isFinite(n) && n > 0) TL_GAP_MIN = n; tlRerenderKeepingCenterTime(); }
+function tlZoom(factor){ TL_PXMIN = Math.min(60, Math.max(0.5, TL_PXMIN * factor)); tlRerenderKeepingCenterTime(); }
 async function deleteEventsDay(){
   const day = EV_DAY || $("#ev-day").value;
   if(!day){ toast("日付を選んでください", true); return; }
