@@ -852,10 +852,19 @@ function renderCams(){
   $("#cam-sum").textContent = `${cams.length} 台 / 稼働 ${cams.filter(c=>c.state==="online").length} / 動体 ${cams.filter(c=>c.motion).length}`;
   const host = $("#cams");
   if(!cams.length){ host.innerHTML = `<div class="card"><div class="body faint">カメラが検出されていません。</div></div>`; return; }
-  const sig = cams.map(c => c.id + c.state + c.motion + c.fps).join("|");
+  const sig = cams.map(c => c.id + c.state + c.motion + c.fps + (c.corrupt_frames ?? 0)).join("|");
   if(host.dataset.sig !== sig){
     host.dataset.sig = sig;
-    host.innerHTML = cams.map(c => `
+    host.innerHTML = cams.map(c => {
+      // 破損フレーム (USB 帯域不足などで一部が単色に潰れた/別フレームと
+      // 混ざったフレーム) は latest.jpg に反映される前に捨てているため
+      // (camera.py _frame_corruption_ratio 参照)、ここに出る件数は「実際に
+      // 画面に出た不具合」の回数ではなく「未然に防いだ回数」。ただし
+      // どのカメラで慢性的に起きているかの手がかりにはなるので、直近
+      // 5分以内に発生していればバッジで警告する。
+      const corruptN = c.corrupt_frames ?? 0;
+      const recentCorrupt = c.last_corrupt && (Date.now()/1000 - c.last_corrupt) < 300;
+      return `
       <div class="card cam" data-id="${esc(c.id)}">
         <div class="hd"><i class="dot ${c.state==="online" ? (c.motion?"warn":"ok") : c.state==="halted" ? "warn" : "bad"}"></i>
           <span class="nm" title="${esc(c.name)}">${esc(c.name)}</span>
@@ -866,11 +875,13 @@ function renderCams(){
           <span>fps ${c.fps ?? 0}</span><span>${esc(c.resolution || "-")}</span>
           <span>再接続 ${c.reconnects ?? 0}</span><span>視聴 ${c.clients ?? 0}</span>
           ${c.motion ? '<span style="color:var(--warn)">動体</span>' : ""}
+          ${corruptN ? `<span style="color:${recentCorrupt?"var(--bad)":"var(--faint)"}" title="単色ブロックなどで破損していたため捨てたフレーム数 (USB 帯域不足の可能性)">破損 ${corruptN}</span>` : ""}
           <span class="spacer" style="flex:1"></span>
           <a onclick="openCamSettings('${esc(c.id)}')" style="cursor:pointer">個別設定</a>
           <a onclick="restartCam('${esc(c.id)}')" style="cursor:pointer">再起動</a>
         </div>
-      </div>`).join("");
+      </div>`;
+    }).join("");
   } else {
     $$("#cams .cam img").forEach(img => {
       const id = img.closest(".cam").dataset.id;

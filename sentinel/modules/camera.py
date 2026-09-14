@@ -19,6 +19,7 @@ import os
 import re
 import subprocess
 import time
+from collections import deque
 from datetime import datetime, timedelta
 from multiprocessing import Event, Process
 from pathlib import Path
@@ -136,7 +137,7 @@ def read_status(cid: str) -> dict:
         return json.loads((rt(cid) / "status.json").read_text(encoding="utf-8"))
     except Exception:
         return {"id": cid, "state": "unknown", "fps": 0, "motion": False,
-                "reconnects": 0, "errors": 0}
+                "reconnects": 0, "errors": 0, "corrupt_frames": 0}
 
 
 def _read_int(path: Path, default: int = 0) -> int:
@@ -193,6 +194,66 @@ def read_motion_debug_log(cid: str) -> str:
         return (rt(cid) / "motion_debug.jsonl").read_text(encoding="utf-8")
     except Exception:
         return ""
+
+
+# --------------------------------------------------- 破損フレームの検出
+# USB 2.0 ハブを Ethernet と共有している (CLAUDE.md 参照) ため、帯域が
+# 逼迫すると UVC カメラの MJPEG 転送が完了しないまま OpenCV へフレームが
+# 渡ってくることがある。cv2 の VideoCapture はこれを ok=True の「正常な」
+# フレームとして返してくる (デコード自体はエラーを出さず、デコードし
+# きれなかった行を単色や直前のバッファ内容で埋めるだけ) ため、read() の
+# 成否チェックだけでは検出できない。実機で報告された症状 (画面の一部が
+# 単色 (#009900 など) で埋まる・1枚の中に別タイミングのフレームが混ざって
+# 見える = 同じカメラが複数合成されたように見える) は、どちらもこの
+# パターンに一致する。再起動しても直らないのは、原因が USB 帯域という
+# 物理的な制約であり、プロセスを再起動しても帯域そのものは増えないため。
+#
+# 対策: 画面を粗い横バンドに分けて標準偏差を見る。一部のバンドだけが
+# 不自然に平坦 (デコードされずに単色/直前データで埋まった) で、かつ他の
+# バンドは通常どおり分散があるフレームを「破損」とみなし、そのフレームの
+# 公開 (latest.jpg・動体判定・保存) を丸ごとスキップする。これにより
+# 「見た目の不具合」自体は確実に消える (直前の正常なフレームが latest.jpg
+# に残り続けるだけになる)。画面全体が均一に暗い/白飛びしているだけの
+# 正常なシーン (全バンドが揃って平坦) は誤検知しないよう除外している。
+# 破損が短時間に連発する場合は、UVC セッションが詰まっている可能性を
+# 考えて一度だけ強制的に再接続する (それでも直らなければ帯域不足そのもの
+# が原因なので、これ以上ソフト側でできることはない — その場合のために
+# corrupt_frames を status.json 経由で公開し、どのカメラが慢性的に
+# 破損しているかを UI から特定できるようにしている)。
+_CORRUPT_BANDS = 8
+_CORRUPT_FLAT_STD = 3.0
+_CORRUPT_MIN_RUN = 3          # 8 バンド中 3 (37.5%) 以上が連続で平坦なら疑う
+_CORRUPT_CONTRAST_MULT = 4.0  # 平坦バンドと非平坦バンドの標準偏差の比
+_CORRUPT_HIST_LEN = 20
+_CORRUPT_RATE_THRESHOLD = 0.5
+_CORRUPT_RECONNECT_COOLDOWN = 20.0
+
+
+def _frame_corruption_ratio(frame) -> float | None:
+    """粗い縦バンドの標準偏差から、フレームの一部だけが不自然に単色で
+    埋まっていないかを調べる。破損していなければ None、破損していれば
+    「平坦なバンドの割合」(0〜1、診断用) を返す。"""
+    import cv2
+    try:
+        small = cv2.resize(frame, (64, 48), interpolation=cv2.INTER_AREA)
+        gray = cv2.cvtColor(small, cv2.COLOR_BGR2GRAY).astype("float32")
+    except Exception:
+        return None
+    band_h = gray.shape[0] // _CORRUPT_BANDS
+    if band_h < 1:
+        return None
+    stds = [float(gray[i * band_h:(i + 1) * band_h].std()) for i in range(_CORRUPT_BANDS)]
+    flat = [s < _CORRUPT_FLAT_STD for s in stds]
+    best_run = run = 0
+    for f in flat:
+        run = run + 1 if f else 0
+        best_run = max(best_run, run)
+    if best_run < _CORRUPT_MIN_RUN:
+        return None
+    non_flat = [s for s, f in zip(stds, flat) if not f]
+    if not non_flat or max(non_flat) < _CORRUPT_FLAT_STD * _CORRUPT_CONTRAST_MULT:
+        return None  # 画面全体が単に平坦なだけ (正常なシーン) は対象外
+    return best_run / _CORRUPT_BANDS
 
 
 # ---------------------------------------------------------------- ワーカー
@@ -255,6 +316,9 @@ def _worker(cid: str, device: str, stop: "Event", cfg: dict) -> None:
     # ことになる。ここに保持しておき、直後のループ本体でそのまま動体判定
     # に使う (使い切ったら None に戻す)。
     pending_frame = None
+    corrupt_frames = 0
+    corrupt_hist: deque = deque(maxlen=_CORRUPT_HIST_LEN)
+    last_corrupt_reconnect = 0.0
 
     def target_res(mode: str) -> tuple[int, int]:
         if mode == NORMAL:
@@ -304,7 +368,8 @@ def _worker(cid: str, device: str, stop: "Event", cfg: dict) -> None:
             return False
 
     emit_status(device=device, state="starting", started=time.time(),
-                reconnects=0, errors=0, fps=0, motion=False)
+                reconnects=0, errors=0, fps=0, motion=False,
+                corrupt_frames=0, last_corrupt=0)
 
     while not stop.is_set():
         try:
@@ -377,6 +442,38 @@ def _worker(cid: str, device: str, stop: "Event", cfg: dict) -> None:
             failures = 0
             frames += 1
 
+            corrupt_ratio = _frame_corruption_ratio(frame)
+            corrupt_hist.append(corrupt_ratio is not None)
+            if corrupt_ratio is not None:
+                corrupt_frames += 1
+                now_c = time.monotonic()
+                rate = sum(corrupt_hist) / len(corrupt_hist)
+                forced_reconnect = (
+                    len(corrupt_hist) >= 10 and rate >= _CORRUPT_RATE_THRESHOLD
+                    and now_c - last_corrupt_reconnect >= _CORRUPT_RECONNECT_COOLDOWN)
+                if forced_reconnect:
+                    log.warning(
+                        "カメラ %s: 直近 %d 枚中 %.0f%% が破損フレーム (単色ブロック/"
+                        "フレーム混在) のため再接続します。USB 帯域不足の可能性があります。",
+                        cid, len(corrupt_hist), rate * 100)
+                    last_corrupt_reconnect = now_c
+                    corrupt_hist.clear()
+                    try:
+                        cap.release()
+                    except Exception:
+                        pass
+                    cap = None
+                    applied_res = None
+                emit_status(state="reconnecting" if forced_reconnect else "corrupt",
+                            corrupt_frames=corrupt_frames, last_corrupt=time.time())
+                # 破損フレームは latest.jpg に書かない・動体判定にも使わない・
+                # 保存もしない。直前の正常なフレームがそのまま残るだけにする
+                # ことが、見た目の不具合を確実に消す唯一の手段 (上のコメント参照)。
+                rest = interval - (time.monotonic() - t0)
+                if rest > 0:
+                    time.sleep(rest)
+                continue
+
             q = int(cfg["jpeg_quality"]) if mode == NORMAL else max(35, int(cfg["jpeg_quality"]) - 20)
             ok, jpg = cv2.imencode(".jpg", frame, [int(cv2.IMWRITE_JPEG_QUALITY), q])
             if ok:
@@ -439,7 +536,8 @@ def _worker(cid: str, device: str, stop: "Event", cfg: dict) -> None:
                 elapsed = time.monotonic() - fps_t0
                 emit_status(fps=round(frames / elapsed, 2), clients=viewers,
                             state="online", mode=mode,
-                            resolution=f"{applied_res[0]}x{applied_res[1]}" if applied_res else "")
+                            resolution=f"{applied_res[0]}x{applied_res[1]}" if applied_res else "",
+                            corrupt_frames=corrupt_frames)
                 frames = 0
                 fps_t0 = time.monotonic()
 
