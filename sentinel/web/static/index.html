@@ -875,7 +875,7 @@ function renderCams(){
           <span>fps ${c.fps ?? 0}</span><span>${esc(c.resolution || "-")}</span>
           <span>再接続 ${c.reconnects ?? 0}</span><span>視聴 ${c.clients ?? 0}</span>
           ${c.motion ? '<span style="color:var(--warn)">動体</span>' : ""}
-          ${corruptN ? `<span style="color:${recentCorrupt?"var(--bad)":"var(--faint)"}" title="単色ブロックなどで破損していたため捨てたフレーム数 (USB 帯域不足の可能性)">破損 ${corruptN}</span>` : ""}
+          ${corruptN ? `<span style="color:${recentCorrupt?"var(--bad)":"var(--faint)"}" title="単色ブロックなどで破損していたため捨てたフレーム数 (USB 帯域不足の可能性)。増え続けず頭打ちなら、カメラ本来の絵 (レターボックス等) として学習済み (許容 ${c.corrupt_tolerated ?? 0})">破損 ${corruptN}</span>` : ""}
           <span class="spacer" style="flex:1"></span>
           <a onclick="openCamSettings('${esc(c.id)}')" style="cursor:pointer">個別設定</a>
           <a onclick="restartCam('${esc(c.id)}')" style="cursor:pointer">再起動</a>
