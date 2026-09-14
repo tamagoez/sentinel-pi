@@ -421,9 +421,9 @@ try{
       <div class="row">
         <button onclick="applyRecommendedMotion()">推奨設定を適用</button>
         <span class="faint" style="font-size:12px">
-          オートフォーカスの誤検知や通知の連発を抑える方向の値に一括設定します
+          オートフォーカスの誤検知を抑える方向の値に一括設定します
           (オートフォーカス無効化・起動直後の判定休止を延長・面積比の下限を
-          引き上げ・再通知までの間隔を延長、など)。適用後カメラは再起動されます。
+          引き上げ、など)。適用後カメラは再起動されます。
         </span>
       </div>
       <div class="row" style="margin-top:12px">
@@ -794,7 +794,6 @@ const MOTION_RECOMMENDED = {
   motion_warmup_seconds: 4.0,
   cam_autofocus: false,
   save_cooldown: 8.0,
-  motion_notify_reset_seconds: 90.0,
 };
 async function applyRecommendedMotion(){
   if(!confirm("動体検知の推奨設定を適用します。現在の値は上書きされ、カメラは再起動されます。よろしいですか。")) return;
@@ -1501,7 +1500,7 @@ const GROUPS = [
   ["カメラ", ["cam_width","cam_height","cam_eco_width","cam_eco_height","jpeg_quality",
               "live_fps","normal_fps","eco_fps","retention_days","reconnect_seconds"]],
   ["動体検知", ["motion_threshold","motion_area_ratio","motion_area_max_ratio","motion_interval",
-                "motion_warmup_seconds","cam_autofocus","save_cooldown","motion_notify_reset_seconds",
+                "motion_warmup_seconds","cam_autofocus","save_cooldown",
                 "motion_debug_log"]],
   ["音楽", ["music_enabled","music_autoplay_on_presence","music_volume","music_repeat",
             "music_shuffle","mpg123_buffer_kb","alsa_device"]],
@@ -1530,7 +1529,6 @@ const LABELS = {
   motion_warmup_seconds:"起動直後の判定休止 (秒、オートフォーカス対策)",
   cam_autofocus:"オートフォーカスを有効にする (対応機種のみ)",
   save_cooldown:"保存の間隔 (秒)",
-  motion_notify_reset_seconds:"無検知でこの秒数経過したら「止まった」とみなす (この間は再通知しない)",
   motion_debug_log:"動体判定の診断ログを記録する (下の「診断ログを取得」用)",
   retention_days:"静止画の保存日数",
   reconnect_seconds:"再接続の基準間隔 (秒)",
@@ -1542,7 +1540,8 @@ const LABELS = {
   notify_motion_grouped:"複数カメラの検知を1通にまとめる (オフ: カメラごとに送る)",
   notify_system_events:"システムイベント (起動・端末など) を通知する",
   notify_min_interval:"最短通知間隔 (秒、「まとめる」オンなら全カメラ合算単位)",
-  notify_summary:"無検知が続いたら集計を通知する", notify_summary_after:"統計を送るまでの静穏時間 (秒)",
+  notify_summary:"無検知が続いたら集計を通知する",
+  notify_summary_after:"静穏とみなす秒数 (集計を送るまで、かつ次の検知を新しい「検知開始」とみなすまで)",
   notify_mode_change:"モード遷移 (通常/エコ/緊急) を通知する",
   notify_motion_title:"動体検知の文面 ({camera} {mode} {temp} {time})",
   notify_summary_title:"集計通知の文面 ({total} {duration_min} {quiet_min})",

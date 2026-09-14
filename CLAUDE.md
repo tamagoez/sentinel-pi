@@ -492,6 +492,31 @@ eco/critical で誰も見ておらず、かつフレーム間隔が長いとき�
 直接スレッドで走らせるテストで、この一連の不具合と修正の両方を
 実際に再現・確認済みです。
 
+### 18. 「検知しました」と「検知が落ち着きました」は同じ秒数で開閉する
+
+一時期、`notify.py` の `on_motion()` (即時の「検知しました」= 括弧の開始)
+は専用の `motion_notify_reset_seconds` という秒数で、`summary_loop()`
+(「検知が落ち着きました」= 括弧の終わり) は `notify_summary_after` という
+**別の**秒数で、それぞれ独立に「無検知がどれだけ続いたら区切りとみなすか」
+を判定していました。この 2 つの秒数がずれている限り (前者の既定値は 45〜90
+秒、後者は 300 秒)、動体が両者の間の間隔で散発すると「終了」が 1 回も
+届かないうちに「開始」だけ何度も届く、という報告どおりの不具合になります
+— 開始のための静穏条件 (例: 45 秒) は動体が数分おきに散発するだけで
+毎回満たされてしまうのに、終了のための静穏条件 (300 秒) はなかなか満たされ
+ないためです。
+
+修正は「開始と終了を同じ秒数 (`notify_summary_after`) で揃える」ことです。
+`on_motion()` は `motion_notify_reset_seconds` を使わず `notify_summary_after`
+をそのまま使うよう変更し、`motion_notify_reset_seconds` という設定項目
+自体を削除しました (`core/config.py` の `DEFAULTS`/`_RANGES`、
+`web/static/index.html` の `GROUPS`/`LABELS`/`MOTION_RECOMMENDED`、
+`web/routes.py` の restart 対象除外リストから、すべて取り除いてあります)。
+**開始・終了の判定に別々の秒数を持つ設計へ戻さないでください** — 秒数を
+どちらか一方だけ変更できる設定が 2 つ存在する限り、運用中にずれて同じ
+不具合に戻ります。「開始 1 回 → (その間の検知はまとめる) → 終了 1 回」
+という対応関係を保証したいだけなら、境界の判定に使う秒数は 1 つで
+足ります。
+
 ## モジュール構成
 
 各モジュールは疎結合で、`core/state.py` の `MODE` を購読するだけです。
@@ -547,12 +572,11 @@ modules/terminal.py     pty over WebSocket
 modules/netlog.py       AdGuard querylog -> サービス名変換
 modules/notify.py       Discord (レート制限対応キュー)。notify_motion_grouped
                          で「カメラごとに即時送信」と「複数カメラの検知を
-                         1通にまとめる」を切り替えられる。動体が途切れず
-                         続く間は再通知しない (motion_notify_reset_seconds
-                         秒の無検知で「止まった」とみなし、次の検知だけが
-                         新しいイベントとして通知される) — 以前は
-                         notify_min_interval の周期だけで間引いていたため、
-                         動体が続く限りその間隔で延々と通知が飛び続けていた
+                         1通にまとめる」を切り替えられる。「検知しました」
+                         (開始) と「検知が落ち着きました」(終了、
+                         summary_loop() が送る) は notify_summary_after
+                         という同じ秒数で開閉する 1 組の括弧 — 開始・終了を
+                         別の秒数で判定しないこと (CLAUDE.md #18)
 modules/maintenance.py  4 時の定時処理と再起動
 
 web/routes.py           全 HTTP / WebSocket エンドポイント
