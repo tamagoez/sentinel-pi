@@ -39,6 +39,7 @@ import asyncio
 import json
 import logging
 import os
+import collections
 import random
 import re
 import shutil
@@ -225,7 +226,7 @@ class Player:
             cmd += ["-a", dev]
         try:
             self.proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                                         stderr=subprocess.DEVNULL, text=True, bufsize=1)
+                                         stderr=subprocess.PIPE, text=True, bufsize=1)
         except Exception as exc:
             self.last_error = f"mpg123 の起動に失敗: {exc}"
             log.exception(self.last_error)
@@ -233,8 +234,31 @@ class Player:
         self._reader = threading.Thread(target=self._read_loop, daemon=True,
                                         name="mpg123-reader")
         self._reader.start()
+        # stderr を捨てない。ALSA の「デバイスを開けない/使用中」系の
+        # エラーは全部こちらに出るため、DEVNULL にしていたときは
+        # 「mpg123 が即死して復帰ループが回り続けるのに理由が
+        # 分からない」状態になっていた (実機で踏んだ)。パイプを誰も
+        # 読まないと mpg123 側が詰まるので、専用スレッドで読み続けつつ
+        # 直近数行だけ保持する。
+        self._err_tail = collections.deque(maxlen=5)
+        threading.Thread(target=self._read_err_loop, args=(self.proc,),
+                         daemon=True, name="mpg123-stderr").start()
         self._send(f"V {int(config.get('music_volume'))}")
         return True
+
+    def _read_err_loop(self, p: subprocess.Popen) -> None:
+        if p.stderr is None:
+            return
+        try:
+            for line in p.stderr:
+                line = line.strip()
+                if line:
+                    self._err_tail.append(line)
+        except Exception:
+            pass
+
+    def stderr_tail(self) -> str:
+        return " / ".join(getattr(self, "_err_tail", ()))
 
     def _send(self, cmd: str) -> None:
         p = self.proc
@@ -705,7 +729,12 @@ async def loop() -> None:
                 and not PLAYER.suspended_by
                 and (PLAYER.proc is None or PLAYER.proc.poll() is not None)
                 and PLAYER.tracks):
-            log.warning("mpg123 が停止していたため復帰させます")
+            tail = PLAYER.stderr_tail()
+            if tail:
+                PLAYER.last_error = tail
+                log.warning("mpg123 が停止していたため復帰させます (mpg123: %s)", tail)
+            else:
+                log.warning("mpg123 が停止していたため復帰させます")
             await asyncio.to_thread(PLAYER.play, PLAYER.position)
 
         PLAYER.persist()

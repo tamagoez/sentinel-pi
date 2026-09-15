@@ -145,6 +145,7 @@ cp -r "$SRC/sentinel" "$APP_DIR/"
 cp -f "$SRC/scripts/"*.sh "$APP_DIR/scripts/"
 chmod +x "$APP_DIR/scripts/"*.sh
 ln -sf "$APP_DIR/scripts/sentinel-diagnose.sh" /usr/local/bin/sentinel-diagnose
+ln -sf "$APP_DIR/scripts/sentinel-logs.sh" /usr/local/bin/sentinel-logs
 ln -sf "$APP_DIR/scripts/sentinel-adguard-8083.sh" /usr/local/bin/sentinel-adguard-8083
 for f in setup.sh update.sh bootstrap.sh install.sh; do
   cp -f "$SRC/$f" "$APP_DIR/" 2>/dev/null || true
@@ -289,12 +290,11 @@ if [[ -x /opt/syncthing/syncthing ]]; then
   chmod -R g+rwX "$ST_HOME" "$ST_VAULTS" 2>/dev/null || true
   chmod g+s "$ST_HOME" "$ST_VAULTS" 2>/dev/null || true
 
-  if runuser -u dietpi -- sh -c ': > "$1/.st-write-test.$$" && rm -f "$1/.st-write-test.$$"' _ "$ST_HOME" 2>/dev/null; then
-    ok "dietpi can write to $ST_HOME"
-  else
-    w "dietpi still cannot write to $ST_HOME; Syncthing may fail to start."
-    w "A reboot (or logging dietpi out/in) may be needed for the new group membership to take effect."
-  fi
+  # The authoritative write test is against $ST_DEFAULT, below, after the
+  # bind mount - that is the path Syncthing itself opens
+  # ($ST_DEFAULT/syncthing.lock). Testing only $ST_HOME checks the wrong
+  # directory whenever the bind mount is not actually in place, which is
+  # exactly when this matters.
 
   # Defensive: something other than our own bind mount can occasionally
   # grab this directory first - DietPi's own drive-detection auto-mounting
@@ -352,6 +352,16 @@ if [[ -x /opt/syncthing/syncthing ]]; then
     fi
 
     mkdir -p "$ST_DEFAULT"
+    # mkdir runs as root here, so a freshly created $ST_DEFAULT is
+    # root:root 0755 - and Syncthing runs as dietpi. Whenever the bind
+    # mount below does not take (or is cleared later), Syncthing then
+    # fails on exactly this directory with "chmod ...: operation not
+    # permitted" followed by "open .../syncthing.lock: permission
+    # denied", which is what real hardware reported. Hand the directory
+    # to dietpi up front; once the bind mount covers it these calls are
+    # harmless no-ops (exFAT has no per-directory ownership at all).
+    chown dietpi:"$SVC_USER" "$ST_DEFAULT" 2>/dev/null || true
+    chmod 0775 "$ST_DEFAULT" 2>/dev/null || true
     grep -qF " $ST_DEFAULT " /etc/fstab || \
       echo "$ST_HOME $ST_DEFAULT none bind 0 0" >> /etc/fstab
     systemctl daemon-reload
@@ -363,8 +373,28 @@ if [[ -x /opt/syncthing/syncthing ]]; then
       w "Syncthing will keep using $ST_DEFAULT on the SD card until this is fixed."
     fi
 
-    (( ST_WAS_RUNNING )) && { systemctl start syncthing 2>/dev/null || true; }
+    (( ST_WAS_RUNNING )) && { systemctl reset-failed syncthing 2>/dev/null; systemctl start syncthing 2>/dev/null || true; }
   fi
+
+  # Now that the bind mount (or its absence) is settled, test the path
+  # Syncthing actually opens. This is the check that would have caught the
+  # real-hardware failure directly instead of leaving it to journalctl.
+  if runuser -u dietpi -- sh -c ': > "$1/.st-write-test.$$" && rm -f "$1/.st-write-test.$$"' _ "$ST_DEFAULT" 2>/dev/null; then
+    ok "dietpi can write to $ST_DEFAULT"
+  else
+    w "dietpi cannot write to $ST_DEFAULT - Syncthing will fail to start there."
+    w "  $(ls -ld "$ST_DEFAULT" 2>/dev/null)"
+    w "  dietpi groups: $(id -nG dietpi 2>/dev/null)"
+    w "A reboot may be needed for a newly added group to reach syncthing.service."
+  fi
+
+  # Syncthing fails fast on a permission problem, so it can burn through
+  # systemd's default 5-starts-in-10s limit and stick at
+  # failed (start-limit-hit), where every later `systemctl start` is
+  # ignored with "Start request repeated too quickly" - real hardware hit
+  # exactly this. reset-failed clears that counter; it is a harmless no-op
+  # on a healthy unit (CLAUDE.md #9).
+  systemctl reset-failed syncthing 2>/dev/null || true
   if (( ST_NEED_RESTART )) && systemctl is-active --quiet syncthing 2>/dev/null; then
     systemctl restart syncthing 2>/dev/null && ok "Restarted Syncthing to pick up its new group membership"
   fi

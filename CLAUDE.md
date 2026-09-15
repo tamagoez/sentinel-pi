@@ -1583,6 +1583,94 @@ mpg123 はどのケースでもエラーを出しません。デバイスは開�
 `sentinel-fix-audio-output.sh` 側へ 1 本化しました (CLAUDE.md #37 の
 「4 か所のうち 1 つだけ直すな」を、そもそも複製を減らして守るため)。
 
+**実機のログで判明した続き (2 点)**
+
+`:8384` がまだ開けない原因は、GUI の bind アドレス以前に **Syncthing が
+そもそも起動できていない**ことでした。ログはこうです:
+
+```
+WRN Failed to correct directory permissions
+    (error="chmod /mnt/dietpi_userdata/syncthing: operation not permitted")
+ERR Failed to acquire lock
+    (error="open /mnt/dietpi_userdata/syncthing/syncthing.lock: permission denied")
+syncthing.service: Start request repeated too quickly.
+```
+
+1. **`$ST_DEFAULT` (`/mnt/dietpi_userdata/syncthing`) が root 所有のまま
+   でした。** `install.sh` の `mkdir -p "$ST_DEFAULT"` は root で走るので
+   `root:root 0755` になります。その上に bind マウントが載っている間は
+   exFAT 側の `uid=`/`gid=` が効くので問題になりませんが、**bind が外れて
+   いる瞬間 (マウント修復スクリプトが一度 umount した直後や、bind に失敗
+   した場合) は素の root 所有ディレクトリが露出**し、`dietpi` で動く
+   Syncthing は lock ファイルすら作れません。`mkdir` の直後に
+   `chown dietpi:$SVC_USER` + `chmod 0775` を掛け、Guardian も
+   「マウントポイントでないとき」だけ同じ修正を毎周期行います。
+   **この chown を外さないでください** — bind が外れた瞬間に Syncthing が
+   起動不能になる状態に戻ります。
+2. **起動失敗の連発で `failed (start-limit-hit)` に固定されていました**
+   (CLAUDE.md #9 と全く同じ罠)。権限エラーで即死するため systemd の既定
+   「10 秒に 5 回」をすぐ超え、以後の `systemctl start` は
+   `Start request repeated too quickly` で**無視**されます。つまり権限を
+   直しても自動では起き上がりません。`install.sh`・
+   `sentinel-fix-syncthing-gui.sh`・Guardian の
+   `check_syncthing_storage()` の**すべての** `systemctl start syncthing`
+   の前に `systemctl reset-failed syncthing` を入れました。**この
+   reset-failed を外さないでください。**
+
+あわせて、`install.sh` の dietpi 書き込みテストの対象を `$ST_HOME`
+(`$STORAGE/syncthing`) から **`$ST_DEFAULT`** へ変え、bind マウント確定後に
+実行するようにしました。**Syncthing が実際に開くのは `$ST_DEFAULT` 側**
+であり、bind が効いていない場合この 2 つは別のディレクトリです — 今回は
+まさにその状況で、テストは `$ST_HOME` を見て「書ける」と報告していました。
+失敗時は `ls -ld` と `id -nG dietpi` も出すので、次は journalctl を見に
+行かなくても切り分けられます。
+
+**mpg123 の stderr を捨てていました**
+
+音楽側は「無音」ではなく、`mpg123 が停止していたため復帰させます` が
+繰り返し記録される = **mpg123 が即死し続けている**状態でした。ところが
+`_spawn()` は `stderr=subprocess.DEVNULL` で起動していたため、ALSA の
+「デバイスを開けない/使用中」といった死因がすべて捨てられていました。
+`stderr=subprocess.PIPE` にし、専用スレッドで読み続けて (読まないと
+mpg123 側のパイプが詰まります) 直近 5 行を保持し、復帰ループが死亡を
+検知した時点で `last_error` とログに載せるようにしました。**この
+stderr を再び DEVNULL に戻さないでください** — 同じ「即死し続けるのに
+理由が分からない」状態に戻ります。
+
+### 42. 実機の状況報告は `sentinel-logs` で取る (生のジャーナルを貼らせない)
+
+実機の不具合を切り分けるとき、これまでは利用者に `journalctl` の出力を
+そのまま貼ってもらっていました。これには 2 つの実害がありました。
+
+1. **同じ行が何十回も並ぶ。** 権限エラーで毎秒再起動するサービスは、
+   同じ文を延々と出します。実際に届いた報告では、10 行のうち意味のある
+   情報は 4 種類だけで、残りは同一メッセージの繰り返しでした。長いので
+   途中で切られ、**肝心の 1 行 (`Start request repeated too quickly`)
+   が埋もれる**ことが起きました。
+2. **状態が分からない。** ログだけでは「今どのサービスが落ちているか」
+   「どのカードが音声出力か」「誰がどこに書き込めるか」が読み取れず、
+   毎回追加で質問する往復が発生していました。
+
+`scripts/sentinel-logs.sh` はこの 2 点だけを解決します。ジャーナルの
+接頭辞 (タイムスタンプ・ホスト・`unit[pid]`) と、デーモンが本文に自分で
+書くタイムスタンプを取り除いてから同一メッセージを数え、`x14` のように
+回数を付けて 1 行にまとめます — PID が毎回変わる再起動ループでも正しく
+畳めます。先頭にはサービスの active/failed (`start-limit-hit` は
+「`reset-failed` が要る」と明示)、`$STORAGE` のマウントと書き込み可否、
+`$ST_DEFAULT` の所有者と dietpi の書き込み可否、音声カードと numid=1/3、
+待ち受けポートを置きます。
+
+**`sentinel-diagnose` を置き換えるものではありません。** あちらは
+tar.gz を作る深掘り用で、チャットに貼るには向きません。こちらは標準
+出力へのプレーンテキスト 1 画面分で、全選択して貼るだけで済むことを
+目的にしています。**「とりあえず journalctl を全部貼ってください」に
+戻さないでください** — 上の 2 つの実害にそのまま戻ります。
+
+ジャーナルの読み取りには root (または `systemd-journal` グループ) が
+要ります。権限が無い場合でも状態ブロックは出し、「読めなかった」と
+明示してから `sudo sentinel-logs` を案内します — 黙って空を返すと
+「何も問題が無い」と誤読されるためです。
+
 ## モジュール構成
 
 各モジュールは疎結合で、`core/state.py` の `MODE` を購読するだけです。
@@ -1626,6 +1714,15 @@ scripts/sentinel-fix-audio-output.sh
                     一致しているかを確認する。find_output_card() の
                     bash 版はここ 1 本だけ (Guardian の check_audio() は
                     このスクリプトへ委譲する、CLAUDE.md #41)
+scripts/sentinel-logs.sh
+                    `sentinel-logs [時間] [full]` (/usr/local/bin/sentinel-logs)。
+                    貼り付け用に「今おかしい所」だけを短く出す。同じ
+                    メッセージは PID や行内タイムスタンプの違いを無視して
+                    1 行にまとめ、回数を x14 のように付ける (再起動ループは
+                    同じ文を何十回も出すため、これだけで実用的な長さに
+                    なる)。冒頭にサービス・ストレージ・音声・ポートの状態
+                    ブロックを置き、数字に文脈を与える。tar.gz を作る
+                    sentinel-diagnose とは用途が別 (CLAUDE.md #42)
 scripts/sentinel-adguard-8083.sh
                     AdGuard Home の :8083 への直接アクセスを一時的に
                     有効化 / 恒久的に無効化する (人が手動で実行する)
