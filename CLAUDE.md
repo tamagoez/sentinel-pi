@@ -1489,6 +1489,26 @@ Obsidian 内でのリアルタイム差分マージはしない)、同じノー�
   追加しています** (存在すれば)。GUI 認証が未設定かどうかまでは検証して
   いません — `sentinel` 自身の Web UI パスワードにも同様の自動検証が
   無いのと同じ基準で、今回もスコープ外としています。
+- **Syncthing の GUI (`:8384`) は、素の DietPi パッケージのままだと
+  ループバックにしか listen しません** — `config.xml` の
+  `<gui address="127.0.0.1:8384">` が Syncthing 自体の上流既定値で、
+  DietPi 側もこれを変えていません。ところが `setup.sh` H8・`SETUP.md`/
+  `SETUP.ja.md`・`install.sh` 末尾の案内はどれも `http://<Pi のIP>:8384`
+  へ LAN からブラウザでアクセスして GUI パスワードを設定する前提で
+  書かれており、ループバックのままではそもそも到達できず、実機で
+  「開けない」という報告になりました。AdGuard の `:8083` (CLAUDE.md #5)
+  は過去の実機トラブル固有の理由でループバック固定にしていますが、
+  Syncthing の GUI にはその理由がなく、Sentinel 自身の Web UI (`:8080`)
+  と同じ「到達可能・パスワードで保護」という設計のつもりで案内文を
+  書いていたので、`install.sh` の Syncthing ブロック末尾
+  (`systemctl enable --now syncthing` の直後) で `config.xml` の
+  address を `0.0.0.0:8384` に書き換えて Syncthing を再起動します。
+  `config.xml` は Syncthing が一度も起動していないと存在しないため、
+  導入したその回の `install.sh` では間に合わないことがあります —
+  `sentinel-guardian.sh` の `check_syncthing_gui()` が同じ書き換えを
+  2 分ごとにも確認するので、次の周期までには追いつきます。**この
+  0.0.0.0 への書き換えを外して素のループバック待ち受けに戻さないで
+  ください** — 同じ「案内どおりに開いても繋がらない」不具合に戻ります。
 
 ## モジュール構成
 
@@ -1510,9 +1530,13 @@ scripts/sentinel-fix-syncthing-mount.sh
                     バインド先が生のデバイスに直接奪われている、の 3 つを
                     条件分岐で自動修復する。install.sh の STEP 4 冒頭
                     (sentinel-fix-storage-owner.sh より前) で毎回呼ばれる
-                    ため、update.sh の再実行だけで反映される。自動で直せな
-                    かった項目はコピペ用の手動コマンドとしてまとめて表示
-                    する (CLAUDE.md #40)
+                    ため、update.sh の再実行だけで反映される。修復中は
+                    sentinel-guardian.timer 自体も止める (oneshot の
+                    .service を止めるだけでは 2 分後にタイマーがまた
+                    syncthing を起動し直してしまい、その開いたファイルが
+                    umount を無言で失敗させた実例があった)。自動で直せな
+                    かった項目はコピペ用の手動コマンド (可能なら fuser の
+                    出力込み) としてまとめて表示する (CLAUDE.md #40)
 scripts/sentinel-adguard-8083.sh
                     AdGuard Home の :8083 への直接アクセスを一時的に
                     有効化 / 恒久的に無効化する (人が手動で実行する)
