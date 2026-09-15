@@ -1411,21 +1411,44 @@ Obsidian 内でのリアルタイム差分マージはしない)、同じノー�
   再マウントします。**この device+inode 比較をやめて `findmnt`/`mount`
   出力の文字列一致に戻さないでください** — 同じ「一見動いているのに
   実は判定が外れている」不具合を作り込むリスクに戻ります。
-- **所有権の修正は `sentinel-fix-storage-owner.sh` を `dietpi` ユーザー
-  向けに呼び出して再利用しています** (`<data-dir> <mountpoint> <user>`
-  という既存の汎用シグネチャのまま、ユーザーだけ `sentinel` から
-  `dietpi` に変えて呼ぶ)。**ただし 1 つ制約が残っています**:
-  このスクリプトの exFAT/NTFS 分岐 (`fix_fat_mount()`) はリマウント前に
-  `sentinel.service` だけを止める実装になっており、`dietpi` ユーザーや
-  `syncthing.service` を止めません。今回のインストール手順では
-  Syncthing がまだ `$STORAGE/syncthing` に触れていない段階でこの関数を
-  呼んでいるため実害はありませんが、もし将来 `$STORAGE` が exFAT/NTFS
-  で、かつ Syncthing が既に稼働中の状態でこの関数のリマウントが必要に
-  なるケースがあれば、`sentinel.service` を止めるだけではアンマウントが
-  "busy" のまま失敗する可能性があります。**この既知の制約を認識せずに
-  `sentinel-fix-storage-owner.sh` の対象ユーザーを安易に増やさないで
-  ください** — 今のところ安全な理由 (呼び出し順序) を、変更のたびに
-  確認し直してください。
+- **所有権は `sentinel-fix-storage-owner.sh` を `dietpi` ユーザー向けに
+  再度呼び出すのではなく、`dietpi` を `sentinel` のグループへ追加する
+  ことで共有しています。** 当初は「`<data-dir> <mountpoint> <user>` と
+  いう既存の汎用シグネチャのまま、ユーザーだけ `sentinel` から `dietpi`
+  に変えて呼ぶ」実装でしたが、これは実機で**実際に全サービス停止を
+  引き起こす障害**になりました。原因は CLAUDE.md #8 そのものです —
+  exFAT/NTFS では `uid=`/`gid=` は**マウント全体**に効く `/etc/fstab`
+  オプションであり、ディレクトリ単位のものではありません。`install.sh`
+  の STEP 4 が `$STORAGE` を `sentinel` 向けに直した直後、この節の当初の
+  実装が同じ `$STORAGE` を今度は `dietpi` 向けに直そうとして
+  `fix_fat_mount()` を再度走らせ、`sentinel` のために設定した
+  `uid=`/`gid=` を上書きしていました。さらに Guardian の
+  `check_storage_owner()` (sentinel 向け) と `check_syncthing_storage()`
+  (dietpi 向け、当時) がどちらも 2 分ごとに独立して所有権を再確認して
+  いたため、2 つのチェックが同じマウントの `uid=`/`gid=` を取り合い、
+  周期のたびに `fix_fat_mount()` の umount → mount (最後は `umount -l`
+  にも倒す) が発火し続け、他のサービス (`sentinel.service`・カメラ・
+  `syncthing.service`) がまだファイルを開いたままのマウントを何度も
+  付け外しすることになりました。結果、全サービスが停止し、物理ドライブ
+  (`sda1`) が `$STORAGE` (`/mnt/VIDEOSD`) ではなく
+  `/mnt/dietpi_userdata/syncthing` 側にマウントされたまま固定される、
+  という報告どおりの障害が実際に発生しました。
+
+  修正は `usermod -aG "$SVC_USER" dietpi` です。`fix_fat_mount()` は
+  `sentinel` のためにマウントを直すとき既に `umask=002` (グループ書き込み
+  可) を設定しているため、`dietpi` をこのグループへ加えるだけで
+  `$STORAGE` 配下すべてへの書き込み権限を、fstab にも再マウントにも
+  一切触れずに共有できます。exFAT/NTFS ではグループ書き込みがマウント
+  オプション由来なのでこれで足り、ext4 のような通常の Unix ファイル
+  システムに備えて `chgrp -R`/`chmod -R g+rwX`/`chmod g+s` もディレクトリ
+  単位で (安全に、マウント自体には触れずに) 掛けています。新規に加わった
+  補助グループは**既に起動中のプロセスには効かない**ため (`dietpi` の
+  `id -nG` に `$SVC_USER` がまだ無いときだけ新規追加とみなし)、その場合は
+  `syncthing.service` を再起動して反映させています。**この
+  `sentinel-fix-storage-owner.sh` への `dietpi` 向け呼び出しを復活させ
+  ないでください** — マウント全体の `uid=`/`gid=` を 2 人のユーザーが
+  奪い合う限り、同じ「実機で全サービス停止」障害に戻ります。グループ
+  共有ならこの奪い合いが原理的に起こりません。
 - **Syncthing 自身の公開ディスカバリ/リレーサーバーへの依存は、GUI から
   オフにするよう案内しています** (`setup.sh` H8)。Tailscale (#39) が
   既に「外出先からの安全な到達性」を提供しているため、Syncthing 側でも

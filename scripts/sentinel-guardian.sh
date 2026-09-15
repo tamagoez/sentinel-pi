@@ -360,21 +360,28 @@ check_syncthing_storage() {
   local storage="${SENTINEL_STORAGE:-/mnt/VIDEOSD}"
   local st_home="$storage/syncthing"
   local st_default=/mnt/dietpi_userdata/syncthing
-  local script="/opt/sentinel/scripts/sentinel-fix-storage-owner.sh"
-  local out
+  local svc_user=sentinel
 
-  if [[ -x "$script" ]]; then
-    if out=$("$script" "$st_home" "$storage" dietpi 2>&1); then
-      [[ -n "$out" ]] && fixed "$out"
-    else
-      warn "dietpi still cannot write to $st_home: $out"
-    fi
-    if out=$("$script" "$storage/obsidian" "$storage" dietpi 2>&1); then
-      [[ -n "$out" ]] && fixed "$out"
-    else
-      warn "dietpi still cannot write to $storage/obsidian: $out"
+  # NEVER call sentinel-fix-storage-owner.sh here for 'dietpi' - its
+  # exFAT/NTFS branch rewrites the whole *mount's* uid=/gid= options
+  # (CLAUDE.md #8), not a single directory, and this mount was already
+  # fixed for $svc_user by install.sh/check_storage_owner(). Doing that a
+  # second time for a different user is exactly what caused a real
+  # incident: this check and check_storage_owner() fighting over the same
+  # mount's uid=/gid= every 2-minute cycle, each fix_fat_mount() call
+  # remounting (up to a lazy umount -l) a mount every other service still
+  # had files open on - which took every service down and left the drive
+  # mounted somewhere other than $storage (CLAUDE.md #40). Group
+  # membership shares the *already-fixed* access instead, without ever
+  # touching fstab or the mount again.
+  if ! id -nG dietpi 2>/dev/null | grep -qw "$svc_user"; then
+    if usermod -aG "$svc_user" dietpi 2>/dev/null; then
+      fixed "added dietpi to the $svc_user group (was missing - Syncthing may not have been able to write to $storage)"
+      systemctl is-active --quiet syncthing 2>/dev/null && systemctl restart syncthing 2>/dev/null
     fi
   fi
+  chgrp -R "$svc_user" "$st_home" "$storage/obsidian" 2>/dev/null || true
+  chmod -R g+rwX "$st_home" "$storage/obsidian" 2>/dev/null || true
 
   [[ -d "$st_home" && -d "$st_default" ]] || return 0
   local a b
