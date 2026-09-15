@@ -283,10 +283,20 @@ async def motion_debug_log(request: Request):
 async def snapshot(cid: str, request: Request):
     require(request)
     p = camera.rt(cid) / "latest.jpg"
-    if not p.is_file():
+    # FileResponse は os.stat() で Content-Length を決めたあと、パス名を
+    # 開き直して本文を送る。latest.jpg はカメラワーカーが毎フレーム
+    # os.replace() で差し替えているため、この 2 段階の間に差し替わると
+    # stat 時のサイズと実際に送るバイト数がずれ、uvicorn 側で
+    # "Response content shorter/longer than Content-Length" になる。
+    # read_bytes() の 1 回読みなら os.replace() の原子性により古い版・
+    # 新しい版のどちらかを完全な形で読めるので、そのバイト列から
+    # Content-Length を計算する Response にする。
+    try:
+        data = await asyncio.to_thread(p.read_bytes)
+    except FileNotFoundError:
         raise HTTPException(404, "フレームがありません")
-    return FileResponse(p, media_type="image/jpeg",
-                        headers={"Cache-Control": "no-store"})
+    return Response(content=data, media_type="image/jpeg",
+                    headers={"Cache-Control": "no-store"})
 
 
 def _mjpeg(cid: str):
