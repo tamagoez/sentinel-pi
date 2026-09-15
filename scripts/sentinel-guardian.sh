@@ -360,21 +360,28 @@ check_syncthing_storage() {
   local storage="${SENTINEL_STORAGE:-/mnt/VIDEOSD}"
   local st_home="$storage/syncthing"
   local st_default=/mnt/dietpi_userdata/syncthing
-  local script="/opt/sentinel/scripts/sentinel-fix-storage-owner.sh"
-  local out
+  local svc_user=sentinel
 
-  if [[ -x "$script" ]]; then
-    if out=$("$script" "$st_home" "$storage" dietpi 2>&1); then
-      [[ -n "$out" ]] && fixed "$out"
-    else
-      warn "dietpi still cannot write to $st_home: $out"
-    fi
-    if out=$("$script" "$storage/obsidian" "$storage" dietpi 2>&1); then
-      [[ -n "$out" ]] && fixed "$out"
-    else
-      warn "dietpi still cannot write to $storage/obsidian: $out"
+  # NEVER call sentinel-fix-storage-owner.sh here for 'dietpi' - its
+  # exFAT/NTFS branch rewrites the whole *mount's* uid=/gid= options
+  # (CLAUDE.md #8), not a single directory, and this mount was already
+  # fixed for $svc_user by install.sh/check_storage_owner(). Doing that a
+  # second time for a different user is exactly what caused a real
+  # incident: this check and check_storage_owner() fighting over the same
+  # mount's uid=/gid= every 2-minute cycle, each fix_fat_mount() call
+  # remounting (up to a lazy umount -l) a mount every other service still
+  # had files open on - which took every service down and left the drive
+  # mounted somewhere other than $storage (CLAUDE.md #40). Group
+  # membership shares the *already-fixed* access instead, without ever
+  # touching fstab or the mount again.
+  if ! id -nG dietpi 2>/dev/null | grep -qw "$svc_user"; then
+    if usermod -aG "$svc_user" dietpi 2>/dev/null; then
+      fixed "added dietpi to the $svc_user group (was missing - Syncthing may not have been able to write to $storage)"
+      systemctl is-active --quiet syncthing 2>/dev/null && systemctl restart syncthing 2>/dev/null
     fi
   fi
+  chgrp -R "$svc_user" "$st_home" "$storage/obsidian" 2>/dev/null || true
+  chmod -R g+rwX "$st_home" "$storage/obsidian" 2>/dev/null || true
 
   [[ -d "$st_home" && -d "$st_default" ]] || return 0
   local a b
@@ -384,6 +391,25 @@ check_syncthing_storage() {
 
   local was_active=0
   systemctl is-active --quiet syncthing 2>/dev/null && { was_active=1; systemctl stop syncthing; }
+
+  # A real incident showed $st_default sometimes ending up mounted directly
+  # from the raw device (not via our bind mount) - DietPi's own drive
+  # detection can grab a newly-visible partition onto an existing empty
+  # mountpoint in a boot-time race (same family as check_bluetooth()'s
+  # race). mount --bind on top of that would stack a second independent
+  # mount of the same filesystem instead of replacing it, and two live
+  # mounts of one exFAT/NTFS filesystem written out of sync risk real data
+  # corruption. Clear anything that isn't our bind mount first.
+  if mountpoint -q "$st_default" 2>/dev/null; then
+    local cur_src
+    cur_src=$(findmnt -no SOURCE "$st_default" 2>/dev/null | tail -n1)
+    if [[ "$cur_src" != "$st_home"* ]]; then
+      local j
+      for j in 1 2 3 4 5; do umount "$st_default" 2>/dev/null && break; sleep 1; done
+      umount -l "$st_default" 2>/dev/null || true
+    fi
+  fi
+
   if mount --bind "$st_home" "$st_default" 2>/dev/null; then
     fixed "re-bind-mounted Syncthing home onto $st_home (had reset to $st_default on the SD card)"
   else

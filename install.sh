@@ -175,6 +175,13 @@ ok "Python environment ready"
 
 # ---------------------------------------------------------------- 4. Data
 c "STEP 4/10  Prepare data directory"
+# Repair a stale/duplicate $STORAGE mount before trusting `mountpoint -q`
+# below - a mount can appear present while still carrying wrong options
+# (mount -a does not fix an already-mounted filesystem) or while the same
+# device is also mounted a second time elsewhere (CLAUDE.md #40). Always
+# safe to run: a clean machine exits immediately without touching anything.
+"$SRC/scripts/sentinel-fix-syncthing-mount.sh" "$SVC_USER" || true
+
 if [[ -d "$STORAGE" ]] && mountpoint -q "$STORAGE"; then
   DATA="$STORAGE/sentinel"
   ok "Using external storage"
@@ -234,19 +241,81 @@ c "STEP 5/10  Prepare Syncthing storage (Obsidian sync)"
 # filesystem level, transparently to Syncthing, and (unlike a symlink
 # pointing outside dietpi_userdata) survives any systemd path sandboxing
 # DietPi's unit applies to the literal /mnt/dietpi_userdata/syncthing path.
+#
+# Ownership: Syncthing runs as 'dietpi', a *different* user than $SVC_USER,
+# on the *same* $STORAGE mount that STEP 4 above just fixed for $SVC_USER.
+# sentinel-fix-storage-owner.sh must never be called a second time here
+# with 'dietpi' as the target user: on exFAT/NTFS its exFAT/NTFS branch
+# rewrites uid=/gid= *mount options*, which apply to the whole mount, not
+# a single directory (CLAUDE.md #8) - calling it again for a different
+# user overwrites the uid=/gid= that was just set for $SVC_USER, and a
+# real incident on real hardware showed what that does: Guardian's
+# check_storage_owner() (for $SVC_USER) and this step (for dietpi) fought
+# over the same mount every cycle, each one's fix_fat_mount() re-running
+# umount/mount (falling back to umount -l) on a mount every other service
+# still had files open on - which took the whole box's services down and
+# left the drive mounted somewhere other than $STORAGE. Adding 'dietpi' to
+# $SVC_USER's group instead lets it use the *same* already-fixed mount
+# options (umask=002 already grants group write) without ever touching
+# fstab or the mount a second time - safe on exFAT/NTFS *and* ext4, so no
+# filesystem-specific branching is needed here at all.
 if [[ -x /opt/syncthing/syncthing ]]; then
   ST_HOME="$STORAGE/syncthing"
   ST_DEFAULT=/mnt/dietpi_userdata/syncthing
   ST_VAULTS="$STORAGE/obsidian"
   mkdir -p "$ST_HOME" "$ST_VAULTS"
 
-  for d in "$ST_HOME" "$ST_VAULTS"; do
-    if FIX_OUT=$("$SRC/scripts/sentinel-fix-storage-owner.sh" "$d" "$STORAGE" dietpi 2>&1); then
-      [[ -n "$FIX_OUT" ]] && ok "$FIX_OUT" || ok "dietpi can write to $d"
-    else
-      w "$FIX_OUT"
+  # A supplementary group only applies to processes started *after* the
+  # change - an already-running syncthing.service keeps its old groups
+  # until restarted. Only force that restart when the membership is
+  # actually new (checked before usermod, which is itself always a
+  # successful no-op when already a member and so cannot tell new from
+  # existing on its own) - no need to bounce Syncthing on every run once
+  # this has already applied once.
+  ST_NEED_RESTART=0
+  if ! id -nG dietpi 2>/dev/null | grep -qw "$SVC_USER"; then
+    usermod -aG "$SVC_USER" dietpi 2>/dev/null && {
+      ok "dietpi added to the $SVC_USER group (shares its already-fixed $STORAGE access)"
+      ST_NEED_RESTART=1
+    }
+  fi
+  # Belt-and-braces group ownership on the directories themselves. A no-op
+  # on exFAT/NTFS (chgrp/chmod cannot do anything there - group access
+  # already comes from the mount's own gid=/umask= options above) but
+  # matters on a real Unix filesystem (ext4, ...), where each directory
+  # has its own ownership independent of the mount. Never touches $STORAGE
+  # itself or any mount option - purely a directory-level chgrp/chmod.
+  chgrp -R "$SVC_USER" "$ST_HOME" "$ST_VAULTS" 2>/dev/null || true
+  chmod -R g+rwX "$ST_HOME" "$ST_VAULTS" 2>/dev/null || true
+  chmod g+s "$ST_HOME" "$ST_VAULTS" 2>/dev/null || true
+
+  if runuser -u dietpi -- sh -c ': > "$1/.st-write-test.$$" && rm -f "$1/.st-write-test.$$"' _ "$ST_HOME" 2>/dev/null; then
+    ok "dietpi can write to $ST_HOME"
+  else
+    w "dietpi still cannot write to $ST_HOME; Syncthing may fail to start."
+    w "A reboot (or logging dietpi out/in) may be needed for the new group membership to take effect."
+  fi
+
+  # Defensive: something other than our own bind mount can occasionally
+  # grab this directory first - DietPi's own drive-detection auto-mounting
+  # a newly-visible partition directly onto an existing empty mountpoint is
+  # a boot-time race in the same family as CLAUDE.md #12, and a real
+  # incident showed the same partition ending up mounted here directly
+  # (not via bind - `mount`/`findmnt` show the raw device as SOURCE, not
+  # "$ST_HOME[/...]") instead of at $STORAGE. If left alone, the
+  # `mount --bind` below would stack a *second* independent mount of the
+  # same filesystem on top of it rather than replacing it - two live
+  # mounts of one exFAT/NTFS filesystem can be written out of sync with
+  # each other and risk real data corruption. Clear anything that isn't
+  # our bind mount before proceeding.
+  if mountpoint -q "$ST_DEFAULT" 2>/dev/null; then
+    CUR_SRC=$(findmnt -no SOURCE "$ST_DEFAULT" 2>/dev/null | tail -n1)
+    if [[ "$CUR_SRC" != "$ST_HOME"* ]]; then
+      w "$ST_DEFAULT is already mounted from $CUR_SRC (not our bind mount) - clearing it first"
+      for i in 1 2 3 4 5; do umount "$ST_DEFAULT" 2>/dev/null && break; sleep 1; done
+      umount -l "$ST_DEFAULT" 2>/dev/null || true
     fi
-  done
+  fi
 
   # Already bind-mounted from a previous run? A bind mount makes the target
   # report the *source* directory's device+inode, so comparing those is a
@@ -295,6 +364,9 @@ if [[ -x /opt/syncthing/syncthing ]]; then
     fi
 
     (( ST_WAS_RUNNING )) && { systemctl start syncthing 2>/dev/null || true; }
+  fi
+  if (( ST_NEED_RESTART )) && systemctl is-active --quiet syncthing 2>/dev/null; then
+    systemctl restart syncthing 2>/dev/null && ok "Restarted Syncthing to pick up its new group membership"
   fi
   systemctl enable --now syncthing >/dev/null 2>&1 || true
 else

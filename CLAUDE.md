@@ -1400,6 +1400,34 @@ Obsidian 内でのリアルタイム差分マージはしない)、同じノー�
   `-home` フラグを直接書き換える実装、あるいはシンボリックリンクに
   戻さないでください** — どちらも同じ「DietPi の再導入で静かに壊れる」
   不具合に戻ります。
+
+  この bind マウントには、もう 1 つ別のレースが実機で見つかっています。
+  DietPi 自身のドライブ自動検出が、起動直後の競合 (CLAUDE.md #12 の
+  Bluetooth/Hotspot と同じ種類のレース) でこの場所へパーティションを
+  **バインドではなく直接** 先にマウントしてしまうことがあります。
+  `mount`/`findmnt` の SOURCE が `$ST_HOME[/...]` ではなく生のデバイス
+  (`/dev/sda1` など) のままなら、それはこの直接マウントです。これを
+  放置して `mount --bind` を重ねると、**同じ exFAT/NTFS パーティションが
+  2 つの独立したマウントとして同時に生き続け**、双方に書き込みが起きると
+  データ破損の恐れがあります。`install.sh`/`check_syncthing_storage()` は
+  どちらも、bind する前に `$ST_DEFAULT` の現在のマウント元を確認し、自分の
+  bind 由来でなければ umount (リトライ + `umount -l`) してから bind し
+  直します。**このチェックを外して無条件に `mount --bind` を重ねる実装に
+  戻さないでください** — 同じ二重マウントに戻ります。
+
+  さらに、これらの障害が実機で実際に重なって起きた際、利用者が手作業で
+  切り分けるのは難しいと判断し、`scripts/sentinel-fix-syncthing-mount.sh`
+  を新設しました。`install.sh` の STEP 4 冒頭 (`sentinel-fix-storage-owner.sh`
+  より前) で毎回呼ばれ、(1) `$STORAGE` 自体が古いマウントオプションの
+  まま (`mount -a` は既にマウント済みのファイルシステムを直さないため、
+  fstab を直しただけでは効きません)、(2) 同じデバイスがどこか別の場所にも
+  二重マウントされている、(3) `$ST_DEFAULT` が bind ではなく生のデバイスに
+  直接奪われている、の 3 つを条件分岐で自動修復します。自動で直せなかった
+  項目は無言で諦めず、その場でコピペ実行できる手動コマンドとしてまとめて
+  表示します。冪等 (問題が無ければ何もせず即終了) なので、`update.sh` の
+  再実行だけで毎回このチェックが走ります。**この自動修復スクリプトの呼び
+  出しを install.sh から外さないでください** — 外すと、次にこの種の障害が
+  起きたとき利用者が再び手作業での切り分けを強いられます。
 - **`install.sh`/Guardian の両方が、このバインドマウントを device+inode
   比較で検証しています** (`stat -c '%d:%i'` が `$STORAGE/syncthing` と
   `/mnt/dietpi_userdata/syncthing` とで一致するかどうか)。`findmnt` の
@@ -1411,21 +1439,44 @@ Obsidian 内でのリアルタイム差分マージはしない)、同じノー�
   再マウントします。**この device+inode 比較をやめて `findmnt`/`mount`
   出力の文字列一致に戻さないでください** — 同じ「一見動いているのに
   実は判定が外れている」不具合を作り込むリスクに戻ります。
-- **所有権の修正は `sentinel-fix-storage-owner.sh` を `dietpi` ユーザー
-  向けに呼び出して再利用しています** (`<data-dir> <mountpoint> <user>`
-  という既存の汎用シグネチャのまま、ユーザーだけ `sentinel` から
-  `dietpi` に変えて呼ぶ)。**ただし 1 つ制約が残っています**:
-  このスクリプトの exFAT/NTFS 分岐 (`fix_fat_mount()`) はリマウント前に
-  `sentinel.service` だけを止める実装になっており、`dietpi` ユーザーや
-  `syncthing.service` を止めません。今回のインストール手順では
-  Syncthing がまだ `$STORAGE/syncthing` に触れていない段階でこの関数を
-  呼んでいるため実害はありませんが、もし将来 `$STORAGE` が exFAT/NTFS
-  で、かつ Syncthing が既に稼働中の状態でこの関数のリマウントが必要に
-  なるケースがあれば、`sentinel.service` を止めるだけではアンマウントが
-  "busy" のまま失敗する可能性があります。**この既知の制約を認識せずに
-  `sentinel-fix-storage-owner.sh` の対象ユーザーを安易に増やさないで
-  ください** — 今のところ安全な理由 (呼び出し順序) を、変更のたびに
-  確認し直してください。
+- **所有権は `sentinel-fix-storage-owner.sh` を `dietpi` ユーザー向けに
+  再度呼び出すのではなく、`dietpi` を `sentinel` のグループへ追加する
+  ことで共有しています。** 当初は「`<data-dir> <mountpoint> <user>` と
+  いう既存の汎用シグネチャのまま、ユーザーだけ `sentinel` から `dietpi`
+  に変えて呼ぶ」実装でしたが、これは実機で**実際に全サービス停止を
+  引き起こす障害**になりました。原因は CLAUDE.md #8 そのものです —
+  exFAT/NTFS では `uid=`/`gid=` は**マウント全体**に効く `/etc/fstab`
+  オプションであり、ディレクトリ単位のものではありません。`install.sh`
+  の STEP 4 が `$STORAGE` を `sentinel` 向けに直した直後、この節の当初の
+  実装が同じ `$STORAGE` を今度は `dietpi` 向けに直そうとして
+  `fix_fat_mount()` を再度走らせ、`sentinel` のために設定した
+  `uid=`/`gid=` を上書きしていました。さらに Guardian の
+  `check_storage_owner()` (sentinel 向け) と `check_syncthing_storage()`
+  (dietpi 向け、当時) がどちらも 2 分ごとに独立して所有権を再確認して
+  いたため、2 つのチェックが同じマウントの `uid=`/`gid=` を取り合い、
+  周期のたびに `fix_fat_mount()` の umount → mount (最後は `umount -l`
+  にも倒す) が発火し続け、他のサービス (`sentinel.service`・カメラ・
+  `syncthing.service`) がまだファイルを開いたままのマウントを何度も
+  付け外しすることになりました。結果、全サービスが停止し、物理ドライブ
+  (`sda1`) が `$STORAGE` (`/mnt/VIDEOSD`) ではなく
+  `/mnt/dietpi_userdata/syncthing` 側にマウントされたまま固定される、
+  という報告どおりの障害が実際に発生しました。
+
+  修正は `usermod -aG "$SVC_USER" dietpi` です。`fix_fat_mount()` は
+  `sentinel` のためにマウントを直すとき既に `umask=002` (グループ書き込み
+  可) を設定しているため、`dietpi` をこのグループへ加えるだけで
+  `$STORAGE` 配下すべてへの書き込み権限を、fstab にも再マウントにも
+  一切触れずに共有できます。exFAT/NTFS ではグループ書き込みがマウント
+  オプション由来なのでこれで足り、ext4 のような通常の Unix ファイル
+  システムに備えて `chgrp -R`/`chmod -R g+rwX`/`chmod g+s` もディレクトリ
+  単位で (安全に、マウント自体には触れずに) 掛けています。新規に加わった
+  補助グループは**既に起動中のプロセスには効かない**ため (`dietpi` の
+  `id -nG` に `$SVC_USER` がまだ無いときだけ新規追加とみなし)、その場合は
+  `syncthing.service` を再起動して反映させています。**この
+  `sentinel-fix-storage-owner.sh` への `dietpi` 向け呼び出しを復活させ
+  ないでください** — マウント全体の `uid=`/`gid=` を 2 人のユーザーが
+  奪い合う限り、同じ「実機で全サービス停止」障害に戻ります。グループ
+  共有ならこの奪い合いが原理的に起こりません。
 - **Syncthing 自身の公開ディスカバリ/リレーサーバーへの依存は、GUI から
   オフにするよう案内しています** (`setup.sh` H8)。Tailscale (#39) が
   既に「外出先からの安全な到達性」を提供しているため、Syncthing 側でも
@@ -1452,6 +1503,16 @@ scripts/sentinel-fix-storage-owner.sh
                     外部ストレージへの書き込み権限を確認し、必要なら
                     fstab のマウントオプションか chown で直す (install.sh
                     と Guardian の両方から呼ばれる)
+scripts/sentinel-fix-syncthing-mount.sh
+                    $STORAGE 自体が古いマウントオプションのまま (mount -a
+                    は既にマウント済みのファイルシステムを直さない)・同じ
+                    デバイスが二重にマウントされている・Syncthing の
+                    バインド先が生のデバイスに直接奪われている、の 3 つを
+                    条件分岐で自動修復する。install.sh の STEP 4 冒頭
+                    (sentinel-fix-storage-owner.sh より前) で毎回呼ばれる
+                    ため、update.sh の再実行だけで反映される。自動で直せな
+                    かった項目はコピペ用の手動コマンドとしてまとめて表示
+                    する (CLAUDE.md #40)
 scripts/sentinel-adguard-8083.sh
                     AdGuard Home の :8083 への直接アクセスを一時的に
                     有効化 / 恒久的に無効化する (人が手動で実行する)
