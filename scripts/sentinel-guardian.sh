@@ -427,13 +427,20 @@ check_syncthing_storage() {
 # install.sh's own one-shot fix so a config.xml that did not exist yet on
 # that run (first-ever install, before Syncthing has started once) still
 # gets caught here within the next 2-minute cycle.
+#
+# The GUI address is a <address>127.0.0.1:8384</address> XML ELEMENT, not
+# an address="..." attribute on <gui> (confirmed against Syncthing's own
+# config docs, https://docs.syncthing.net/users/config.html). A first cut
+# of this fix used the attribute form, which never matches and left the
+# GUI unreachable with no error at all. Do not go back to the attribute
+# form.
 check_syncthing_gui() {
   command -v syncthing >/dev/null 2>&1 || [[ -x /opt/syncthing/syncthing ]] || return 0
   local storage="${SENTINEL_STORAGE:-/mnt/VIDEOSD}"
   local st_config="$storage/syncthing/config.xml"
   [[ -f "$st_config" ]] || return 0
-  grep -q 'address="127\.0\.0\.1:8384"' "$st_config" || return 0
-  sed -i 's#address="127\.0\.0\.1:8384"#address="0.0.0.0:8384"#' "$st_config"
+  grep -qE '<address>127\.0\.0\.1:[0-9]+</address>' "$st_config" || return 0
+  sed -i -E 's#<address>127\.0\.0\.1:([0-9]+)</address>#<address>0.0.0.0:\1</address>#' "$st_config"
   if systemctl restart syncthing 2>/dev/null; then
     fixed "Syncthing GUI was loopback-only - now reachable at :8384"
   else

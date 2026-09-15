@@ -1491,8 +1491,16 @@ Obsidian 内でのリアルタイム差分マージはしない)、同じノー�
   無いのと同じ基準で、今回もスコープ外としています。
 - **Syncthing の GUI (`:8384`) は、素の DietPi パッケージのままだと
   ループバックにしか listen しません** — `config.xml` の
-  `<gui address="127.0.0.1:8384">` が Syncthing 自体の上流既定値で、
-  DietPi 側もこれを変えていません。ところが `setup.sh` H8・`SETUP.md`/
+  `<address>127.0.0.1:8384</address>` (`<gui>` の子要素、属性ではない
+  — [公式ドキュメント](https://docs.syncthing.net/users/config.html)、
+  [MichaIng/DietPi#3329](https://github.com/MichaIng/DietPi/issues/3329)
+  で同じ症状が報告されています) が Syncthing 自体の上流既定値で、
+  DietPi 側もこれを変えていません。**最初の修正はこれを `address="127.
+  0.0.1:8384"` という属性だと誤認し**、`sed` パターンが一致せず何も
+  変更されないまま `[OK]` のような見た目で終わっていました (実機で
+  `ERR_CONNECTION_REFUSED` として発覚)。**このパターンを属性形式
+  (`address="..."`) に戻さないでください** — 同じ「変更したはずなのに
+  何も変わらない」不具合に戻ります。ところが `setup.sh` H8・`SETUP.md`/
   `SETUP.ja.md`・`install.sh` 末尾の案内はどれも `http://<Pi のIP>:8384`
   へ LAN からブラウザでアクセスして GUI パスワードを設定する前提で
   書かれており、ループバックのままではそもそも到達できず、実機で
