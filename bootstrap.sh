@@ -164,13 +164,20 @@ apt-get update -qq
 # espeak-ng stays installed too as an always-available fallback
 # (modules/voice.py falls back to it automatically if Open JTalk's
 # packages are ever missing), so voice.py never goes silent outright.
+# swh-plugins: provides the mbeq LADSPA plugin (15-band graphic EQ) used
+# by the optional music equalizer (modules/music.py, CLAUDE.md #31/#32).
+# Only ever loaded when a user actually enables the EQ (default off) -
+# scripts/sentinel-setup-audio-mixing.sh searches for it at runtime and
+# falls back to no EQ if it's somehow missing, so this package failing to
+# install does not break basic playback.
 apt-get install -y --no-install-recommends \
   bluez bluez-alsa-utils \
   mpg123 v4l-utils python3-opencv python3-pil python3-venv \
   fonts-dejavu-core fonts-noto-cjk iptables \
   exfatprogs ntfs-3g espeak-ng \
-  open-jtalk open-jtalk-mecab-naist-jdic hts-voice-nitech-jp-atr503-m001 >/dev/null 2>&1 \
-  && ok "Bluetooth-audio, camera, exFAT/NTFS and voice (Open JTalk/espeak-ng) packages installed" \
+  open-jtalk open-jtalk-mecab-naist-jdic hts-voice-nitech-jp-atr503-m001 \
+  swh-plugins >/dev/null 2>&1 \
+  && ok "Bluetooth-audio, camera, exFAT/NTFS, voice and EQ packages installed" \
   || w "Some packages failed to install."
 
 # ---------------------------------------------------------------- 6. Audio
@@ -194,6 +201,26 @@ if (( ! AUDIO_DONE )); then
     grep -qE '^dtparam=audio=on' "$BOOTCFG" || echo 'dtparam=audio=on' >> "$BOOTCFG"
     ok "dtparam=audio=on written to $BOOTCFG (fallback)"
   fi
+fi
+
+# Establish the dmix baseline (music + voice announcements able to mix
+# simultaneously with independent volumes, CLAUDE.md #31) so it's in place
+# before the app ever starts. EQ off here regardless of any saved setting -
+# config.json may not exist yet on a first install, and even when it does,
+# bootstrap.sh has no business reaching into it; modules/music.py re-asserts
+# the actual configured EQ state itself once the app starts. Skipped if the
+# card genuinely isn't ready yet (a reboot is still pending) - the next
+# bootstrap.sh run (setup.sh resuming after that reboot, or the next
+# update.sh) covers it, same as everything else in this script being safe
+# to re-run.
+CARD=$(aplay -l 2>/dev/null | grep -m1 -oE '^card [0-9]+' | awk '{print $2}')
+if [[ -n "$CARD" ]]; then
+  "$(dirname "${BASH_SOURCE[0]}")/scripts/sentinel-setup-audio-mixing.sh" "$CARD" off \
+    >/dev/null 2>&1 \
+    && ok "Audio mixing (music + voice, independent volumes) set up on card $CARD" \
+    || w "Audio mixing setup failed; music/voice announcements may not be able to play at once."
+else
+  w "No sound card detected yet; audio mixing setup will run on the next bootstrap.sh (after the pending reboot)."
 fi
 
 # ---------------------------------------------------------------- 7. Resources

@@ -197,6 +197,8 @@ async def put_config(request: Request):
         music.PLAYER.set_volume(int(changed["music_volume"]))
     if "music_shuffle" in changed or "music_shuffle_seed" in changed:
         music.PLAYER.scan()
+    if any(k in changed for k in ("music_eq_enabled", "music_eq_bands", "music_eq_track_overrides")):
+        await asyncio.to_thread(music.refresh_eq)
     if any(k in changed for k in ("eco_idle_minutes", "temp_eco_c",
                                   "temp_critical_c", "temp_recover_c",
                                   "mode_override")):
@@ -398,6 +400,39 @@ async def music_status(request: Request):
     return {"status": music.PLAYER.status(),
             "playlist": music.PLAYER.playlist(),
             "downloads": music.DOWNLOADS[:20]}
+
+
+@router.get("/api/music/eq")
+async def music_eq_get(request: Request):
+    require(request)
+    return {
+        "bands_hz": music.EQ_BAND_HZ,
+        "enabled": bool(config.get("music_eq_enabled")),
+        "global": config.get("music_eq_bands") or {},
+        "track_overrides": config.get("music_eq_track_overrides") or {},
+        "current_track": (music.PLAYER.current_path().name
+                          if music.PLAYER.current_path() else ""),
+    }
+
+
+@router.put("/api/music/eq/global")
+async def music_eq_set_global(request: Request):
+    require(request)
+    patch = await request.json()
+    if not isinstance(patch, dict):
+        raise HTTPException(400, "バンドの指定が不正です")
+    cur = await asyncio.to_thread(music.set_eq_bands, patch)
+    return {"ok": True, "bands": cur}
+
+
+@router.put("/api/music/eq/track/{name}")
+async def music_eq_set_track(name: str, request: Request):
+    require(request)
+    patch = await request.json()
+    if not isinstance(patch, dict):
+        raise HTTPException(400, "バンドの指定が不正です")
+    cur = await asyncio.to_thread(music.set_track_eq_bands, name, patch)
+    return {"ok": True, "bands": cur}
 
 
 @router.post("/api/music/{action}")

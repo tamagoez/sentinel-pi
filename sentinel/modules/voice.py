@@ -19,18 +19,32 @@ Raspberry Pi 3B+ の制約上の設計判断:
 
 - 音楽エンジン (mpg123、CLAUDE.md #2) とは完全に別経路で鳴らす。
   Open JTalk/espeak-ng はどちらも ALSA へ直接書き込み、mpg123 のキュー・
-  音楽ライブラリには一切触れない。ただし bcm2835 の出力は dmix なしでは
-  同時に 1 ストリームしか受け付けないため、曲の再生を一時的に完全停止
-  (music.duck_for_voice()/resume_from_voice()、bluetooth.py の退避・復帰
-  と同じパターン) してから喋る。Bluetooth 接続中は bluealsa-aplay が同じ
-  デバイスを使っているため、割り込むと双方が壊れるだけなので、その間は
-  アナウンス自体を静かにスキップする。
+  音楽ライブラリには一切触れない。**曲を止めずに重ねて鳴らす** —
+  `sentinel-setup-audio-mixing.sh` が設定する ALSA の dmix (CLAUDE.md
+  #31) 経由で、音楽は `sentinel_music`、音声は `sentinel_voice` という
+  別々の名前つき PCM へ書き込み、dmix がハードウェア側で 1 本にミックス
+  する。以前は bcm2835 の出力が dmix なしでは同時に 1 ストリームしか
+  受け付けないため曲を毎回完全停止していたが (`music.duck_for_voice()`)、
+  「音楽の音量が意図せず変わる」「重ねて鳴らしたい」という報告を受けて
+  dmix 導入に切り替えた。`_mixing_ready()` が `sentinel_voice` という
+  named PCM の存在を都度確認し、用意できていれば ducking せず重ねて鳴らす
+  — 用意できていない場合 (LADSPA プラグイン欠如以外の何らかの理由で
+  `sentinel-setup-audio-mixing.sh` が失敗していた場合など) だけ、
+  `duck_for_voice()`/`resume_from_voice()` による旧来の「完全に止めて
+  から喋る」経路に自動でフォールバックする。Bluetooth 接続中だけは別に
+  例外で、`bluealsa-aplay` がこの dmix を経由せず ALSA デバイスを直接
+  掴むため、割り込むと双方が壊れる。その間はアナウンス自体を静かに
+  スキップする (元々の設計のまま)。
 
-- 音量は bluetooth._apply_volume() と同じ ALSA numid=1 (PCM Playback
-  Volume) を直接操作する。mpg123 はソフトウェアゲイン (music_volume) で
-  音量を持つため ALSA ミキサーを一切操作しないが、TTS エンジンはそれを
-  バイパスするので、Bluetooth 再生と同じ理由でハードウェア側の音量調整が
-  要る (CLAUDE.md #15)。
+- 音量は `sentinel_voice` PCM 自身が持つ ALSA softvol コントロール
+  ("SentinelVoice"、`amixer -c <card> sset SentinelVoice <%>`) を操作
+  する。**bluetooth._apply_volume() や以前のこのモジュールが使っていた
+  numid=1 (PCM Playback Volume、ハードウェアのアンプそのもの) とは別物**
+  — numid=1 は音楽・Bluetooth・この Pi の出力全体で共有される 1 つの
+  ハードウェアレジスタなので、ここを声のたびに書き換えると、たとえ
+  ducking で曲を止めていても「音楽の音量がいつの間にか変わる」ことに
+  なっていた (実際に報告された不具合)。softvol はストリームごとに独立
+  したソフトウェアゲインを持つため、この問題自体が起こらない。
 
 - カテゴリごとに個別の on/off + 読み上げ文のテンプレートを持つ
   (voice_time_enabled/voice_error_enabled/voice_camera_reboot_enabled/
@@ -150,6 +164,23 @@ def _has_open_jtalk() -> bool:
             and _ojt_dic_dir() is not None and _ojt_voice_file() is not None)
 
 
+def _mixing_ready() -> bool:
+    """sentinel-setup-audio-mixing.sh (CLAUDE.md #31) が sentinel_voice/
+    sentinel_music という named PCM を実際に用意できているかどうか。
+    bootstrap.sh は毎回これを試みるが、対応する LADSPA プラグインの
+    欠如以外にも、カードが検出できない等で結局書き込めていない可能性は
+    ゼロではない。用意できていない状態でその名前を渡しても ALSA が開けず
+    ただ無音になるだけなので、そのときだけ曲を完全に止めてから喋る
+    旧来の経路 (music.duck_for_voice()/resume_from_voice()) へ自動的に
+    フォールバックする — 「重ねて鳴らせないなら、せめて交互にでも鳴らす」
+    という段階的劣化。"""
+    try:
+        out = subprocess.run(["aplay", "-L"], capture_output=True, text=True, timeout=5).stdout
+    except Exception:
+        return False
+    return "sentinel_voice" in out.splitlines()
+
+
 def _sound_card() -> int | None:
     try:
         out = subprocess.run(["aplay", "-l"], capture_output=True, text=True, timeout=5).stdout
@@ -170,13 +201,13 @@ def _apply_volume(percent: int) -> None:
         return
     percent = max(0, min(100, percent))
     try:
-        subprocess.run(["amixer", "-c", str(card), "cset", "numid=1", f"{percent}%"],
+        subprocess.run(["amixer", "-c", str(card), "sset", "SentinelVoice", f"{percent}%"],
                        capture_output=True, timeout=5, check=False)
     except Exception:
         pass
 
 
-def _speak_open_jtalk(text: str, rate: float) -> bool:
+def _speak_open_jtalk(text: str, rate: float, device: str | None) -> bool:
     dic = _ojt_dic_dir()
     voice = _ojt_voice_file()
     if not dic or not voice:
@@ -189,7 +220,8 @@ def _speak_open_jtalk(text: str, rate: float) -> bool:
             input=text.encode("utf-8"), capture_output=True, timeout=20, check=False)
         if not wav_path.exists() or wav_path.stat().st_size < 100:
             return False
-        subprocess.run(["aplay", "-q", str(wav_path)], capture_output=True, timeout=30, check=False)
+        cmd = ["aplay", "-q"] + (["-D", device] if device else []) + [str(wav_path)]
+        subprocess.run(cmd, capture_output=True, timeout=30, check=False)
         return True
     except Exception as exc:
         log.warning("open_jtalk での再生に失敗しました: %s", exc)
@@ -198,7 +230,7 @@ def _speak_open_jtalk(text: str, rate: float) -> bool:
         wav_path.unlink(missing_ok=True)
 
 
-def _speak_espeak(text: str, rate: float) -> bool:
+def _speak_espeak(text: str, rate: float, device: str | None) -> bool:
     if not _has_espeak():
         return False
     lang = str(config.get("voice_lang") or "ja")
@@ -207,24 +239,31 @@ def _speak_espeak(text: str, rate: float) -> bool:
     # 既定 150wpm を基準に変換する。
     wpm = int(max(80, min(400, 150 * rate)))
     try:
-        subprocess.run(["espeak-ng", "-v", lang, "-s", str(wpm), text],
-                       capture_output=True, timeout=30, check=False)
+        # --stdout で WAV をパイプへ吐かせ、open_jtalk と同じ経路で aplay
+        # に流す。espeak-ng 自身のデバイス選択機構 (環境変数頼み) に任せる
+        # より、経路を両エンジンで揃えた方が確実。
+        espeak = subprocess.Popen(
+            ["espeak-ng", "-v", lang, "-s", str(wpm), "--stdout", text],
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+        cmd = ["aplay", "-q"] + (["-D", device] if device else [])
+        subprocess.run(cmd, stdin=espeak.stdout, capture_output=True, timeout=30, check=False)
+        espeak.wait(timeout=5)
         return True
     except Exception as exc:
         log.warning("espeak-ng での再生に失敗しました: %s", exc)
         return False
 
 
-def _speak_sync(text: str) -> None:
+def _speak_sync(text: str, device: str | None) -> None:
     _apply_volume(int(config.get("voice_volume")))
     rate = float(config.get("voice_rate"))
     ok = False
     if _has_open_jtalk():
-        ok = _speak_open_jtalk(text, rate)
+        ok = _speak_open_jtalk(text, rate, device)
         if ok:
             STATE["engine"] = "open_jtalk"
     if not ok:
-        ok = _speak_espeak(text, rate)
+        ok = _speak_espeak(text, rate, device)
         if ok:
             STATE["engine"] = "espeak-ng"
     if not ok:
@@ -240,9 +279,10 @@ def _speak_sync(text: str) -> None:
 
 def speak_test(text: str) -> tuple[bool, str]:
     """設定タブの「テスト再生」用。キューを経由せず即座に鳴らす。"""
-    ducked = music.duck_for_voice()
+    mixing = _mixing_ready()
+    ducked = music.duck_for_voice() if not mixing else False
     try:
-        _speak_sync(text)
+        _speak_sync(text, "sentinel_voice" if mixing else None)
     finally:
         if ducked:
             music.resume_from_voice()
@@ -256,16 +296,20 @@ async def loop() -> None:
     _LOOP = asyncio.get_running_loop()
     while True:
         text = await _QUEUE.get()
-        # Bluetooth 接続中は bluealsa-aplay が同じ ALSA デバイスを排他的に
-        # 使っている。割り込むと相手の再生を壊すだけなので静かに諦める
-        # (モジュール読み込み順の都合で遅延 import する)。
+        # Bluetooth 接続中は bluealsa-aplay がこの dmix を経由せず ALSA
+        # デバイスを直接掴んでいる。割り込むと相手の再生を壊すだけなので
+        # 静かに諦める (モジュール読み込み順の都合で遅延 import する)。
         from . import bluetooth as _bt
         if _bt.STATE.get("connected"):
             STATE["skipped"] += 1
             continue
-        ducked = await asyncio.to_thread(music.duck_for_voice)
+        # dmix ミキシングが用意できていれば曲を止めずに重ねて鳴らす
+        # (CLAUDE.md #31)。用意できていない場合だけ、以前どおり曲を
+        # 完全に止めてから喋る (_mixing_ready() 参照)。
+        mixing = await asyncio.to_thread(_mixing_ready)
+        ducked = await asyncio.to_thread(music.duck_for_voice) if not mixing else False
         try:
-            await asyncio.to_thread(_speak_sync, text)
+            await asyncio.to_thread(_speak_sync, text, "sentinel_voice" if mixing else None)
         finally:
             if ducked:
                 await asyncio.to_thread(music.resume_from_voice)
