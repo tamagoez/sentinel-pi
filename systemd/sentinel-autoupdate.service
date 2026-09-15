@@ -4,5 +4,6 @@ Description=Sentinel auto-update - pull and apply new commits from the tracked g
 [Service]
 Type=oneshot
 ExecStart=/opt/sentinel/scripts/sentinel-autoupdate.sh
+Environment=SENTINEL_DATA=/mnt/VIDEOSD/sentinel
 TimeoutStartSec=1800
 SuccessExitStatus=0

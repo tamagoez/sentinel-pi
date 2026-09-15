@@ -54,6 +54,12 @@ DEFAULTS: dict[str, Any] = {
     "port": 8080,
     "password": "",                       # 空なら認証なし (LAN 内限定運用向け)
     "session_hours": 168,
+    "system_autoupdate_enabled": True,    # sentinel-autoupdate.timer (30分毎) が
+                                           # git リモートを確認して自動で
+                                           # update.sh を実行するかどうか
+                                           # (scripts/sentinel-autoupdate.sh が
+                                           # config.json から直接この値を読む、
+                                           # CLAUDE.md #26)
 
     # --- モード制御 ---
     "eco_idle_minutes": 10.0,             # 全カメラ無検知がこれだけ続いたら Eco
@@ -108,6 +114,13 @@ DEFAULTS: dict[str, Any] = {
     "save_cooldown": 5.0,
     "retention_days": 14,
     "reconnect_seconds": 3,
+    "corrupt_min_area_ratio": 0.12,       # 破損 (単色ブロック化/フレーム混在) と
+                                           # みなす、平坦なセルの面積比の下限。
+                                           # 低くすると小さな破損も拾いやすくなる
+                                           # 代わりに誤検知が増える (CLAUDE.md #19)
+    "corrupt_reboot_threshold": 4,        # 強制再接続してもこの回数だけ破損が
+                                           # 解消しなければ Pi 本体を再起動する
+                                           # (CLAUDE.md #22)
     "camera_overrides": {},               # カメラID -> {設定キー: 値, ...}
                                            # 個別カメラだけ上の共有値を上書きする。
                                            # キーが無い/空ならそのカメラは共有値を使う。
@@ -171,19 +184,28 @@ DEFAULTS: dict[str, Any] = {
     "terminal_shell": "/bin/bash",
     "terminal_notify": True,
 
-    # --- 音声アナウンス (espeak-ng 経由、mpg123 の音楽ライブラリとは別経路) ---
+    # --- 音声アナウンス (Open JTalk 優先、espeak-ng へフォールバック。
+    #     mpg123 の音楽ライブラリとは別経路、CLAUDE.md #27) ---
     "voice_enabled": False,               # 総元栓。False ならどのカテゴリも喋らない
     "voice_volume": 70,                   # 0-100。ALSA numid=1 (PCM Playback
                                            # Volume) を直接操作する (bluetooth.py
                                            # の _apply_volume() と同じコントロール)
-    "voice_rate": 150,                    # espeak-ng -s (words per minute)
-    "voice_lang": "ja",                   # espeak-ng -v。空なら espeak-ng の既定
+    "voice_rate": 1.0,                    # 速さの倍率 (0.5-2.0)。Open JTalk の -r
+                                           # にそのまま渡し、espeak-ng では
+                                           # words-per-minute に変換する
+    "voice_lang": "ja",                   # espeak-ng フォールバック時の -v。
+                                           # 空なら espeak-ng の既定 (Open JTalk 側
+                                           # は日本語音声モデル固定のため無関係)
     "voice_time_enabled": False,          # 時報 (n 分ごとに現在時刻を読み上げる)
     "voice_time_interval_minutes": 60,    # 時報の間隔 (分)
+    "voice_time_text": "{hour}時{minute}分です",           # {hour} {minute}
     "voice_error_enabled": True,          # エラー通知 (定時処理の例外など) を喋る
+    "voice_error_text": "{message}",                        # {message}
     "voice_camera_reboot_enabled": True,  # カメラ破損によるPi緊急再起動を喋る
+    "voice_camera_reboot_text": "{message}",                # {message}
     "voice_other_enabled": False,         # 上記以外のシステムイベント (起動/停止/
                                            # 手動再起動/定時処理の開始・完了) を喋る
+    "voice_other_text": "{message}",                        # {message}
 }
 
 _LOCK = threading.RLock()
@@ -265,6 +287,8 @@ _RANGES: dict[str, tuple[float, float]] = {
     "motion_confirm_checks": (1, 10),
     "motion_release_checks": (1, 10),
     "save_cooldown": (1.0, 300.0),
+    "corrupt_min_area_ratio": (0.02, 0.9),
+    "corrupt_reboot_threshold": (1, 20),
     "retention_days": (1, 3650),
     "music_volume": (0, 100),
     "mpg123_buffer_kb": (64, 8192),
@@ -278,7 +302,7 @@ _RANGES: dict[str, tuple[float, float]] = {
     "timelapse_tile_width": (160, 1280),
     "session_hours": (1, 8760),
     "voice_volume": (0, 100),
-    "voice_rate": (80, 400),
+    "voice_rate": (0.5, 2.0),
     "voice_time_interval_minutes": (1, 720),
 }
 

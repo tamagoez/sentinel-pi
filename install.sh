@@ -285,8 +285,11 @@ echo "     service uptime / hotspot DNS / disk space / yt-dlp"
 
 install -m644 "$SRC/systemd/sentinel-autoupdate.service" /etc/systemd/system/
 install -m644 "$SRC/systemd/sentinel-autoupdate.timer" /etc/systemd/system/
+sed -i -e "s|^Environment=SENTINEL_DATA=.*|Environment=SENTINEL_DATA=$DATA|" \
+  /etc/systemd/system/sentinel-autoupdate.service
 ok "Auto-update registered; checks the git remote every 30 minutes and runs"
-echo "     update.sh automatically once new commits land on it"
+echo "     update.sh automatically once new commits land on it (toggle:"
+echo "     system_autoupdate_enabled in the Web UI settings tab)"
 
 # ---------------------------------------------------------------- 8. Main service
 c "STEP 8/9  Register Sentinel service"

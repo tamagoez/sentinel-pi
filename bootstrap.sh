@@ -152,18 +152,25 @@ apt-get update -qq
 # without these packages that mount can fail outright. Even with them,
 # such drives have no real Unix ownership - install.sh and Guardian handle
 # that separately by fixing the mount's uid=/gid= options.
-# espeak-ng: voice announcements (modules/voice.py). Chosen over a
-# higher-quality Japanese TTS (e.g. Open JTalk) because its own dictionary
-# alone runs tens of MB - espeak-ng is a few MB and needs no separate
-# dictionary package, matching the RAM 1GB / SD-card constraints this
-# project is built around (see CLAUDE.md "依存を増やさない"). The tradeoff
-# is rougher pronunciation, especially for kanji.
+# open-jtalk + its mecab dictionary + a voice model: voice announcements
+# (modules/voice.py), preferred over espeak-ng for actually-intelligible
+# Japanese - real reports on real hardware called espeak-ng's output
+# unintelligible. Open JTalk parses text through the same MeCab dictionary
+# naist-jdic uses before synthesizing, so it reads kanji correctly instead
+# of guessing phonetically. This is heavier than espeak-ng alone (tens of
+# MB for the dictionary + voice model combined) but still well inside the
+# RAM 1GB / SD-card budget this project is built around (see CLAUDE.md
+# "依存を増やさない") - nowhere near a few-hundred-MB engine like VOICEVOX.
+# espeak-ng stays installed too as an always-available fallback
+# (modules/voice.py falls back to it automatically if Open JTalk's
+# packages are ever missing), so voice.py never goes silent outright.
 apt-get install -y --no-install-recommends \
   bluez bluez-alsa-utils \
   mpg123 v4l-utils python3-opencv python3-pil python3-venv \
   fonts-dejavu-core fonts-noto-cjk iptables \
-  exfatprogs ntfs-3g espeak-ng >/dev/null 2>&1 \
-  && ok "Bluetooth-audio, camera, exFAT/NTFS and voice (espeak-ng) packages installed" \
+  exfatprogs ntfs-3g espeak-ng \
+  open-jtalk open-jtalk-mecab-naist-jdic hts-voice-nitech-jp-atr503-m001 >/dev/null 2>&1 \
+  && ok "Bluetooth-audio, camera, exFAT/NTFS and voice (Open JTalk/espeak-ng) packages installed" \
   || w "Some packages failed to install."
 
 # ---------------------------------------------------------------- 6. Audio
