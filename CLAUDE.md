@@ -1142,6 +1142,112 @@ sentinel_music`/`sentinel_voice` を実際に鳴らしてみる、
 `--restrict-filenames` を「Windows のファイル名制限を気にして」等の理由で
 復活させないでください** — 同じ「日本語タイトルが消える」不具合に戻ります。
 
+### 34. アクセス記録は AdGuard の「新しい順」を、保存前にひっくり返す
+
+「ネットワークのアクセス記録の時刻順がおかしくなる」という報告がありました。
+原因は `netlog.py` の `loop()` が、AdGuard Home の `/control/querylog` が
+**新しい順 (降順)** で返してくることを踏まえずに書かれていたことです。
+
+- 日次 JSONL ファイル (`_log_path()`/`read_day()`) は **古い順 (昇順)** を
+  前提に読まれています — `web/routes.py` の `netlog_view()` は
+  `read_day(day)[-limit:]` で「ファイルの末尾 = 直近」を取ってから
+  `reverse()` していますし、`maintenance.py` の `ticker_entries()` も
+  日次動画のテロップをタイムラプスの実時刻と対応させるため昇順を前提に
+  読んでいます。ところが `loop()` は AdGuard から返ってきた (新しい順の)
+  `fresh` をそのままファイルへ `_append()` していたため、ポーリング 1 回分
+  の中では新しい→古いの順で書かれ、かつポーリングのたびに (より新しい)
+  次のブロックがファイル末尾へ追記される、という「ブロック内は降順、
+  ブロック間は昇順」のノコギリ状の並びになっていました。
+- `RECENT` (直近イベント一覧) は逆に **新しい順** を前提にしています —
+  `netlog_view()` は `day` 未指定のとき `RECENT[:limit]` をそのまま返し、
+  `reverse()` していません。ところが `loop()` は `RECENT[:0] =
+  reversed(fresh)` としており、新しい順の `fresh` をわざわざ古い順に
+  ひっくり返してから先頭に挿し込んでいたため、こちらも向きが逆でした。
+
+修正は `loop()` 内の 2 箇所だけです。日次ファイルへは `list(reversed(fresh))`
+(古い順) で書き、`RECENT` へは `fresh` をそのまま (新しい順) 挿入します。
+**この 2 か所の向きを揃えて元の実装 (ファイルへ `fresh` をそのまま、
+`RECENT` へ `reversed(fresh)`) に戻さないでください** — AdGuard の
+querylog が新しい順である以上、同じ「時刻順がおかしい」不具合に戻ります。
+
+### 35. mpg123 の自己修復が、失敗し続けるイコライザー同期に道連れにされていた
+
+「mpg123 が停止して、復帰を試みても復帰できない」という報告がありました。
+原因は #32 で追加した `music.py` の `Player._sync_eq()` です。イコライザー
+設定 (enabled/bands) が前回適用時から変わっていれば `_apply_audio_mixing()`
+(sudo 経由で `sentinel-setup-audio-mixing.sh` を呼ぶ、最大 30 秒かかりうる)
+を実行しますが、**これが失敗した場合に `_last_applied_eq` を一切更新して
+いませんでした**。`play()` は `self._lock` を握ったまま `_sync_eq()` を
+呼ぶため、`_apply_audio_mixing()` が (sudoers 未設定・`_card_index()` が
+起動直後の ALSA 初期化と競合して失敗・スクリプト自身の実再生テストが
+デバイスビジーで失敗、など) 一度でも失敗すると、`_last_applied_eq` が
+「未適用」のまま固定され、**以後のすべての `play()` 呼び出しで同じ 30 秒
+ブロックしうる sudo 呼び出しを再試行し続ける**ことになります。`loop()`
+の自己修復ループは 5 秒おきに `PLAYER.play()` を呼んで mpg123 の復帰を
+試みますが、その 1 回 1 回がこの重い再試行を踏むため、`self._lock` を
+取り合う `status()` など他の Player 操作まで巻き添えで固まり、復帰が
+実質的に機能しなくなっていました (mpg123 自体の再起動 `_spawn()` は
+`_sync_eq()` の成否に関わらず続行されるため、深刻な環境では「復帰にとても
+時間がかかる」、失敗が恒久的なら「復帰試行のたびに固まったように見える」
+という症状になります)。
+
+修正は `_eq_sync_failed_at`/`_EQ_RETRY_COOLDOWN_SEC` (既定 60 秒) を追加し、
+直近で同じ適用に失敗していれば `_apply_audio_mixing()` 自体を呼ばずに即座に
+諦める (mpg123 自体の復帰は妨げない) ことです。**この失敗記憶・クール
+ダウンを外して、失敗するたびに毎回無条件で `_apply_audio_mixing()` を
+呼ぶ実装に戻さないでください** — 同じ「mpg123 が停止しても復帰が固まって
+機能しなくなる」不具合に戻ります。
+
+### 36. イベントのタイムラインは既定表示にし、URL は「点」ではなく「期間」で描く
+
+タイムライン表示 (#10/#18 で追加) について 3 つの要望がありました:
+「URL アクセスが 1 列だと一部しか把握できないので複数行にして期間も
+表示してほしい」「タイムラインを既定表示にしてほしい」「マウスホイールで
+拡大、Shift+ホイールで移動、ドラッグで範囲選択し、その範囲を横に分割して
+カメラ/URL データを順に並べてほしい」。
+
+- **既定表示**: `#ev-view` の `<option>` を並べ替え、`timeline` に
+  `selected` を付けました。これに伴い、以前は「タイムライン表示のときだけ」
+  行っていた URL アクセス記録の取得 (`/api/netlog`) を `renderEvents()`
+  側 (`EV_NET_DAY !== EV_DAY` のときだけ) に移し、タイムラインが既定に
+  なっても "本体の R/W・通信は増やしたくない" という元の節約方針
+  (グリッド/カメラ別表示では取得しない) を維持しています。
+- **URL は期間で描く**: `buildNetSpans()` が、同じサービスへのアクセスを
+  `TL_NET_SPAN_MIN` 分 (既定 5 分) 以内の間隔でまとめて「期間」(span:
+  開始・終了時刻を持つ) にします。単純に「直前の記録と同じサービスか」
+  だけを見ると、間に別サービスの記録が挟まった瞬間に誤って期間が分断
+  されるため、サービスごとに独立した「今開いている期間」を追いかける
+  (`open` map) 実装にしています。
+- **複数行**: `packNetRows()` が、期間を開始時刻順に見て「既存の行のうち
+  直前の終了時刻がこの開始時刻以前のものがあればそこへ、無ければ新しい
+  行」という単純な区間スケジューリングで行に詰めます。同時期に複数の
+  サービスへアクセスしていた場合だけ自然に複数行へ分かれ、URL トラックの
+  高さ (`heightPx`) はこの行数から動的に決まります (画像トラックは
+  従来どおり固定 1 行)。**この行パッキングを外して固定 1 行に戻さないで
+  ください** — 同じ「一部しか把握できない」不具合に戻ります。
+- **ホイール操作**: `tlHandleWheel()` を `#tl-scroll` の `wheel` イベントへ
+  束縛しています。Shift 押下時は `scrollLeft` を直接動かして横移動、
+  それ以外はカーソル位置の時刻を保ったままズームします (地図アプリの
+  ズームと同じ「カーソル下の地点が画面上で動かない」挙動 — 画面中央基準
+  ではなくカーソル基準にしているのは、ホイール操作は見ている場所を
+  そのまま拡大/縮小したいことが大半なため)。
+- **ドラッグ範囲選択 → 分割表示**: `#tl-scroll` に `mousedown`/`mousemove`/
+  `mouseup` を束縛し (`tlMouseDown`/`tlMouseMove`/`tlMouseUp`)、実際に
+  一定距離動いた場合だけドラッグとみなして `TL_RANGE_SEL` を確定します
+  (動きがほぼ無ければ従来どおり `tlScrollClick` のクリック=カーソル設置
+  として扱う — `TL_SUPPRESS_CLICK` フラグで、ドラッグ確定直後に発火する
+  click イベントだけを 1 回だけ握りつぶしています)。`renderTlDrilldown()`
+  が選択範囲を `TL_DRILL_SEGMENTS` (既定 6) 個の等時間区画へ分割し、各区画
+  ではその時間帯のカメラ画像と URL アクセスを時刻順に 1 本のリストへ
+  混ぜて表示します — 個別トラックではなく「その瞬間に何が起きていたか」
+  を時系列で追えるようにするためで、`#ev-view` の描画のたびに
+  `renderTlTrack()` が再構築する通常のタイムラインとは別の
+  `#tl-drill-area` に追記される (タイムライン本体を壊さない) 形にして
+  います。
+- 1 分未満の期間が常に「1分」に丸められて区別できなくなる問題も
+  `fmtDur()` に持ち込んでいました。`core/notify.py` の `_fmt_minsec()`
+  (CLAUDE.md #20) と同じ考え方で、60 秒未満は秒表示にしています。
+
 ## モジュール構成
 
 各モジュールは疎結合で、`core/state.py` の `MODE` を購読するだけです。
@@ -1217,7 +1323,12 @@ modules/music.py        mpg123 制御、位置復帰、yt-dlp キュー。alsa_d
                          使う。イコライザー (music_eq_enabled/music_eq_bands/
                          music_eq_track_overrides) は Player._sync_eq() が
                          曲の実効設定が前回と変わったときだけ asound.conf を
-                         再構成して mpg123 を再起動する (CLAUDE.md #32)
+                         再構成して mpg123 を再起動する (CLAUDE.md #32)。
+                         _sync_eq() が失敗した適用は _EQ_RETRY_COOLDOWN_SEC
+                         (既定60秒) が経つまで再試行しない — mpg123 停止
+                         からの自己修復ループ (5秒おき) が失敗し続ける限り
+                         毎回この重い sudo 呼び出しを踏んで復帰できなくなる
+                         のを防ぐため (CLAUDE.md #35)
 modules/thermal.py      温度と CPU -> MODE.report_temperature()
 modules/bluetooth.py    A2DP 接続検知 -> 音楽の退避と復帰。この Pi 自身の
                          表示名 (set_local_name、bluetoothctl system-alias)
@@ -1226,7 +1337,12 @@ modules/bluetooth.py    A2DP 接続検知 -> 音楽の退避と復帰。この P
 modules/hotspot.py       WiFi ホットスポット SSID の表示・変更
                          (sentinel-set-hotspot-ssid.sh を sudo 経由で呼ぶ)
 modules/terminal.py     pty over WebSocket
-modules/netlog.py       AdGuard querylog -> サービス名変換
+modules/netlog.py       AdGuard querylog -> サービス名変換。AdGuard は
+                         querylog を新しい順で返すため、日次 JSONL ファイル
+                         へは古い順に反転してから書き、RECENT (直近一覧)
+                         へは新しい順のまま積む — 両者の想定する向きが逆な
+                         ため、揃えて反転させると同じ時刻順の不具合に戻る
+                         (CLAUDE.md #34)
 modules/notify.py       Discord (レート制限対応キュー)。notify_motion_grouped
                          で「カメラごとに即時送信」と「複数カメラの検知を
                          1通にまとめる」を切り替えられる。「検知しました」
@@ -1257,7 +1373,14 @@ web/routes.py           全 HTTP / WebSocket エンドポイント。latest.jpg 
                          FileResponse (stat とオープンが別ステップ) では
                          配信せず、read_bytes() で 1 回読んで Response に
                          渡す (CLAUDE.md #23)
-web/static/index.html   単一ファイル SPA
+web/static/index.html   単一ファイル SPA。イベントページのタイムライン表示
+                         (renderEventsRecall() 以下) が既定表示。URL アクセス
+                         トラックは buildNetSpans()/packNetRows() で「点」
+                         ではなく期間の横棒・複数行として描く。#tl-scroll に
+                         ホイール (拡大縮小)・Shift+ホイール (横移動)・
+                         ドラッグ (範囲選択 -> renderTlDrilldown() で横に
+                         分割してカメラ/URL を時系列表示) を束縛している
+                         (CLAUDE.md #36)
 ```
 
 ### モジュールを追加するとき

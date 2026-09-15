@@ -64,6 +64,17 @@ EQ_BAND_HZ = ["50", "100", "156", "220", "311", "440", "622", "880",
 # 再構成すると、EQ 設定が変わっていない曲間にも毎回ギャップができてしまう。
 _last_applied_eq: tuple | None = None
 
+# _apply_audio_mixing() が直近に失敗した時刻。mpg123 が停止して loop() の
+# 自己修復ループが 5 秒おきに play() を呼び直すとき、_sync_eq() が毎回
+# _apply_audio_mixing() (sudo 経由の外部スクリプト、最大 30 秒かかる) を
+# 再試行すると、self._lock を握ったまま 30 秒ブロックする試行が 5 秒おきに
+# 積み重なり、status() など他の Player 操作も巻き添えで固まる — 実機の
+# 「mpg123 が停止して、復帰を試みても復帰できない」不具合の原因だった。
+# 一度失敗したら _EQ_RETRY_COOLDOWN_SEC が経つまで _apply_audio_mixing()
+# を呼ばない (mpg123 自体の再起動 = _spawn() はこの成否に関わらず進む)。
+_eq_sync_failed_at: float = 0.0
+_EQ_RETRY_COOLDOWN_SEC = 60.0
+
 
 def _card_index() -> int | None:
     try:
@@ -263,14 +274,26 @@ class Player:
         """イコライザー設定が前回適用時から変わっていれば asound.conf を
         再構成し、実行中の mpg123 を落とす (次の呼び出し元が新しい設定で
         開き直す)。変わっていなければ何もしない (曲間の無用なギャップを
-        避ける、モジュール docstring 参照)。戻り値は実際に再構成したか。"""
-        global _last_applied_eq
+        避ける、モジュール docstring 参照)。戻り値は実際に再構成したか。
+
+        _apply_audio_mixing() は sudo 経由の外部スクリプトで最大 30 秒
+        ブロックしうる。直近で同じ適用に失敗したばかりなら
+        _EQ_RETRY_COOLDOWN_SEC が経過するまで再試行しない — mpg123 停止
+        からの自己修復ループ (5 秒おきに play() を呼ぶ) が、失敗し続ける
+        限り毎回この 30 秒ブロックを踏んで実質的に復帰できなくなるのを
+        防ぐため。mpg123 自体の再起動 (_spawn()) は、この EQ 再同期が
+        失敗しても play() 側でそのまま続行される。"""
+        global _last_applied_eq, _eq_sync_failed_at
         enabled = bool(config.get("music_eq_enabled"))
         bands = resolve_eq_bands(track_name) if enabled else None
         key = (enabled, tuple(bands) if bands is not None else None)
         if key == _last_applied_eq:
             return False
+        now = time.time()
+        if now - _eq_sync_failed_at < _EQ_RETRY_COOLDOWN_SEC:
+            return False
         if not _apply_audio_mixing(enabled, bands):
+            _eq_sync_failed_at = now
             return False
         _last_applied_eq = key
         if self.proc is not None:
