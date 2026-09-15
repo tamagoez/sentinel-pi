@@ -40,7 +40,11 @@
 set -uo pipefail
 
 STORAGE="${SENTINEL_STORAGE:-/mnt/VIDEOSD}"
-ST_USER=dietpi
+# Ask systemd which user the service runs as rather than assuming: DietPi
+# uses User=syncthing, and `syncthing --paths` answers differently per
+# user because the default config location follows $HOME.
+ST_USER=$(systemctl show syncthing -p User --value 2>/dev/null)
+[[ -n "$ST_USER" ]] || ST_USER=dietpi
 PORT=8384
 QUIET=0
 [[ "${1:-}" == "--quiet" ]] && QUIET=1

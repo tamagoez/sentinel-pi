@@ -206,7 +206,17 @@ class Player:
             self.last_error = "mpg123 がインストールされていません"
             log.error(self.last_error)
             return False
-        cmd = ["mpg123", "-R", "--buffer", str(int(config.get("mpg123_buffer_kb")))]
+        # -o alsa: mpg123 は複数の出力モジュール (alsa/jack/pulse/...) を
+        # 持ち、指定が無いと順に試して最初に開けたものを使う。実機では
+        # ALSA (dmix) が開けなかったときに JACK モジュールへ落ち、
+        # "jack server is not running" で即死する → 5 秒ごとの復帰ループ、
+        # という遠回りな壊れ方をした。このプロジェクトは ALSA へ直接
+        # 書く前提 (CLAUDE.md #2) なので、モジュールを固定して「駄目なら
+        # ALSA のエラーで正直に落ちる」ようにする。**この -o alsa を
+        # 外さないでください** — 同じ「JACK を探しに行って死ぬ」に戻り、
+        # 本当の ALSA のエラーがログから消えます。
+        cmd = ["mpg123", "-o", "alsa", "-R",
+               "--buffer", str(int(config.get("mpg123_buffer_kb")))]
         dev = str(config.get("alsa_device") or "").strip()
         if not dev:
             if _mixing_ready():
