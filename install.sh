@@ -369,6 +369,29 @@ if [[ -x /opt/syncthing/syncthing ]]; then
     systemctl restart syncthing 2>/dev/null && ok "Restarted Syncthing to pick up its new group membership"
   fi
   systemctl enable --now syncthing >/dev/null 2>&1 || true
+
+  # Syncthing's own default GUI bind (upstream default, unchanged by
+  # DietPi's package) is 127.0.0.1:8384 - loopback only. This script's own
+  # closing summary, and SETUP.md/SETUP.ja.md, tell the user to open
+  # http://<Pi-IP>:8384 from a LAN browser to set the GUI password
+  # (setup.sh H8) - a loopback-only bind makes that unreachable. Syncthing's
+  # own GUI password is the access control here, the same "reachable,
+  # password-gated" model as Sentinel's own Web UI on :8080 - unlike
+  # AdGuard's :8083 (CLAUDE.md #5), which stays loopback-only for reasons
+  # specific to that incident's history, nothing here calls for the same
+  # restriction, so this one binds openly. config.xml does not exist until
+  # Syncthing has started at least once and generated it, so a first-ever
+  # install run may not see it yet - the next update.sh run (and Guardian's
+  # own periodic check) picks it up.
+  ST_CONFIG="$ST_HOME/config.xml"
+  if [[ -f "$ST_CONFIG" ]] && grep -q 'address="127\.0\.0\.1:8384"' "$ST_CONFIG"; then
+    sed -i 's#address="127\.0\.0\.1:8384"#address="0.0.0.0:8384"#' "$ST_CONFIG"
+    if systemctl restart syncthing 2>/dev/null; then
+      ok "Syncthing GUI now reachable at :8384 (was loopback-only)"
+    else
+      w "edited Syncthing's GUI bind but could not restart syncthing"
+    fi
+  fi
 else
   w "Syncthing not installed; skipping storage redirect (see bootstrap.sh STEP 9)."
 fi

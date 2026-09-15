@@ -418,6 +418,29 @@ check_syncthing_storage() {
   (( was_active )) && systemctl start syncthing
 }
 
+# ------------------------------------------------------------------ 8c. Syncthing GUI reachability
+# Syncthing's own default GUI bind (upstream default, unchanged by DietPi's
+# package) is 127.0.0.1:8384 - loopback only. install.sh's own closing
+# summary and SETUP.md/SETUP.ja.md tell the user to open
+# http://<Pi-IP>:8384 from a LAN browser to set the GUI password (setup.sh
+# H8), which a loopback-only bind makes unreachable. This mirrors
+# install.sh's own one-shot fix so a config.xml that did not exist yet on
+# that run (first-ever install, before Syncthing has started once) still
+# gets caught here within the next 2-minute cycle.
+check_syncthing_gui() {
+  command -v syncthing >/dev/null 2>&1 || [[ -x /opt/syncthing/syncthing ]] || return 0
+  local storage="${SENTINEL_STORAGE:-/mnt/VIDEOSD}"
+  local st_config="$storage/syncthing/config.xml"
+  [[ -f "$st_config" ]] || return 0
+  grep -q 'address="127\.0\.0\.1:8384"' "$st_config" || return 0
+  sed -i 's#address="127\.0\.0\.1:8384"#address="0.0.0.0:8384"#' "$st_config"
+  if systemctl restart syncthing 2>/dev/null; then
+    fixed "Syncthing GUI was loopback-only - now reachable at :8384"
+  else
+    warn "edited Syncthing's GUI bind but could not restart syncthing"
+  fi
+}
+
 # ------------------------------------------------------------------ 9. Storage space
 # Full storage would stall every feature, so warn early and keep one
 # diagnostics bundle on record for later investigation.
@@ -464,6 +487,7 @@ check_bluealsa_freshness
 check_hotspot_dns
 check_storage_owner
 check_syncthing_storage
+check_syncthing_gui
 check_storage
 check_ytdlp
 

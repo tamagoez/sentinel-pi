@@ -20,14 +20,25 @@
 #      before install.sh's bind mount runs (CLAUDE.md #12 is the same
 #      class of race, for Bluetooth/hostapd).
 #
+# Guardian (sentinel-guardian.timer, every 2 minutes) can itself start
+# syncthing/sentinel back up mid-repair if it fires while this script is
+# working - a real run showed exactly that: Guardian's own reconcile
+# started syncthing.service moments before this script tried to remount
+# $STORAGE, and the still-open files it held made the remount a no-op
+# (umount succeeded, but writes stayed broken). This script stops the
+# TIMER too, not just the services, for the duration of the repair, and
+# restarts it when done - stopping only the oneshot service does not
+# stop the timer from firing again two minutes later.
+#
 # Idempotent: a machine with none of these problems exits with nothing
 # touched, no service ever stopped. Called from install.sh (STEP 4), so a
 # plain `sudo ./update.sh` re-run picks this up automatically on every
 # affected machine (CLAUDE.md #7) with no separate action needed.
 #
 # Anything this script cannot resolve on its own (e.g. a mount that stays
-# busy through umount -l) is never left to fail silently: it is collected
-# and printed as ready-to-paste manual commands at the end.
+# busy through umount -l) is never left to fail silently: it is collected,
+# with the exact process still holding it open, and printed as
+# ready-to-paste manual commands at the end.
 
 set -uo pipefail
 # Deliberately not `-e`: each check must be able to fail and move on to
@@ -68,8 +79,32 @@ force_umount() {
 STOPPED=0
 ensure_stopped() {
   (( STOPPED )) && return 0
+  # Stop the TIMER, not just the oneshot service - the service itself may
+  # already have exited by the time we get here, but the timer firing
+  # again 2 minutes into this script's work would restart syncthing (or
+  # touch storage ownership) out from under it.
+  systemctl stop sentinel-guardian.timer 2>/dev/null || true
   systemctl stop sentinel sentinel-guardian.service syncthing 2>/dev/null || true
   STOPPED=1
+}
+
+fix_storage_mount() {
+  # Runs the umount -> daemon-reload -> mount cycle for $STORAGE up to 3
+  # times. One pass is not always enough: if something still had a file
+  # open under $STORAGE (Guardian having just started syncthing back up,
+  # for example) the first umount can silently no-op even after
+  # ensure_stopped(), and only shows up as "still stale" afterwards.
+  local want="$1" attempt live
+  for attempt in 1 2 3; do
+    ensure_stopped
+    force_umount "$STORAGE"
+    systemctl daemon-reload
+    mount "$STORAGE" 2>/dev/null
+    live=$(findmnt -no OPTIONS "$STORAGE" 2>/dev/null | grep -oE 'uid=[0-9]+' | head -n1)
+    [[ "$live" == "$want" ]] && return 0
+    sleep 2
+  done
+  return 1
 }
 
 c "1/3 Checking $STORAGE itself"
@@ -84,17 +119,17 @@ if mountpoint -q "$STORAGE" 2>/dev/null; then
   LIVE_UID=$(findmnt -no OPTIONS "$STORAGE" 2>/dev/null | grep -oE 'uid=[0-9]+' | head -n1)
   if [[ -n "$WANT_UID" && "$WANT_UID" != "$LIVE_UID" ]]; then
     w "$STORAGE is mounted with stale options ($LIVE_UID; fstab now wants $WANT_UID) - remounting"
-    ensure_stopped
-    if force_umount "$STORAGE"; then
-      systemctl daemon-reload
-      mount "$STORAGE" 2>/dev/null
-    fi
-    LIVE_UID2=$(findmnt -no OPTIONS "$STORAGE" 2>/dev/null | grep -oE 'uid=[0-9]+' | head -n1)
-    if [[ "$LIVE_UID2" == "$WANT_UID" ]]; then
+    if fix_storage_mount "$WANT_UID"; then
       ok "$STORAGE now mounted with $WANT_UID"
     else
-      w "$STORAGE still not using $WANT_UID after a remount attempt"
-      manual "umount -l $STORAGE; systemctl daemon-reload; mount $STORAGE; findmnt -no OPTIONS $STORAGE"
+      HOLDERS=$(fuser -vm "$STORAGE" 2>&1 | tail -n +2)
+      w "$STORAGE still not using $WANT_UID after 3 remount attempts"
+      if [[ -n "$HOLDERS" ]]; then
+        w "still held open by: $(tr '\n' ' ' <<<"$HOLDERS")"
+        manual "fuser -vm $STORAGE   # identify what's still holding it open, then: systemctl stop <that unit>; umount -l $STORAGE; systemctl daemon-reload; mount $STORAGE; findmnt -no OPTIONS $STORAGE"
+      else
+        manual "umount -l $STORAGE; systemctl daemon-reload; mount $STORAGE; findmnt -no OPTIONS $STORAGE"
+      fi
     fi
   elif [[ -z "$WANT_UID" ]]; then
     w "no uid= option found in the $STORAGE fstab line - cannot verify it is current"
@@ -160,12 +195,13 @@ elif [[ -d "$STORAGE/sentinel" ]]; then
 fi
 
 if (( STOPPED )); then
+  systemctl start sentinel-guardian.timer 2>/dev/null || true
   systemctl start sentinel 2>/dev/null || true
-  # sentinel-guardian and syncthing are intentionally left stopped here -
-  # install.sh's own later steps (Syncthing storage prep, Guardian
-  # registration) bring them back up once this run has actually finished
-  # setting ownership/bind mounts; starting them mid-repair would race
-  # this script's own checks above.
+  # syncthing is intentionally left stopped here - install.sh's own later
+  # Syncthing storage-prep step brings it back up once this run has
+  # actually finished setting ownership/bind mounts; starting it mid-repair
+  # would race this script's own checks above (this is exactly what
+  # happened on real hardware: Guardian restarting it mid-repair).
 fi
 
 if (( ${#MANUAL_STEPS[@]} )); then
