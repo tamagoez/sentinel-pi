@@ -383,9 +383,18 @@ if [[ -x /opt/syncthing/syncthing ]]; then
   # Syncthing has started at least once and generated it, so a first-ever
   # install run may not see it yet - the next update.sh run (and Guardian's
   # own periodic check) picks it up.
+  #
+  # The GUI address is a <address>127.0.0.1:8384</address> XML ELEMENT, not
+  # an address="..." attribute on <gui> (confirmed against Syncthing's own
+  # config docs, https://docs.syncthing.net/users/config.html - a DietPi
+  # issue, https://github.com/MichaIng/DietPi/issues/3329, hits this exact
+  # loopback-only default). A first cut of this fix used the attribute
+  # form, which never matches and left the GUI unreachable with no error at
+  # all - a real deploy caught this via ERR_CONNECTION_REFUSED even after
+  # this step reported success. **Do not go back to the attribute form.**
   ST_CONFIG="$ST_HOME/config.xml"
-  if [[ -f "$ST_CONFIG" ]] && grep -q 'address="127\.0\.0\.1:8384"' "$ST_CONFIG"; then
-    sed -i 's#address="127\.0\.0\.1:8384"#address="0.0.0.0:8384"#' "$ST_CONFIG"
+  if [[ -f "$ST_CONFIG" ]] && grep -qE '<address>127\.0\.0\.1:[0-9]+</address>' "$ST_CONFIG"; then
+    sed -i -E 's#<address>127\.0\.0\.1:([0-9]+)</address>#<address>0.0.0.0:\1</address>#' "$ST_CONFIG"
     if systemctl restart syncthing 2>/dev/null; then
       ok "Syncthing GUI now reachable at :8384 (was loopback-only)"
     else
