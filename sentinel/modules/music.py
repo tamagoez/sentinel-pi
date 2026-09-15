@@ -40,6 +40,7 @@ import json
 import logging
 import os
 import random
+import re
 import shutil
 import subprocess
 import threading
@@ -78,6 +79,17 @@ _EQ_RETRY_COOLDOWN_SEC = 60.0
 
 def _card_index() -> int | None:
     return audio.find_output_card()
+
+
+def _asound_card() -> int | None:
+    """/etc/asound.conf の dmix スレーブ (`pcm "hw:N,0"`) に実際に焼き込まれて
+    いるカード番号。読めなければ None。"""
+    try:
+        text = Path("/etc/asound.conf").read_text(errors="replace")
+    except Exception:
+        return None
+    m = re.search(r'pcm\s+"hw:(\d+),\d+"', text)
+    return int(m.group(1)) if m else None
 
 
 def _mixing_ready() -> bool:
@@ -195,8 +207,20 @@ class Player:
             return False
         cmd = ["mpg123", "-R", "--buffer", str(int(config.get("mpg123_buffer_kb")))]
         dev = str(config.get("alsa_device") or "").strip()
-        if not dev and _mixing_ready():
-            dev = "sentinel_music"     # dmix 経由。音声アナウンスと同時に鳴らせる
+        if not dev:
+            if _mixing_ready():
+                dev = "sentinel_music"   # dmix 経由。音声アナウンスと同時に鳴らせる
+            else:
+                # dmix のセットアップが失敗している機体で、-a を付けずに
+                # mpg123 を起動すると ALSA の既定デバイスへ流れる。複数
+                # カードある Pi では既定が HDMI (card 0) になることが多く、
+                # mpg123 は正常に開けてしまうので「再生中と表示されるのに
+                # 3.5mm から何も聞こえない」という、エラーの出ない無音に
+                # なる (実機で踏んだ)。CLAUDE.md #37 と同じ優先順位で
+                # 見つけたアナログ出力カードを明示的に指定する。
+                card = _card_index()
+                if card is not None:
+                    dev = f"plughw:{card},0"
         if dev:
             cmd += ["-a", dev]
         try:
@@ -276,8 +300,19 @@ class Player:
         global _last_applied_eq, _eq_sync_failed_at
         enabled = bool(config.get("music_eq_enabled"))
         bands = resolve_eq_bands(track_name) if enabled else None
-        key = (enabled, tuple(bands) if bands is not None else None)
-        if key == _last_applied_eq:
+        card = _card_index()
+        # カード番号を key に含める理由: asound.conf の dmix スレーブは
+        # `hw:N,0` と焼き込まれるので、N が実際のアナログ出力とズレたら
+        # 音は HDMI 側へ流れて 3.5mm からは何も聞こえなくなる (エラーは
+        # 出ない)。EQ 設定だけを key にしていたときは、一度書かれた
+        # asound.conf が二度と再生成されず、この状態から復帰できなかった。
+        key = (enabled, tuple(bands) if bands is not None else None, card)
+        # ファイルの実体も見る。setup スクリプトが再生テストに失敗して
+        # asound.conf をバックアップへ戻した場合 (CLAUDE.md #31)、key 上は
+        # 「適用済み」なのに実際には sentinel_music が存在しない、という
+        # ズレが残るため。
+        stale_file = card is not None and _asound_card() != card
+        if key == _last_applied_eq and not stale_file:
             return False
         now = time.time()
         if now - _eq_sync_failed_at < _EQ_RETRY_COOLDOWN_SEC:

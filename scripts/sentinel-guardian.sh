@@ -168,38 +168,24 @@ check_firewall() {
 }
 
 # ------------------------------------------------------------------ 4. Audio
-# Find the ALSA card index for the 3.5mm analog output (bcm2835
-# "Headphones"). Some kernels/DietPi builds list an HDMI card (e.g.
-# vc4hdmi0) ahead of it, so grabbing the first "card N:" line blindly can
-# pin the wrong output. Prefer a card named "Headphones" (current Pi
-# OS/DietPi naming), fall back to "bcm2835" (older single-card naming),
-# and only then fall back to the first card as a last resort. This same
-# priority is duplicated in sentinel/core/audio.py (used by
-# music.py/bluetooth.py/voice.py) - keep both in sync, see that file's
-# docstring for the real-hardware failure this fixes (CLAUDE.md #42).
-find_output_card() {
-  local list
-  list=$(aplay -l 2>/dev/null) || return 1
-  local card
-  card=$(printf '%s\n' "$list" | grep -im1 '^card [0-9]\+:.*headphones' | grep -oE '^card [0-9]+' | awk '{print $2}')
-  [[ -n "$card" ]] || card=$(printf '%s\n' "$list" | grep -im1 '^card [0-9]\+:.*bcm2835' | grep -oE '^card [0-9]+' | awk '{print $2}')
-  [[ -n "$card" ]] || card=$(printf '%s\n' "$list" | grep -m1 -oE '^card [0-9]+' | awk '{print $2}')
-  [[ -n "$card" ]] || return 1
-  printf '%s\n' "$card"
-}
-
-# Pin output to the 3.5mm jack. numid=3 value 1 = headphone jack.
+# The whole analog-output path (shared hardware volume numid=1, routing
+# numid=3, and the card /etc/asound.conf actually mixes into) is checked
+# by sentinel-fix-audio-output.sh, which also owns the single bash copy of
+# find_output_card(). Delegating rather than duplicating: the previous
+# version here only ever checked numid=3, so a hardware volume parked at
+# zero silenced music indefinitely with nothing reporting an error
+# (CLAUDE.md #41).
 check_audio() {
-  command -v amixer >/dev/null || return 0
-  local card
-  card=$(find_output_card)
-  [[ -n "$card" ]] || return 0
-  local cur
-  cur=$(amixer -c "$card" cget numid=3 2>/dev/null | grep -m1 -oE ': values=[0-9]+' | grep -oE '[0-9]+$')
-  if [[ -n "$cur" && "$cur" != "1" ]]; then
-    amixer -c "$card" cset numid=3 1 >/dev/null 2>&1 && \
-      fixed "reset audio output to AUX (headphone jack)"
-    alsactl store >/dev/null 2>&1 || true
+  local script=/opt/sentinel/scripts/sentinel-fix-audio-output.sh
+  [[ -x "$script" ]] || return 0
+  local out rc
+  out=$("$script" --quiet 2>&1); rc=$?
+  if (( rc == 10 )); then
+    while IFS= read -r line; do
+      [[ -n "$line" ]] && fixed "${line#*] }"
+    done <<<"$out"
+  elif (( rc != 0 )) && [[ -n "$out" ]]; then
+    warn "audio output check: $(printf '%s' "$out" | tr '\n' ' ')"
   fi
 }
 
@@ -419,32 +405,23 @@ check_syncthing_storage() {
 }
 
 # ------------------------------------------------------------------ 8c. Syncthing GUI reachability
-# Syncthing's own default GUI bind (upstream default, unchanged by DietPi's
-# package) is 127.0.0.1:8384 - loopback only. install.sh's own closing
-# summary and SETUP.md/SETUP.ja.md tell the user to open
-# http://<Pi-IP>:8384 from a LAN browser to set the GUI password (setup.sh
-# H8), which a loopback-only bind makes unreachable. This mirrors
-# install.sh's own one-shot fix so a config.xml that did not exist yet on
-# that run (first-ever install, before Syncthing has started once) still
-# gets caught here within the next 2-minute cycle.
-#
-# The GUI address is a <address>127.0.0.1:8384</address> XML ELEMENT, not
-# an address="..." attribute on <gui> (confirmed against Syncthing's own
-# config docs, https://docs.syncthing.net/users/config.html). A first cut
-# of this fix used the attribute form, which never matches and left the
-# GUI unreachable with no error at all. Do not go back to the attribute
-# form.
+# Syncthing binds its GUI to loopback only by default, which makes the
+# http://<Pi-IP>:8384 that setup.sh H8 and SETUP.md tell the user to open
+# refuse the connection. sentinel-fix-syncthing-gui.sh owns the repair -
+# it has to find the config Syncthing actually reads, stop Syncthing
+# before editing (Syncthing overwrites config.xml from memory on
+# shutdown), and verify the resulting socket. Two earlier in-line versions
+# of this check got that wrong and silently changed nothing, so this one
+# delegates rather than keeping its own copy (CLAUDE.md #40).
 check_syncthing_gui() {
-  command -v syncthing >/dev/null 2>&1 || [[ -x /opt/syncthing/syncthing ]] || return 0
-  local storage="${SENTINEL_STORAGE:-/mnt/VIDEOSD}"
-  local st_config="$storage/syncthing/config.xml"
-  [[ -f "$st_config" ]] || return 0
-  grep -qE '<address>127\.0\.0\.1:[0-9]+</address>' "$st_config" || return 0
-  sed -i -E 's#<address>127\.0\.0\.1:([0-9]+)</address>#<address>0.0.0.0:\1</address>#' "$st_config"
-  if systemctl restart syncthing 2>/dev/null; then
+  local script=/opt/sentinel/scripts/sentinel-fix-syncthing-gui.sh
+  [[ -x "$script" ]] || return 0
+  local out rc
+  out=$("$script" --quiet 2>&1); rc=$?
+  if (( rc == 10 )); then
     fixed "Syncthing GUI was loopback-only - now reachable at :8384"
-  else
-    warn "edited Syncthing's GUI bind but could not restart syncthing"
+  elif (( rc != 0 )) && [[ -n "$out" ]]; then
+    warn "Syncthing GUI check: $(printf '%s' "$out" | tr '\n' ' ')"
   fi
 }
 
