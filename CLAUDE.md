@@ -873,7 +873,7 @@ Web UI の「スロットリング」カードをすべて削除しました。�
   ものだけ) に限定しているため、`safe.directory` を無条件に許可しても
   外部から任意のパスを注入される経路にはなりません。
 
-### 27. 音声アナウンス (`modules/voice.py`) は mpg123 と別経路、ALSA numid=1 で音量を持つ
+### 27. 音声アナウンス (`modules/voice.py`) は mpg123 と別経路で鳴らす (音量制御は #31 で見直し)
 
 時報・エラー通知・カメラ再起動通知・その他システムイベントを喋る機能を
 追加しました。設計上の判断は #2/#15 で確立済みのパターンをそのまま踏襲
@@ -1027,6 +1027,121 @@ Web UI 設定タブへの反映を後回しにした機能がありました。�
 合わせるだけの単純なスクリプトで機械的にできるので、次に似た指摘が来たら
 まずこれを流してから個別の機能を疑ってください。
 
+### 31. 音楽と音声アナウンスは ALSA の dmix で重ねて鳴らし、音量は完全に別系統にする
+
+#27 で音声アナウンス機能を追加した当初は、bcm2835 の出力が dmix なしでは
+同時に 1 ストリームしか受け付けないという制約に対し、「曲を完全に止めて
+から喋る」(`music.duck_for_voice()`/`resume_from_voice()`) という単純な
+排他制御で対応していました。実機からさらに 2 つの報告があり、この設計を
+見直しました。
+
+1. 「音声アナウンスと音楽の音量がたまに独立せず、音楽の音量が大きく
+   なってしまったりする」。原因は `voice.py` の `_apply_volume()` が
+   `amixer -c <card> cset numid=1 <%>` でハードウェアのアンプそのもの
+   (bcm2835 の "PCM Playback Volume") を直接書き換えていたことです。
+   numid=1 は Bluetooth 再生 (#15) とこの音声アナウンス機能の両方が
+   共有する**たった 1 つの**ハードウェアレジスタなので、たとえ ducking
+   で曲を一時停止していても、声を鳴らすたびにこの共有レジスタが書き
+   換わり、次に曲を再開したときの実際の聞こえ方 (ハードウェア段の
+   増幅率) が声の音量設定に引きずられてズレていました。
+2. 「同時に重ねられるようにしてほしい」。ducking である以上、原理的に
+   同時再生はできません。
+
+`scripts/sentinel-setup-audio-mixing.sh` (新設、root 権限が要るため
+sudoers 経由、sentinel-set-governor.sh などと同じ「引数はスクリプト
+自身が検証する」パターン) が `/etc/asound.conf` に以下を書きます。
+
+```
+pcm.sentinel_dmix   dmix (実体のハードウェアミキシング段)
+pcm.sentinel_music  音楽 (mpg123 -a sentinel_music) の入口。素通し、または
+                    (イコライザー有効時) LADSPA 段を挟んでから dmix へ
+pcm.sentinel_voice  音声 (aplay -D sentinel_voice) の入口。専用の ALSA
+                    softvol コントロール "SentinelVoice" を持ち、dmix へ
+```
+
+`voice.py` の音量操作は numid=1 をやめ、`sentinel_voice` PCM 自身の
+softvol コントロール ("SentinelVoice") だけを操作するようにしました。
+これはストリームごとに独立したソフトウェアゲインなので、声の音量を
+いくら変えても numid=1 (ハードウェア段、音楽・Bluetooth と共有) は
+一切変わりません。**この "SentinelVoice" softvol を経由せず、再び
+numid=1 を直接操作する実装に戻さないでください** — 同じ「音声を鳴らす
+たびに音楽の音量が変わって聞こえる」不具合に戻ります。mpg123 側の
+音量 (`music_volume`) はこれまでどおり mpg123 自身のソフトウェアゲイン
+(V コマンド) のままで、ALSA ミキサーには一切触れません — 変える理由が
+ないので変えていません。
+
+`music.py`/`voice.py` はどちらも、この named PCM が実際に用意できて
+いるか (`aplay -L` に `sentinel_music`/`sentinel_voice` があるか) を
+都度確認し、無ければ (LADSPA プラグイン欠如以外の理由でセットアップ
+スクリプトが失敗していた場合など) 従来の ducking 経路へ自動で
+フォールバックします。**この段階的劣化を外して「named PCM が無ければ
+何もしない (無音)」にしないでください** — dmix セットアップが何らかの
+理由で失敗した機体で、音楽・音声アナウンスの両方が一切鳴らなくなります。
+
+`sentinel-setup-audio-mixing.sh` 自身も、書き込み前の `/etc/asound.conf`
+をバックアップしておき、新しい設定が実際の再生テスト (`aplay -D
+sentinel_music`/`sentinel_voice` を実際に鳴らしてみる、
+`sentinel-fix-storage-owner.sh` の `can_write()` と同じ「実際に試す」
+哲学、CLAUDE.md #8) に失敗したら元の内容へ戻します。**このバックアップ・
+復元と実際の再生テストを外さないでください** — カード番号を誤って
+渡した、LADSPA プラグインが実は入っていなかった、といったケースで
+「前は (dmix なしで) 鳴っていた音が、この機能のせいで一切鳴らなくなる」
+という今回より悪い regression になります。
+
+### 32. イコライザーは ALSA の LADSPA プラグイン (mbeq) を使い、設定変更は曲の切れ目でだけ反映する
+
+「重くなりすぎない程度にイコライザー機能を、全体設定と曲ごとの設定の
+両方に対応させ、オフにもできるように」という要望を受けて追加しました。
+
+- **エンジンは swh-plugins の mbeq (15 バンドのグラフィック EQ、LADSPA
+  プラグイン)。** alsaequal のような専用パッケージ (Debian の公式
+  リポジトリでの提供が不安定) には頼らず、alsa-lib 標準の `type ladspa`
+  PCM プラグインだけで完結させています。**この理由から、LADSPA プラグイン
+  の実ファイルは `find` で探しています** (`open-jtalk`/`hts-voice` の
+  辞書探索、CLAUDE.md #27 と同じ「決め打ちパスにしない」考え方) —
+  distro/アーキテクチャでインストール先が微妙に違うためです。見つから
+  なければ (パッケージ未インストールなど) EQ は自動的にオフへフォール
+  バックし、音楽自体は鳴り続けます。
+- **オフの間は LADSPA 段そのものを asound.conf から外します。** 「ゲイン
+  0dB のフィルタを挟んだまま素通しする」のではなく、`pcm.sentinel_music`
+  の定義そのものを EQ 無しの素通し (`type plug`) に書き換えます。これに
+  より、オフのときは本当に CPU コストがゼロになります — 「オフにして
+  負荷を抑えられるようにしてほしい」という要望の核心です。
+- **設定変更 (オン/オフの切り替え、バンドの変更、曲の切り替わりによる
+  実効バンドの変化) は、そのつど asound.conf を書き換えて mpg123 を
+  再起動することで反映します。** alsa-lib 標準の LADSPA PCM プラグインは
+  (alsaequal が独自に用意する専用の ctl プラグインと違って) バンドの値を
+  ライブでは調整できません — 変えるには PCM を開き直す必要があります。
+  そのため `Player._sync_eq()` は「直前に実際に適用した (enabled, bands)
+  の組」を憶えておき、**次に鳴らす曲の実効設定 (全体設定 + その曲の
+  上書き) が前回と完全に同じなら何もしません** — 曲を跨ぐたびに毎回
+  無条件で再構成すると、EQ 設定が変わっていない曲同士の間にも再生の
+  ギャップができてしまいます。**この「変化がなければ何もしない」判定を
+  外して毎曲ごとに無条件で再構成する実装に戻さないでください** — 同じ
+  曲間ギャップの不具合に戻ります。設定が実際に変わったとき (曲の切れ目、
+  または設定タブでの変更直後の `music.refresh_eq()` 呼び出し) だけ、
+  短い再生の途切れを許容しています。
+- **全体設定 (`music_eq_bands`) と曲ごとの上書き (`music_eq_track_overrides`)
+  は、`camera_overrides`/`bt_device_volumes` と同じ「疎な dict、無指定の
+  バンドは 0dB (フラット) 扱い」パターンです。** 一般の設定 UI
+  (GROUPS/LABELS) には出さず (CLAUDE.md #15 と同じ理由 — dict をテキスト
+  入力欄で編集させる作りにはなっていない)、音楽タブに専用の 15 本
+  スライダー UI と `全体設定`/`この曲だけ` の切り替えを設けています。
+
+### 33. yt-dlp の `--restrict-filenames` は日本語タイトルを消していた
+
+「取得した曲の日本語名が消されてしまう」という報告がありました。原因は
+`music.py` の `_run_ytdlp()` が渡していた yt-dlp の `--restrict-filenames`
+オプションです。このオプションは名前のとおり「制限された」ファイル名
+(`[A-Za-z0-9_.-]` のみ) を強制するため、曲名が日本語であれば実質的に
+ほぼ全文字が失われていました — 危険な文字だけを避けるのではなく、
+非 ASCII 文字を丸ごと弾く強い制限です。yt-dlp は元々このオプション無しでも
+ファイルシステムに使えない文字 (`/` や制御文字など) は既定で適切に
+サニタイズするため、`--restrict-filenames` を外すだけで日本語タイトルを
+保ったままファイルシステム安全性も保たれます。**この
+`--restrict-filenames` を「Windows のファイル名制限を気にして」等の理由で
+復活させないでください** — 同じ「日本語タイトルが消える」不具合に戻ります。
+
 ## モジュール構成
 
 各モジュールは疎結合で、`core/state.py` の `MODE` を購読するだけです。
@@ -1063,6 +1178,14 @@ scripts/sentinel-autoupdate.sh
                     /var/lib/sentinel/repo-path から読み、git fetch して
                     リモートに新しいコミットがあれば update.sh を自動で
                     実行する (CLAUDE.md #26)
+scripts/sentinel-setup-audio-mixing.sh
+                    /etc/asound.conf を書く。音楽 (sentinel_music) と
+                    音声アナウンス (sentinel_voice) を ALSA の dmix で
+                    同時に重ねて鳴らせるようにし、イコライザー有効時は
+                    LADSPA (mbeq) 段を挟む。root しか書き込めないため
+                    sudoers で個別に許可し、modules/music.py が sudo 経由
+                    で呼ぶ (sentinel-set-governor.sh と同じパターン、
+                    CLAUDE.md #31/#32)
 
 core/config.py      設定の唯一の保管場所。型と範囲を強制する
 core/state.py       モード状態機械。「今どのモードか」の唯一の決定者
@@ -1089,7 +1212,12 @@ modules/camera.py       カメラ (別プロセス)。動体検知 -> MODE.repor
                          ON_CORRUPT_REBOOT フック経由で Pi 再起動を要求する
                          (実際の再起動は maintenance.emergency_reboot() に
                          委譲、CLAUDE.md #22)
-modules/music.py        mpg123 制御、位置復帰、yt-dlp キュー
+modules/music.py        mpg123 制御、位置復帰、yt-dlp キュー。alsa_device が
+                         空なら sentinel_music (dmix 経由、CLAUDE.md #31) を
+                         使う。イコライザー (music_eq_enabled/music_eq_bands/
+                         music_eq_track_overrides) は Player._sync_eq() が
+                         曲の実効設定が前回と変わったときだけ asound.conf を
+                         再構成して mpg123 を再起動する (CLAUDE.md #32)
 modules/thermal.py      温度と CPU -> MODE.report_temperature()
 modules/bluetooth.py    A2DP 接続検知 -> 音楽の退避と復帰。この Pi 自身の
                          表示名 (set_local_name、bluetoothctl system-alias)
@@ -1115,11 +1243,14 @@ modules/notify.py       Discord (レート制限対応キュー)。notify_motion
 modules/maintenance.py  4 時の定時処理と再起動。emergency_reboot() は
                          camera.py の破損検知エスカレーション専用の緊急
                          再起動 (タイムラプス生成は省略、CLAUDE.md #22)
-modules/voice.py        espeak-ng 経由の音声アナウンス (時報・エラー・
-                         カメラ再起動・その他システムイベント)。mpg123 の
-                         音楽ライブラリとは別経路、鳴らす前に music.py の
-                         duck_for_voice()/resume_from_voice() で曲を一時
-                         停止し、numid=1 で音量を持つ (CLAUDE.md #27)
+modules/voice.py        Open JTalk 優先/espeak-ng フォールバックの音声
+                         アナウンス (時報・エラー・カメラ再起動・その他
+                         システムイベント)。mpg123 の音楽ライブラリとは
+                         別経路、sentinel_voice (dmix 経由、ALSA softvol
+                         "SentinelVoice" で音量) を使い曲を止めずに重ねて
+                         鳴らす。named PCM が用意できていないときだけ
+                         music.py の duck_for_voice()/resume_from_voice()
+                         へフォールバックする (CLAUDE.md #27/#31)
 
 web/routes.py           全 HTTP / WebSocket エンドポイント。latest.jpg の
                          ように他プロセスが継続的に上書きするファイルは

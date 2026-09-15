@@ -133,7 +133,18 @@ DEFAULTS: dict[str, Any] = {
     "music_shuffle_seed": 0,              # 0 なら起動時に生成
     "music_autoplay_on_presence": True,
     "mpg123_buffer_kb": 1024,             # アンダーラン対策のバッファ
-    "alsa_device": "",                    # 空なら既定デバイス
+    "alsa_device": "",                    # 空なら sentinel_music (dmix 経由、
+                                           # 音声アナウンスと同時に鳴らせる。
+                                           # CLAUDE.md #31) を使う
+    "music_eq_enabled": False,            # イコライザーを有効にする (既定オフ。
+                                           # CPU 負荷と ALSA 再接続の手間を避け
+                                           # たい場合はオフのままにする)
+    "music_eq_bands": {},                 # 全体の既定バンド設定。帯域 Hz (文字列)
+                                           # -> ゲイン dB (-20〜+20)。無いバンドは
+                                           # 0dB (フラット)
+    "music_eq_track_overrides": {},       # 曲のファイル名 -> {帯域Hz: ゲインdB}
+                                           # (music_eq_bands と同じ形式)。
+                                           # 指定が無い曲は music_eq_bands を使う
 
     # --- Bluetooth ---
     "bt_enabled": True,

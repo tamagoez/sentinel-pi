@@ -125,11 +125,17 @@ ok "$SVC_USER added to video/audio/bluetooth/plugdev/systemd-journal"
 # only. modules/hotspot.py calls it so the WiFi hotspot's SSID can be
 # changed at runtime from the Settings page, not just once via dietpi.txt
 # at image-prep time. Same argument-validation-is-the-boundary pattern.
+#
+# sentinel-setup-audio-mixing.sh: /etc/asound.conf is root-writable only.
+# modules/music.py calls it whenever the equalizer is toggled/changed so
+# music and voice announcements (modules/voice.py) can mix through ALSA's
+# dmix plugin with independent volumes instead of one fully stopping the
+# other (CLAUDE.md #31). Same argument-validation-is-the-boundary pattern.
 cat > /etc/sudoers.d/sentinel <<EOF
-$SVC_USER ALL=(root) NOPASSWD: /sbin/reboot, /sbin/shutdown, /usr/bin/systemctl reboot, $APP_DIR/scripts/sentinel-set-governor.sh *, $APP_DIR/scripts/sentinel-set-hotspot-ssid.sh *
+$SVC_USER ALL=(root) NOPASSWD: /sbin/reboot, /sbin/shutdown, /usr/bin/systemctl reboot, $APP_DIR/scripts/sentinel-set-governor.sh *, $APP_DIR/scripts/sentinel-set-hotspot-ssid.sh *, $APP_DIR/scripts/sentinel-setup-audio-mixing.sh *
 EOF
 chmod 440 /etc/sudoers.d/sentinel
-visudo -cf /etc/sudoers.d/sentinel >/dev/null && ok "sudoers: reboot + CPU governor switch + hotspot SSID"
+visudo -cf /etc/sudoers.d/sentinel >/dev/null && ok "sudoers: reboot + CPU governor switch + hotspot SSID + audio mixing"
 
 # ---------------------------------------------------------------- 3. Deploy
 c "STEP 3/9  Deploy application files"

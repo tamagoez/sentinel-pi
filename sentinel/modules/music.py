@@ -19,6 +19,18 @@ mpg123 -R の主なコマンド:
 
 再生位置は @F 行から取得し、メモリ上に保持する。
 ディスクへの書き込みはモード遷移時と1時間毎のみに限定し、SD カードを守る。
+
+`alsa_device` が空のときは、既定の ALSA デバイスではなく
+`sentinel-setup-audio-mixing.sh` (CLAUDE.md #31) が用意する
+`sentinel_music` という named PCM (ALSA の dmix 経由) を使う。これにより
+音楽と音声アナウンス (modules/voice.py) が同時に重ねて鳴らせる。イコライザー
+(music_eq_enabled/music_eq_bands/music_eq_track_overrides) は同じスクリプトが
+書く asound.conf の中に LADSPA (mbeq、swh-plugins) 段として挟み込むため、
+有効/無効の切り替えやバンド設定の変更は asound.conf の書き換え + mpg123 の
+再起動を伴う (ALSA の LADSPA プラグインは alsaequal のような専用の ctl
+プラグインを使わない限りライブ調整できないため、設定を跨いだ「聞こえ方の
+変化」は曲の切れ目で起きる)。曲ごとに設定が違わない限りは何も再構成せず、
+曲間で途切れない。
 """
 
 from __future__ import annotations
@@ -41,6 +53,77 @@ log = logging.getLogger("sentinel.music")
 
 AUDIO_EXT = {".mp3"}
 _SCAN_EXT = {".mp3", ".m4a", ".opus", ".ogg", ".flac", ".wav", ".webm"}
+
+# mbeq (swh-plugins) の 15 バンドの中心周波数。
+# scripts/sentinel-setup-audio-mixing.sh へ渡す順序と一致させること。
+EQ_BAND_HZ = ["50", "100", "156", "220", "311", "440", "622", "880",
+             "1250", "1750", "2500", "3500", "5000", "10000", "20000"]
+
+# 直近に実際に適用した (enabled, bands) の組。同じ組が来たら asound.conf の
+# 再構成・mpg123 の再起動をスキップする — 曲を切り替えるたびに無条件で
+# 再構成すると、EQ 設定が変わっていない曲間にも毎回ギャップができてしまう。
+_last_applied_eq: tuple | None = None
+
+
+def _card_index() -> int | None:
+    try:
+        out = subprocess.run(["aplay", "-l"], capture_output=True, text=True, timeout=5).stdout
+    except Exception:
+        return None
+    for line in out.splitlines():
+        if line.startswith("card "):
+            try:
+                return int(line.split()[1].rstrip(":"))
+            except Exception:
+                continue
+    return None
+
+
+def _mixing_ready() -> bool:
+    """sentinel-setup-audio-mixing.sh が sentinel_music という named PCM を
+    実際に用意できているか (voice.py の _mixing_ready() と対になる)。"""
+    try:
+        out = subprocess.run(["aplay", "-L"], capture_output=True, text=True, timeout=5).stdout
+    except Exception:
+        return False
+    return "sentinel_music" in out.splitlines()
+
+
+def resolve_eq_bands(track_name: str | None) -> list[float]:
+    """曲名 (track_path.name) に対して実際に使うべき 15 バンドのゲイン
+    (dB) を返す。曲ごとの上書き (music_eq_track_overrides) があればそれを
+    優先し、無ければ全体設定 (music_eq_bands)、それも無ければ 0dB (フラット)。"""
+    global_bands = config.get("music_eq_bands") or {}
+    overrides = (config.get("music_eq_track_overrides") or {}).get(track_name or "") or {}
+    out = []
+    for hz in EQ_BAND_HZ:
+        if hz in overrides:
+            out.append(float(overrides[hz]))
+        elif hz in global_bands:
+            out.append(float(global_bands[hz]))
+        else:
+            out.append(0.0)
+    return out
+
+
+def _apply_audio_mixing(enabled: bool, bands: list[float] | None) -> bool:
+    card = _card_index()
+    if card is None:
+        return False
+    script = config.APP_ROOT.parent / "scripts" / "sentinel-setup-audio-mixing.sh"
+    args = ["sudo", "-n", str(script), str(card), "on" if enabled else "off"]
+    if enabled:
+        args += [f"{b:g}" for b in (bands or [0.0] * len(EQ_BAND_HZ))]
+    try:
+        p = subprocess.run(args, capture_output=True, text=True, timeout=30)
+    except Exception as exc:
+        log.warning("音声ミキシング設定の更新に失敗しました: %s", exc)
+        return False
+    if p.returncode != 0:
+        log.warning("sentinel-setup-audio-mixing.sh が失敗しました: %s",
+                    (p.stderr or p.stdout or "").strip())
+        return False
+    return True
 
 
 class Player:
@@ -111,6 +194,8 @@ class Player:
             return False
         cmd = ["mpg123", "-R", "--buffer", str(int(config.get("mpg123_buffer_kb")))]
         dev = str(config.get("alsa_device") or "").strip()
+        if not dev and _mixing_ready():
+            dev = "sentinel_music"     # dmix 経由。音声アナウンスと同時に鳴らせる
         if dev:
             cmd += ["-a", dev]
         try:
@@ -174,12 +259,41 @@ class Player:
 
     # -------------------------------------------------- 操作
 
+    def _sync_eq(self, track_name: str) -> bool:
+        """イコライザー設定が前回適用時から変わっていれば asound.conf を
+        再構成し、実行中の mpg123 を落とす (次の呼び出し元が新しい設定で
+        開き直す)。変わっていなければ何もしない (曲間の無用なギャップを
+        避ける、モジュール docstring 参照)。戻り値は実際に再構成したか。"""
+        global _last_applied_eq
+        enabled = bool(config.get("music_eq_enabled"))
+        bands = resolve_eq_bands(track_name) if enabled else None
+        key = (enabled, tuple(bands) if bands is not None else None)
+        if key == _last_applied_eq:
+            return False
+        if not _apply_audio_mixing(enabled, bands):
+            return False
+        _last_applied_eq = key
+        if self.proc is not None:
+            log.info("イコライザー設定が変わったため mpg123 を再起動します (enabled=%s)", enabled)
+            self._send("S")
+            self._send("Q")
+            try:
+                self.proc.wait(timeout=3)
+            except Exception:
+                try:
+                    self.proc.kill()
+                except Exception:
+                    pass
+            self.proc = None
+        return True
+
     def play(self, seek: float = 0.0) -> None:
         with self._lock:
             path = self.current_path()
             if path is None:
                 self.last_error = "再生可能な曲がありません"
                 return
+            self._sync_eq(path.name)
             if self.proc is None or self.proc.poll() is not None:
                 if not self._spawn():
                     return
@@ -336,6 +450,58 @@ class Player:
 PLAYER = Player()
 
 
+def set_eq_bands(bands: dict) -> dict:
+    """イコライザーの全体設定を部分更新する。値が None のキーは削除
+    (0dB=フラットへ戻す)。camera.set_overrides() と同じパターン。"""
+    cur = dict(config.get("music_eq_bands") or {})
+    for hz, v in bands.items():
+        if hz not in EQ_BAND_HZ:
+            continue
+        if v is None:
+            cur.pop(hz, None)
+        else:
+            cur[hz] = max(-20.0, min(20.0, float(v)))
+    config.update({"music_eq_bands": cur})
+    refresh_eq()
+    return cur
+
+
+def set_track_eq_bands(track_name: str, bands: dict) -> dict:
+    """曲ごとのイコライザー上書きを部分更新する。全バンドが空になったら
+    その曲のエントリごと削除する (bt_device_volumes と同じパターン)。"""
+    all_overrides = dict(config.get("music_eq_track_overrides") or {})
+    cur = dict(all_overrides.get(track_name) or {})
+    for hz, v in bands.items():
+        if hz not in EQ_BAND_HZ:
+            continue
+        if v is None:
+            cur.pop(hz, None)
+        else:
+            cur[hz] = max(-20.0, min(20.0, float(v)))
+    if cur:
+        all_overrides[track_name] = cur
+    else:
+        all_overrides.pop(track_name, None)
+    config.update({"music_eq_track_overrides": all_overrides})
+    refresh_eq()
+    return cur
+
+
+def refresh_eq() -> None:
+    """設定タブでイコライザーの有効/バンドを変更した直後に呼ぶ (routes.py
+    の put_config から)。次に曲が切り替わるのを待たず、今かかっている曲
+    に対してすぐ反映させる。設定が実際には変わっていなければ何もしない
+    (Player._sync_eq() が判定する) ので、無関係な設定変更のたびに呼んでも
+    安全。"""
+    path = PLAYER.current_path()
+    if path is None:
+        return
+    with PLAYER._lock:
+        changed = PLAYER._sync_eq(path.name)
+    if changed:
+        PLAYER.play(PLAYER.position)
+
+
 # ---------------------------------------------------------------- モード連動
 
 def on_mode_change(new: str, old: str) -> None:
@@ -430,7 +596,13 @@ def _run_ytdlp(url: str, entry: dict) -> None:
         "yt-dlp", "--no-playlist", "--no-progress", "--newline",
         "-x", "--audio-format", "mp3", "--audio-quality", "0",
         "--embed-metadata", "--embed-thumbnail", "--convert-thumbnails", "jpg",
-        "--no-overwrites", "--restrict-filenames",
+        "--no-overwrites",
+        # --restrict-filenames was here previously and stripped every
+        # non-ASCII character - it forces filenames down to [A-Za-z0-9_.-]
+        # only, so any Japanese title lost its actual characters entirely
+        # (not just risky ones). yt-dlp already sanitizes filesystem-unsafe
+        # characters (/, control chars, ...) by default without this flag,
+        # so dropping it keeps Japanese titles while staying filesystem-safe.
         "-o", str(config.MUSIC_DIR / "%(uploader,artist)s - %(title)s.%(ext)s"),
         url,
     ]

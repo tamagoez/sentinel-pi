@@ -319,6 +319,27 @@ try{
         </div>
       </div></div>
 
+      <div class="card"><h3>イコライザー</h3><div class="body">
+        <div class="row" style="margin-bottom:8px">
+          <select id="eq-enabled" style="width:auto" onchange="cfg({music_eq_enabled: this.value})">
+            <option value="false">オフ (負荷を抑える)</option>
+            <option value="true">オン</option>
+          </select>
+          <select id="eq-scope" style="width:auto" onchange="renderEq()">
+            <option value="global">全体設定</option>
+            <option value="track">この曲だけ</option>
+          </select>
+          <button onclick="eqReset()">この範囲をリセット</button>
+        </div>
+        <div id="eq-bands" class="row" style="align-items:flex-end;gap:3px"></div>
+        <div class="faint" id="eq-track-name" style="font-size:11px;margin-top:6px"></div>
+        <div class="hint faint" style="font-size:11px;margin-top:4px">
+          オフの間は ALSA の EQ 段そのものを外すため、CPU 負荷は増えません。
+          設定を変えると (曲が変わるタイミングでない限り) その場で曲が一瞬
+          途切れて再構成されます。
+        </div>
+      </div></div>
+
       <div class="card"><h3>URL から追加 (yt-dlp)</h3><div class="body">
         <div class="row">
           <input id="dl-url" placeholder="https://..." style="flex:1">
@@ -1062,6 +1083,57 @@ async function setMode(m){
 let MUSIC = {};
 async function loadMusic(){
   try{ MUSIC = await api("/api/music"); renderMusic(true); }catch(e){}
+  loadEq();
+}
+
+/* ---------------- equalizer ---------------- */
+let EQ = null;
+async function loadEq(){
+  try{ EQ = await api("/api/music/eq"); renderEq(); }catch(e){}
+}
+function renderEq(){
+  if(!EQ) return;
+  $("#eq-enabled").value = String(EQ.enabled);
+  const scope = $("#eq-scope").value;
+  const track = EQ.current_track;
+  $("#eq-track-name").textContent = scope === "track"
+    ? (track ? `対象の曲: ${track}` : "再生中の曲がありません (先に曲を再生してください)")
+    : "";
+  const trackBands = (track && EQ.track_overrides[track]) || {};
+  $("#eq-bands").innerHTML = EQ.bands_hz.map(hz => {
+    const has = scope === "global" ? (hz in EQ.global) : (hz in trackBands);
+    const v = scope === "global" ? (EQ.global[hz] ?? 0) : (trackBands[hz] ?? EQ.global[hz] ?? 0);
+    const label = (+hz >= 1000) ? `${(+hz/1000).toFixed(+hz % 1000 ? 1 : 0)}k` : hz;
+    return `<div style="display:flex;flex-direction:column;align-items:center;flex:1;min-width:0">
+      <span class="faint" style="font-size:9px">${has ? v : 0}</span>
+      <input type="range" min="-20" max="20" step="1" value="${v}"
+        style="writing-mode:vertical-lr;direction:rtl;width:16px;height:90px;padding:0"
+        onchange="eqSetBand('${hz}', this.value)" title="${hz} Hz">
+      <span class="faint" style="font-size:9px;white-space:nowrap">${label}</span>
+    </div>`;
+  }).join("");
+}
+async function eqSetBand(hz, val){
+  const scope = $("#eq-scope").value;
+  const body = {}; body[hz] = +val;
+  try{
+    if(scope === "global") await putJson("/api/music/eq/global", body);
+    else{
+      if(!EQ.current_track){ toast("再生中の曲がありません", true); return; }
+      await putJson(`/api/music/eq/track/${encodeURIComponent(EQ.current_track)}`, body);
+    }
+    await loadEq();
+  }catch(e){ toast(e.message, true); }
+}
+async function eqReset(){
+  const scope = $("#eq-scope").value;
+  const body = {}; EQ.bands_hz.forEach(hz => body[hz] = null);
+  try{
+    if(scope === "global") await putJson("/api/music/eq/global", body);
+    else if(EQ.current_track) await putJson(`/api/music/eq/track/${encodeURIComponent(EQ.current_track)}`, body);
+    await loadEq();
+    toast("リセットしました");
+  }catch(e){ toast(e.message, true); }
 }
 function renderMusic(full){
   const s = (DATA.music && Object.keys(DATA.music).length) ? DATA.music : (MUSIC.status || {});
@@ -1774,7 +1846,7 @@ const GROUPS = [
                 "motion_warmup_seconds","motion_confirm_checks","motion_release_checks",
                 "cam_autofocus","save_cooldown","motion_debug_log"]],
   ["音楽", ["music_enabled","music_autoplay_on_presence","music_volume","music_repeat",
-            "music_shuffle","mpg123_buffer_kb","alsa_device"]],
+            "music_shuffle","mpg123_buffer_kb","alsa_device","music_eq_enabled"]],
   ["Bluetooth", ["bt_enabled","bt_poll_seconds"]],
   ["通知 (Discord)", ["discord_webhook","notify_motion","notify_motion_grouped","notify_min_interval",
                       "notify_summary","notify_summary_after","notify_mode_change",
@@ -1814,7 +1886,9 @@ const LABELS = {
   corrupt_reboot_threshold:"再接続を何回試しても直らなければPiを緊急再起動するか",
   music_enabled:"常時再生を有効にする", music_autoplay_on_presence:"人を検知したら自動再生",
   music_volume:"音量 (%)", music_repeat:"繰り返し", music_shuffle:"シャッフル",
-  mpg123_buffer_kb:"mpg123 バッファ (KB)", alsa_device:"ALSA デバイス (空欄で既定)",
+  mpg123_buffer_kb:"mpg123 バッファ (KB)",
+  alsa_device:"ALSA デバイス (空欄で sentinel_music、音声アナウンスと同時再生可能)",
+  music_eq_enabled:"イコライザーを有効にする (音楽タブでバンドを調整、CPU 負荷対策でオフが既定)",
   bt_enabled:"Bluetooth 連携を有効にする", bt_poll_seconds:"接続確認の間隔 (秒)",
   discord_webhook:"Webhook URL", notify_motion:"動体検知を通知する",
   notify_motion_grouped:"複数カメラの検知を1通にまとめる (オフ: カメラごとに送る)",
