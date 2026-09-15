@@ -69,7 +69,15 @@ Basic 認証ヘッダを組み立て、`/control/querylog` へ送ります。AdG
 到達性は別の話です。`http.address` を `127.0.0.1:8083` に固定し、iptables
 でも二重に塞いでいます。8080 経由の `/adguard/` プロキシは撤去したままです
 (フィルタ設定などを直接いじりたいまれなケースには
-`scripts/sentinel-adguard-8083.sh enable [MINUTES]` で :8083 を一時的に
+`scripts/sentinel-fix-bluealsa.sh
+                    bluealsa が org.bluealsa の D-Bus 名を取れずに落ち
+                    続ける状態を直す。dbus-send で実際の所有者 PID と
+                    ユニットを特定し、別ユニット (ディストリ側の
+                    bluealsa.service など) ならそれを停止・無効化する。
+                    この再起動ループは bluealsa-aplay を道連れにし、
+                    bcm2835 を壊して「音楽が鳴らない」まで波及するため、
+                    音声障害の調査でも最初に見る (CLAUDE.md #45)
+scripts/sentinel-adguard-8083.sh enable [MINUTES]` で :8083 を一時的に
 (既定 15 分、Guardian の次の周期までに自動で再遮断) 開けます。`disable`
 で即座に再遮断、`status` で現在の状態を確認できます)。
 
@@ -1727,6 +1735,84 @@ numid=3 の名前に `Route`、numid=1 の名前に `Volume` が含まれると�
 `fuser -v /dev/snd/*` で掴んでいるプロセスを名指しします。実機では
 `aplay -D sentinel_music` が `audio open error: Invalid argument` で
 失敗しており、この 2 つの区別が付かないと次の一手が決められません。
+
+### 45. サービスが「どのユーザーで動くか」を推測しない。3 つの症状が 1 つの原因だったこと
+
+`sentinel-logs` (#42) が failed ユニットの `User=` と生ログを出すようになって
+初めて、長く追いかけていた 3 つの症状の正体が判明しました。**どれも推測で
+書いたコードが原因で、実機のログ 1 行ずつで確定しました。**
+
+**(1) Syncthing は `dietpi` ではなく `syncthing` ユーザーで動いていた**
+
+```
+User=syncthing
+ExecStart=/opt/syncthing/syncthing ... --home=/mnt/dietpi_userdata/syncthing
+```
+
+CLAUDE.md #40 以降の対策 — `dietpi` を `sentinel` グループへ追加、
+`chown dietpi:sentinel`、そして `dietpi` での書き込みテスト — は**すべて
+サービスが一度も名乗らないユーザーを対象にしていました**。しかも
+書き込みテストは `dietpi can write: yes` と報告し続けたため、**対策が
+効いているように見えるのに Syncthing は `syncthing.lock` で
+permission denied を出し続ける**という、出力だけ見ると矛盾する状態に
+なっていました。exFAT は `uid=984(sentinel)/gid=984(sentinel)`、
+`dmask=0002` で `drwxrwxr-x` なので、`syncthing` ユーザーは other 扱い =
+書き込み不可です。
+
+修正は `systemctl show syncthing -p User --value` で実際のユーザーを取得し、
+グループ追加・chown・書き込みテスト・`syncthing --paths` の実行ユーザーを
+すべてそれに合わせることです (`install.sh`・`check_syncthing_storage()`・
+`sentinel-fix-syncthing-gui.sh`・`sentinel-logs.sh` の 4 か所)。
+**ユーザー名をハードコードした実装に戻さないでください** — DietPi の
+パッケージ構成が変われば同じことが起き、しかも「テストは通るのに動かない」
+という最も時間を溶かす形で現れます。
+
+**(2) bluealsa は D-Bus 名を取れずに落ち続けていた**
+
+```
+bluealsa: E: main.c:137: Couldn't acquire D-Bus name.
+          Please check D-Bus configuration. Requested name: org.bluealsa
+```
+
+D-Bus の well-known name の所有者は 1 つだけです。取れなければ bluealsa は
+終了し、systemd が再起動し、また終了する — 実機では 2 時間で 492 回
+失敗していました。ほぼ確実にディストリ側の `bluealsa.service` が同時に
+動いています。`scripts/sentinel-fix-bluealsa.sh` が `dbus-send` で
+`GetNameOwner` → `GetConnectionUnixProcessID` と辿って**実際の所有者の
+PID とユニット名を特定**し、別ユニットならそれを停止・無効化します
+(こちらの unit は `-p a2dp-sink` を持つ必要があるため、残すのはこちら)。
+所有者が居ないのに取れない場合は D-Bus のポリシー問題なので、推測で
+いじらず該当ファイルの確認手順を出して止まります。
+
+**(3) 音楽が鳴らないのは (2) の巻き添えだった**
+
+これが今回いちばん重要な発見です。`sentinel-bluealsa-aplay.service` は
+`Requires=sentinel-bluealsa.service` なので、(2) の再起動ループのたびに
+道連れで停止・起動を繰り返し、**そのたびに ALSA の既定デバイスを開いて
+閉じます**。bcm2835 はこれに耐えきれないことがあり
+(`bcm2835-audio: failed to close VCHI service connection (status=-11)`)、
+一度おかしくなると dmix が `hw:N,0` を開けなくなります。結果:
+
+- `aplay -D sentinel_music` → `audio open error: Invalid argument`
+- mpg123 も開けない → **JACK モジュールへフォールバックして即死**
+  (`jack server is not running`) → 5 秒ごとの復帰ループ
+
+**つまり Bluetooth の D-Bus 名前衝突が、Bluetooth とは何の関係もない
+「音楽が鳴らない」として現れていました。** 症状ごとに個別対処していた
+限り直らなかったのは当然で、直すべき箇所は 1 つでした。
+
+あわせて mpg123 には `-o alsa` を付け、出力モジュールを固定しました。
+mpg123 は指定が無いと alsa/jack/pulse を順に試すため、ALSA が開けない
+ときに JACK を探しに行って死にます。このプロジェクトは ALSA へ直接書く
+前提 (CLAUDE.md #2) なので、**駄目なら ALSA のエラーで正直に落ちる**方が
+正しく、実際 JACK のメッセージは本当の原因を隠していました。**この
+`-o alsa` を外さないでください。**
+
+**教訓として残すこと**: 今回の 3 つは、どれも「調べれば 1 行で分かる事実」を
+推測で埋めたことが原因です。サービスのユーザー、D-Bus 名の所有者、
+プロセスの死因 — いずれも `systemctl show` / `dbus-send` / stderr を
+読めば確定できました。**次に似た症状が出たら、まず `sentinel-logs` を
+取り、事実が出揃うまでコードを書かないでください。**
 
 ## モジュール構成
 

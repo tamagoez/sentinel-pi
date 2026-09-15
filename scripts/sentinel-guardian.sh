@@ -347,6 +347,13 @@ check_syncthing_storage() {
   local st_home="$storage/syncthing"
   local st_default=/mnt/dietpi_userdata/syncthing
   local svc_user=sentinel
+  # Never assume the user Syncthing runs as - DietPi's unit uses
+  # User=syncthing, and an earlier version of this check hardcoded
+  # 'dietpi', so every repair it made targeted a user the service never
+  # runs as while Syncthing kept failing on its lock file.
+  local st_user
+  st_user=$(systemctl show syncthing -p User --value 2>/dev/null)
+  [[ -n "$st_user" ]] || st_user=dietpi
 
   # NEVER call sentinel-fix-storage-owner.sh here for 'dietpi' - its
   # exFAT/NTFS branch rewrites the whole *mount's* uid=/gid= options
@@ -360,9 +367,9 @@ check_syncthing_storage() {
   # mounted somewhere other than $storage (CLAUDE.md #40). Group
   # membership shares the *already-fixed* access instead, without ever
   # touching fstab or the mount again.
-  if ! id -nG dietpi 2>/dev/null | grep -qw "$svc_user"; then
-    if usermod -aG "$svc_user" dietpi 2>/dev/null; then
-      fixed "added dietpi to the $svc_user group (was missing - Syncthing may not have been able to write to $storage)"
+  if ! id -nG "$st_user" 2>/dev/null | grep -qw "$svc_user"; then
+    if usermod -aG "$svc_user" "$st_user" 2>/dev/null; then
+      fixed "added $st_user to the $svc_user group (was missing - Syncthing could not write to $storage)"
       systemctl is-active --quiet syncthing 2>/dev/null && systemctl restart syncthing 2>/dev/null
     fi
   fi
@@ -375,7 +382,7 @@ check_syncthing_storage() {
   # mount covers it this is a no-op (exFAT has no per-directory
   # ownership), so it is safe to run unconditionally every cycle.
   if [[ -d "$st_default" ]] && ! mountpoint -q "$st_default" 2>/dev/null; then
-    chown dietpi:"$svc_user" "$st_default" 2>/dev/null || true
+    chown "$st_user":"$svc_user" "$st_default" 2>/dev/null || true
     chmod 0775 "$st_default" 2>/dev/null || true
   fi
 
@@ -438,6 +445,26 @@ check_syncthing_gui() {
   fi
 }
 
+# ------------------------------------------------------------------ 8d. BlueALSA D-Bus name
+# bluealsa exits whenever it cannot own org.bluealsa, and systemd restarts
+# it forever. The churn tears sentinel-bluealsa-aplay down and up with it,
+# and that repeated opening of the ALSA device can leave bcm2835 wedged -
+# at which point music fails too, for a reason that looks nothing like
+# Bluetooth (CLAUDE.md #45).
+check_bluealsa_dbus() {
+  local script=/opt/sentinel/scripts/sentinel-fix-bluealsa.sh
+  [[ -x "$script" ]] || return 0
+  local out rc
+  out=$("$script" --quiet 2>&1); rc=$?
+  if (( rc == 10 )); then
+    while IFS= read -r line; do
+      [[ -n "$line" ]] && fixed "${line#*] }"
+    done <<<"$out"
+  elif (( rc != 0 )) && [[ -n "$out" ]]; then
+    warn "bluealsa check: $(printf '%s' "$out" | tr '\n' ' ')"
+  fi
+}
+
 # ------------------------------------------------------------------ 9. Storage space
 # Full storage would stall every feature, so warn early and keep one
 # diagnostics bundle on record for later investigation.
@@ -485,6 +512,7 @@ check_hotspot_dns
 check_storage_owner
 check_syncthing_storage
 check_syncthing_gui
+check_bluealsa_dbus
 check_storage
 check_ytdlp
 

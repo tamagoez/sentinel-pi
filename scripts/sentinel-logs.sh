@@ -69,12 +69,17 @@ else
 fi
 if [[ -d "$ST_DEFAULT" ]]; then
   kv "$ST_DEFAULT" "$(ls -ld "$ST_DEFAULT" 2>/dev/null | awk '{print $1, $3":"$4}')$(mountpoint -q "$ST_DEFAULT" 2>/dev/null && echo ' [mounted]' || echo ' [plain dir]')"
-  if runuser -u dietpi -- test -w "$ST_DEFAULT" 2>/dev/null; then
-    kv "dietpi can write" "yes"
+  # Report the user the service actually runs as. Testing a hardcoded
+  # 'dietpi' here printed a reassuring "can write: yes" for hours while
+  # Syncthing (User=syncthing) was failing on that very directory.
+  ST_USER=$(systemctl show syncthing -p User --value 2>/dev/null)
+  [[ -n "$ST_USER" ]] || ST_USER=dietpi
+  if runuser -u "$ST_USER" -- test -w "$ST_DEFAULT" 2>/dev/null; then
+    kv "$ST_USER can write" "yes"
   else
-    kv "dietpi can write" "NO <-- Syncthing cannot start"
+    kv "$ST_USER can write" "NO <-- Syncthing cannot start"
   fi
-  kv "dietpi groups" "$(id -nG dietpi 2>/dev/null)"
+  kv "$ST_USER groups" "$(id -nG "$ST_USER" 2>/dev/null)"
 fi
 
 hdr "audio"

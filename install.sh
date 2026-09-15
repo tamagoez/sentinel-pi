@@ -243,7 +243,8 @@ c "STEP 5/10  Prepare Syncthing storage (Obsidian sync)"
 # pointing outside dietpi_userdata) survives any systemd path sandboxing
 # DietPi's unit applies to the literal /mnt/dietpi_userdata/syncthing path.
 #
-# Ownership: Syncthing runs as 'dietpi', a *different* user than $SVC_USER,
+# Ownership: Syncthing runs as its own user (see ST_USER below), a
+# *different* user than $SVC_USER,
 # on the *same* $STORAGE mount that STEP 4 above just fixed for $SVC_USER.
 # sentinel-fix-storage-owner.sh must never be called a second time here
 # with 'dietpi' as the target user: on exFAT/NTFS its exFAT/NTFS branch
@@ -266,6 +267,16 @@ if [[ -x /opt/syncthing/syncthing ]]; then
   ST_VAULTS="$STORAGE/obsidian"
   mkdir -p "$ST_HOME" "$ST_VAULTS"
 
+  # NEVER hardcode the user Syncthing runs as. This block assumed 'dietpi'
+  # and was wrong on real hardware: DietPi's unit has User=syncthing. Every
+  # part of the old fix - the group membership, the chown, and the write
+  # test that then cheerfully reported "dietpi can write: yes" - targeted a
+  # user the service never runs as, while Syncthing itself failed on
+  # "open .../syncthing.lock: permission denied" for hours. Ask systemd.
+  ST_USER=$(systemctl show syncthing -p User --value 2>/dev/null)
+  [[ -n "$ST_USER" ]] || ST_USER=dietpi
+  ok "Syncthing runs as: $ST_USER"
+
   # A supplementary group only applies to processes started *after* the
   # change - an already-running syncthing.service keeps its old groups
   # until restarted. Only force that restart when the membership is
@@ -274,9 +285,9 @@ if [[ -x /opt/syncthing/syncthing ]]; then
   # existing on its own) - no need to bounce Syncthing on every run once
   # this has already applied once.
   ST_NEED_RESTART=0
-  if ! id -nG dietpi 2>/dev/null | grep -qw "$SVC_USER"; then
-    usermod -aG "$SVC_USER" dietpi 2>/dev/null && {
-      ok "dietpi added to the $SVC_USER group (shares its already-fixed $STORAGE access)"
+  if ! id -nG "$ST_USER" 2>/dev/null | grep -qw "$SVC_USER"; then
+    usermod -aG "$SVC_USER" "$ST_USER" 2>/dev/null && {
+      ok "$ST_USER added to the $SVC_USER group (shares its already-fixed $STORAGE access)"
       ST_NEED_RESTART=1
     }
   fi
@@ -353,14 +364,14 @@ if [[ -x /opt/syncthing/syncthing ]]; then
 
     mkdir -p "$ST_DEFAULT"
     # mkdir runs as root here, so a freshly created $ST_DEFAULT is
-    # root:root 0755 - and Syncthing runs as dietpi. Whenever the bind
+    # root:root 0755 - and Syncthing runs as $ST_USER. Whenever the bind
     # mount below does not take (or is cleared later), Syncthing then
     # fails on exactly this directory with "chmod ...: operation not
     # permitted" followed by "open .../syncthing.lock: permission
     # denied", which is what real hardware reported. Hand the directory
-    # to dietpi up front; once the bind mount covers it these calls are
+    # to $ST_USER up front; once the bind mount covers it these calls are
     # harmless no-ops (exFAT has no per-directory ownership at all).
-    chown dietpi:"$SVC_USER" "$ST_DEFAULT" 2>/dev/null || true
+    chown "$ST_USER":"$SVC_USER" "$ST_DEFAULT" 2>/dev/null || true
     chmod 0775 "$ST_DEFAULT" 2>/dev/null || true
     grep -qF " $ST_DEFAULT " /etc/fstab || \
       echo "$ST_HOME $ST_DEFAULT none bind 0 0" >> /etc/fstab
@@ -379,12 +390,12 @@ if [[ -x /opt/syncthing/syncthing ]]; then
   # Now that the bind mount (or its absence) is settled, test the path
   # Syncthing actually opens. This is the check that would have caught the
   # real-hardware failure directly instead of leaving it to journalctl.
-  if runuser -u dietpi -- sh -c ': > "$1/.st-write-test.$$" && rm -f "$1/.st-write-test.$$"' _ "$ST_DEFAULT" 2>/dev/null; then
-    ok "dietpi can write to $ST_DEFAULT"
+  if runuser -u "$ST_USER" -- sh -c ': > "$1/.st-write-test.$$" && rm -f "$1/.st-write-test.$$"' _ "$ST_DEFAULT" 2>/dev/null; then
+    ok "$ST_USER can write to $ST_DEFAULT"
   else
-    w "dietpi cannot write to $ST_DEFAULT - Syncthing will fail to start there."
+    w "$ST_USER cannot write to $ST_DEFAULT - Syncthing will fail to start there."
     w "  $(ls -ld "$ST_DEFAULT" 2>/dev/null)"
-    w "  dietpi groups: $(id -nG dietpi 2>/dev/null)"
+    w "  $ST_USER groups: $(id -nG "$ST_USER" 2>/dev/null)"
     w "A reboot may be needed for a newly added group to reach syncthing.service."
   fi
 
@@ -432,6 +443,12 @@ if [[ -n "$BA" ]]; then
 else
   w "bluealsa not found; Bluetooth-speaker feature will be unavailable."
 fi
+
+# A second bluealsa (typically the distribution's own bluealsa.service)
+# takes the org.bluealsa D-Bus name, ours then exits on every start, and
+# the restart churn that follows can wedge the bcm2835 card badly enough
+# that music stops too (CLAUDE.md #45).
+"$SRC/scripts/sentinel-fix-bluealsa.sh" || true
 
 # Nothing in this project ever restores the shared hardware volume
 # (numid=1) once something leaves it at zero, which silences music with no
