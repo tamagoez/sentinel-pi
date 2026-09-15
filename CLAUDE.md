@@ -1400,6 +1400,20 @@ Obsidian 内でのリアルタイム差分マージはしない)、同じノー�
   `-home` フラグを直接書き換える実装、あるいはシンボリックリンクに
   戻さないでください** — どちらも同じ「DietPi の再導入で静かに壊れる」
   不具合に戻ります。
+
+  この bind マウントには、もう 1 つ別のレースが実機で見つかっています。
+  DietPi 自身のドライブ自動検出が、起動直後の競合 (CLAUDE.md #12 の
+  Bluetooth/Hotspot と同じ種類のレース) でこの場所へパーティションを
+  **バインドではなく直接** 先にマウントしてしまうことがあります。
+  `mount`/`findmnt` の SOURCE が `$ST_HOME[/...]` ではなく生のデバイス
+  (`/dev/sda1` など) のままなら、それはこの直接マウントです。これを
+  放置して `mount --bind` を重ねると、**同じ exFAT/NTFS パーティションが
+  2 つの独立したマウントとして同時に生き続け**、双方に書き込みが起きると
+  データ破損の恐れがあります。`install.sh`/`check_syncthing_storage()` は
+  どちらも、bind する前に `$ST_DEFAULT` の現在のマウント元を確認し、自分の
+  bind 由来でなければ umount (リトライ + `umount -l`) してから bind し
+  直します。**このチェックを外して無条件に `mount --bind` を重ねる実装に
+  戻さないでください** — 同じ二重マウントに戻ります。
 - **`install.sh`/Guardian の両方が、このバインドマウントを device+inode
   比較で検証しています** (`stat -c '%d:%i'` が `$STORAGE/syncthing` と
   `/mnt/dietpi_userdata/syncthing` とで一致するかどうか)。`findmnt` の

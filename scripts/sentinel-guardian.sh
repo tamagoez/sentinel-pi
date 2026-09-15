@@ -391,6 +391,25 @@ check_syncthing_storage() {
 
   local was_active=0
   systemctl is-active --quiet syncthing 2>/dev/null && { was_active=1; systemctl stop syncthing; }
+
+  # A real incident showed $st_default sometimes ending up mounted directly
+  # from the raw device (not via our bind mount) - DietPi's own drive
+  # detection can grab a newly-visible partition onto an existing empty
+  # mountpoint in a boot-time race (same family as check_bluetooth()'s
+  # race). mount --bind on top of that would stack a second independent
+  # mount of the same filesystem instead of replacing it, and two live
+  # mounts of one exFAT/NTFS filesystem written out of sync risk real data
+  # corruption. Clear anything that isn't our bind mount first.
+  if mountpoint -q "$st_default" 2>/dev/null; then
+    local cur_src
+    cur_src=$(findmnt -no SOURCE "$st_default" 2>/dev/null | tail -n1)
+    if [[ "$cur_src" != "$st_home"* ]]; then
+      local j
+      for j in 1 2 3 4 5; do umount "$st_default" 2>/dev/null && break; sleep 1; done
+      umount -l "$st_default" 2>/dev/null || true
+    fi
+  fi
+
   if mount --bind "$st_home" "$st_default" 2>/dev/null; then
     fixed "re-bind-mounted Syncthing home onto $st_home (had reset to $st_default on the SD card)"
   else

@@ -289,6 +289,27 @@ if [[ -x /opt/syncthing/syncthing ]]; then
     w "A reboot (or logging dietpi out/in) may be needed for the new group membership to take effect."
   fi
 
+  # Defensive: something other than our own bind mount can occasionally
+  # grab this directory first - DietPi's own drive-detection auto-mounting
+  # a newly-visible partition directly onto an existing empty mountpoint is
+  # a boot-time race in the same family as CLAUDE.md #12, and a real
+  # incident showed the same partition ending up mounted here directly
+  # (not via bind - `mount`/`findmnt` show the raw device as SOURCE, not
+  # "$ST_HOME[/...]") instead of at $STORAGE. If left alone, the
+  # `mount --bind` below would stack a *second* independent mount of the
+  # same filesystem on top of it rather than replacing it - two live
+  # mounts of one exFAT/NTFS filesystem can be written out of sync with
+  # each other and risk real data corruption. Clear anything that isn't
+  # our bind mount before proceeding.
+  if mountpoint -q "$ST_DEFAULT" 2>/dev/null; then
+    CUR_SRC=$(findmnt -no SOURCE "$ST_DEFAULT" 2>/dev/null | tail -n1)
+    if [[ "$CUR_SRC" != "$ST_HOME"* ]]; then
+      w "$ST_DEFAULT is already mounted from $CUR_SRC (not our bind mount) - clearing it first"
+      for i in 1 2 3 4 5; do umount "$ST_DEFAULT" 2>/dev/null && break; sleep 1; done
+      umount -l "$ST_DEFAULT" 2>/dev/null || true
+    fi
+  fi
+
   # Already bind-mounted from a previous run? A bind mount makes the target
   # report the *source* directory's device+inode, so comparing those is a
   # reliable, filesystem-agnostic way to tell "already redirected" apart
