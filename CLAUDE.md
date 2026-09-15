@@ -716,6 +716,50 @@ unresolved_reconnects** を添えて書き出し、`log.error()` も出します
 二度と要求しない」実装にしないでください** — 最初の再起動要求が何らかの
 理由で失敗した場合に復旧手段が無くなります。
 
+### 23. `FileResponse` を、他プロセスが継続的に上書きするファイルに使わない
+
+実機のログに `ERROR uvicorn.error Exception in ASGI application` →
+`RuntimeError: Response content shorter than Content-Length` /
+`RuntimeError: Response content longer than Content-Length` が、1 時間で
+数十回という頻度で記録されていました。再起動しても直らず、カメラの
+ライブ映像を開いている間に集中して発生していました。
+
+原因は `GET /api/camera/{cid}/snapshot` (`web/routes.py`) が
+`FileResponse(camera.rt(cid) / "latest.jpg", ...)` を返していたことです。
+Starlette の `FileResponse.__call__()` は (1) `os.stat(path)` でファイル
+サイズを取得して `Content-Length` ヘッダを確定させ、(2) そのあと**同じ
+パス名を改めて `open()` し直して**本文を送信する、という 2 段階の処理に
+なっています。`latest.jpg` はカメラワーカーが毎フレーム
+`tmp.write_bytes(...)` → `os.replace(tmp, "latest.jpg")` で原子的に
+差し替え続けているファイルなので (CLAUDE.md「高頻度の書き込みは
+`/dev/shm` にだけ行う」)、(1) の `stat` と (2) の `open` の間にこの
+差し替えが割り込むと、`Content-Length` に書いた古い版のサイズと、実際に
+`open` し直して送る新しい版のサイズがずれます。uvicorn は ASGI アプリが
+宣言した `Content-Length` と実際に送られたバイト数を突き合わせて検証して
+おり、ここが一致しないと丸ごと例外で落ちます。ライブ映像を見ている間は
+このスナップショット取得が頻繁に呼ばれるため、発生頻度が上がっていたのも
+筋が通ります。
+
+同じファイルを MJPEG ストリーム (`_mjpeg()`、`/api/camera/{cid}/stream`)
+としても配信していますが、こちらは `p.read_bytes()` で 1 回だけ丸ごと
+読み、その戻り値の `len()` から `Content-Length` を計算しているため、
+`os.replace()` の原子性 (読み取り側は古い版・新しい版のどちらかを必ず
+完全な形で読める) の恩恵をそのまま受けられておりレースが起きません。
+
+`snapshot()` もこれに合わせ、`FileResponse` (stat とオープンが別ステップ)
+をやめて `p.read_bytes()` で 1 回読んだ内容を `Response(content=data,
+media_type="image/jpeg", ...)` で返すよう変更しました。`Response` の
+`Content-Length` は渡した `content` の実際のバイト長から計算されるため、
+読んだ内容と送る内容が常に一致します。**この `snapshot()` を
+`FileResponse` に戻さないでください** — 同じ `Content-Length` 不一致の
+例外に戻ります。他のエンドポイントの `FileResponse` (`/api/capture/...`
+の保存済みキャプチャ、タイムラプス動画、`index.html` など) は他プロセス
+から継続的に上書きされるファイルではないため対象外です — 今後
+`FileResponse` を新しいエンドポイントに使うときは、配信対象のファイルが
+別プロセス/別スレッドから頻繁に置き換えられるものでないか、都度確認して
+ください。継続的に上書きされるファイルには `read_bytes()` 一発読みの
+`Response` パターンを使ってください。
+
 ## モジュール構成
 
 各モジュールは疎結合で、`core/state.py` の `MODE` を購読するだけです。
@@ -799,7 +843,11 @@ modules/maintenance.py  4 時の定時処理と再起動。emergency_reboot() �
                          camera.py の破損検知エスカレーション専用の緊急
                          再起動 (タイムラプス生成は省略、CLAUDE.md #22)
 
-web/routes.py           全 HTTP / WebSocket エンドポイント
+web/routes.py           全 HTTP / WebSocket エンドポイント。latest.jpg の
+                         ように他プロセスが継続的に上書きするファイルは
+                         FileResponse (stat とオープンが別ステップ) では
+                         配信せず、read_bytes() で 1 回読んで Response に
+                         渡す (CLAUDE.md #23)
 web/static/index.html   単一ファイル SPA
 ```
 
