@@ -76,6 +76,14 @@ def set_overrides(cid: str, patch: dict) -> dict:
 # 動体検知イベントを通知モジュールへ渡すためのフック (notify 側が差し込む)
 ON_MOTION = None   # Callable[[str, str], None] -> (camera_id, capture_path)
 
+# 破損フレームが繰り返しの再接続でも解消しないときのフック
+# (main.py が maintenance.emergency_reboot を差し込む)。camera.py 自身は
+# 「再起動が必要かどうか」の判定と要求までを担い、実際に Pi を再起動する
+# 手順 (音楽・カメラを止めてから reboot) は maintenance.py 側の既存の
+# 仕組みを再利用する — ここで独自に sudo reboot を呼ぶコードを重複させない
+# (CLAUDE.md #22)。
+ON_CORRUPT_REBOOT = None   # Callable[[str, dict], None] -> (camera_id, info)
+
 
 # ---------------------------------------------------------------- 検出
 
@@ -245,6 +253,12 @@ _CORRUPT_RECONNECT_MAX_BACKOFF = 300.0
 # 毎回寸分違わず同じ位置になるとは考えにくいため、この一致を「破損では
 # ない」ことの強い手がかりとして使う。
 _CORRUPT_LEARN_STREAK = 8
+# 強制再接続をしても破損が解消しない (=直後にまた閾値レートへ達して
+# 再度 forced_reconnect が起きる) 回数がこれに達したら、ソフト側の
+# 打てる手をすべて尽くしたとみなし、Pi 本体の再起動を要求する
+# (CLAUDE.md #22)。USB コントローラ自体が詰まっている・ケーブル/
+# ハブの物理的な問題など、プロセス再接続では届かない原因を想定している。
+_CORRUPT_REBOOT_THRESHOLD = 4
 
 
 def _frame_corruption_ratio(frame) -> tuple[float, tuple[bool, ...]] | None:
@@ -343,6 +357,11 @@ def _worker(cid: str, device: str, stop: "Event", cfg: dict) -> None:
     corrupt_hist: deque = deque(maxlen=_CORRUPT_HIST_LEN)
     last_corrupt_reconnect = 0.0
     corrupt_reconnect_backoff = _CORRUPT_RECONNECT_COOLDOWN
+    # 強制再接続をしてもすぐまた破損レートが閾値に戻ってしまった回数。
+    # _CORRUPT_HIST_LEN 分の連続した正常フレームが確認できたときだけ
+    # 0 に戻す (1 枚良いフレームが来ただけでは「解消した」と判断しない —
+    # backoff のリセットより厳しい基準にしている)。
+    corrupt_unresolved_reconnects = 0
     # 動体判定のヒステリシス。1 回の判定 (raw_hit) は照明のちらつき・虫・
     # 圧縮ノイズなど 1 サイクルだけの偶然でも簡単に閾値を跨ぐため、これを
     # そのまま「動体あり」として通知にまで流すと、実機で報告された
@@ -543,6 +562,31 @@ def _worker(cid: str, device: str, stop: "Event", cfg: dict) -> None:
                         pass
                     cap = None
                     applied_res = None
+                    corrupt_unresolved_reconnects += 1
+                    if corrupt_unresolved_reconnects >= _CORRUPT_REBOOT_THRESHOLD:
+                        # 再接続を繰り返しても直らない = ソフト側で打てる手を
+                        # 尽くした。原因究明に使える情報 (device・破損/許容
+                        # 件数・これまでの再接続回数) を添えて、親プロセスへ
+                        # Pi 再起動を要求する (実際の再起動処理は camera.py
+                        # からは行わない — 上の ON_CORRUPT_REBOOT のコメント
+                        # 参照)。
+                        log.error(
+                            "カメラ %s: 強制再接続を %d 回行っても破損が解消しないため、"
+                            "Pi の再起動を要求します (device=%s, corrupt_frames=%d, "
+                            "corrupt_tolerated=%d, reconnects=%d)。",
+                            cid, corrupt_unresolved_reconnects, device,
+                            corrupt_frames, corrupt_tolerated, reconnects)
+                        try:
+                            (d / "corrupt_reboot_request").write_text(json.dumps({
+                                "t": time.time(),
+                                "device": device,
+                                "unresolved_reconnects": corrupt_unresolved_reconnects,
+                                "corrupt_frames": corrupt_frames,
+                                "corrupt_tolerated": corrupt_tolerated,
+                                "reconnects": reconnects,
+                            }, ensure_ascii=False), encoding="utf-8")
+                        except Exception:
+                            log.exception("再起動要求ファイルの書き込みに失敗しました")
                 emit_status(state="reconnecting" if forced_reconnect else "corrupt",
                             corrupt_frames=corrupt_frames, corrupt_tolerated=corrupt_tolerated,
                             last_corrupt=time.time())
@@ -554,6 +598,13 @@ def _worker(cid: str, device: str, stop: "Event", cfg: dict) -> None:
                     time.sleep(rest)
                 continue
             corrupt_reconnect_backoff = _CORRUPT_RECONNECT_COOLDOWN
+            # 再起動要求の解除条件は backoff のリセットより厳しくする —
+            # 直近 _CORRUPT_HIST_LEN 枚が丸ごと正常だったときだけ「本当に
+            # 解消した」とみなし、緊急再起動へのエスカレーションをリセット
+            # する。1 枚良いフレームが来ただけでリセットすると、破損と正常
+            # が入り混じるカメラでいつまで経っても閾値に届かなくなる。
+            if len(corrupt_hist) >= _CORRUPT_HIST_LEN and sum(corrupt_hist) == 0:
+                corrupt_unresolved_reconnects = 0
 
             q = int(cfg["jpeg_quality"]) if mode == NORMAL else max(35, int(cfg["jpeg_quality"]) - 20)
             ok, jpg = cv2.imencode(".jpg", frame, [int(cv2.IMWRITE_JPEG_QUALITY), q])
@@ -771,6 +822,8 @@ async def loop() -> None:
     last_discover = 0.0
     last_cleanup = 0.0
     seen_motion: dict[str, float] = {}
+    seen_reboot_request: dict[str, float] = {}
+    last_reboot_attempt = 0.0
     while True:
         now = time.time()
         if now - last_discover >= _DISCOVER_INTERVAL:
@@ -797,6 +850,32 @@ async def loop() -> None:
                         ON_MOTION(cid, cap_path)
                     except Exception:
                         log.exception("動体通知フックが失敗しました")
+
+        # 破損フレームがヒステリシス付きの再接続を繰り返しても解消しない
+        # 場合の緊急再起動要求を拾う (CLAUDE.md #22)。複数カメラがほぼ
+        # 同時に閾値へ達しても二重に再起動を呼ばないよう、直近に一度要求
+        # した後は last_reboot_attempt からのクールダウンを置く。もし
+        # 何らかの理由で実際には再起動されなかった場合 (sudoers の設定
+        # 漏れなど) でも、このクールダウンが明ければ再度要求されるので、
+        # 永久に諦めたままにはならない。
+        for cid in list(WORKERS):
+            req_path = rt(cid) / "corrupt_reboot_request"
+            try:
+                info = json.loads(req_path.read_text(encoding="utf-8"))
+            except Exception:
+                continue
+            ts = float(info.get("t", 0.0))
+            if ts <= seen_reboot_request.get(cid, 0.0):
+                continue
+            seen_reboot_request[cid] = ts
+            if now - last_reboot_attempt < 600.0:
+                continue
+            last_reboot_attempt = now
+            if ON_CORRUPT_REBOOT is not None:
+                try:
+                    ON_CORRUPT_REBOOT(cid, info)
+                except Exception:
+                    log.exception("破損検知の緊急再起動フックが失敗しました")
 
         # 古いキャプチャの削除 (1時間毎)
         if now - last_cleanup >= 3600:

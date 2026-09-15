@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import logging.handlers
 import multiprocessing
@@ -58,6 +59,7 @@ async def lifespan(app: FastAPI):
 
     # モジュール間のフックを接続する
     camera.ON_MOTION = notify.on_motion
+    camera.ON_CORRUPT_REBOOT = _on_corrupt_reboot
     terminal.ON_SESSION = notify.on_terminal_session
     MODE.subscribe(camera.on_mode_change)
     MODE.subscribe(music.on_mode_change)
@@ -92,8 +94,19 @@ async def lifespan(app: FastAPI):
         log.info("停止処理が完了しました")
 
 
+def _on_corrupt_reboot(cid: str, info: dict) -> None:
+    """camera.ON_CORRUPT_REBOOT フック。破損フレームが繰り返しの再接続
+    でも解消しないときに camera.py から呼ばれる (同期呼び出し、CLAUDE.md
+    #22)。実際の停止・通知・再起動は maintenance.emergency_reboot() に
+    任せ、ここではそれをバックグラウンドタスクとして起動するだけにする
+    (フック自体は camera.loop() のループを止めてはいけないため)。"""
+    reason = (f"再接続 {info.get('unresolved_reconnects')} 回でも解消せず"
+             f" (device={info.get('device')}, corrupt_frames={info.get('corrupt_frames')},"
+             f" corrupt_tolerated={info.get('corrupt_tolerated')}, reconnects={info.get('reconnects')})")
+    asyncio.create_task(maintenance.emergency_reboot(cid, reason))
+
+
 async def _to_thread_safe(fn):
-    import asyncio
     try:
         await asyncio.to_thread(fn)
     except Exception:

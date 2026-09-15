@@ -608,6 +608,40 @@ async def run_now(*, reboot: bool | None = None) -> dict:
     return {"ok": ok, "message": detail}
 
 
+async def emergency_reboot(cid: str, reason: str) -> None:
+    """カメラの破損フレームが、ヒステリシス付きの再接続 (camera.py
+    _CORRUPT_REBOOT_THRESHOLD 回) を繰り返しても解消しないときに、
+    camera.py の ON_CORRUPT_REBOOT フック経由で main.py から呼ばれる。
+
+    真の原因が USB コントローラの詰まりなど、プロセスの再接続では届かない
+    ところにある場合、実機で試せる最後の手段は Pi 自体の再起動しかない
+    (CLAUDE.md #22)。日次の run_now() と違いタイムラプス生成は行わない —
+    異常系なので原因究明を優先し、時間のかかる処理を挟まない。カメラ・
+    音楽を止めてから再起動するという手順自体と _reboot() の sudo
+    フォールバックは run_now() と共通の実装を再利用し、重複させない。
+
+    再起動の「理由」は Discord とログの両方に残す。実機で同じ報告が
+    来たとき、どのカメラが・何回再接続を試みて・破損/許容件数がどうで
+    再起動に至ったかを、後から (機体が再起動されて手元に無くても)
+    確認できるようにするため。"""
+    if STATE["running"]:
+        log.warning("定時処理の実行中のため、破損検知による緊急再起動は見送ります (カメラ %s)", cid)
+        return
+    log.error("カメラ %s の破損が繰り返し解消しないため緊急再起動します: %s", cid, reason)
+    notify.system_event(
+        "カメラの破損が繰り返し解消しないため、Pi を再起動します",
+        f"カメラ: {cid}\n{reason}", level="error")
+    try:
+        await asyncio.to_thread(music.PLAYER.persist, force=True)
+        await asyncio.to_thread(music.PLAYER.stop, terminate=True, reason="corrupt-reboot")
+        await asyncio.to_thread(camera.shutdown)
+        await asyncio.sleep(1.0)
+    except Exception:
+        log.exception("緊急再起動前の停止処理に失敗しました (再起動は続行します)")
+    await asyncio.sleep(4)     # 通知が飛ぶのを待つ (run_now() と同じ)
+    await asyncio.to_thread(_reboot)
+
+
 def _reboot() -> None:
     for cmd in (["sudo", "-n", "/sbin/reboot"], ["systemctl", "reboot"],
                 ["/sbin/reboot"]):
