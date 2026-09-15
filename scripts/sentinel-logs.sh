@@ -109,11 +109,16 @@ digest() {
   local label="$1"; shift
   local raw
   raw=$("$@" 2>/dev/null) || true
-  if [[ -z "$raw" ]]; then
-    return
-  fi
-  local out
-  out=$(printf '%s\n' "$raw" | awk -v maxlen="$MAXLEN" -v maxmsg="$MAXMSG" '
+  [[ -n "$raw" ]] || return
+
+  # Emit "<last-seen>\t<count>\t<message>" per distinct message, then let
+  # sort/tail pick the most RECENT ones. Showing the first N found is the
+  # wrong end: after a fix is applied, the lines worth reading are the
+  # newest, and a long-running crash loop would otherwise push them all
+  # out with hours-old repeats (seen on real hardware - 167 newer messages
+  # were dropped in favour of 25 stale ones).
+  local rows total
+  rows=$(printf '%s\n' "$raw" | awk '
     # Keep only lines that look like a problem. Deliberately broad: a
     # missed line costs another round-trip, an extra line costs nothing.
     !/ERR|WRN|Error|error|Warning|WARNING|Traceback|Failed|failed|FAILED|denied|refus|Cannot|cannot|Exception|FIXED|start-limit|repeated too quickly|Invalid|invalid|No such|timeout|Timeout/ { next }
@@ -123,31 +128,34 @@ digest() {
       # "<ts> <host> <unit[pid]>: <message>" - the unit token never
       # contains a colon, so [^:]* stops exactly at its trailing one.
       sub(/^[^ ]+ [^ ]+ [^:]*: /, "", msg)
-      # Some daemons (Syncthing) print their own timestamp inside the
-      # message too; drop it so identical events actually collapse.
-      sub(/^[0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2} /, "", msg)
+      # Many daemons print their own timestamp inside the message as well.
+      # Python logging adds milliseconds after a comma ("02:01:14,926");
+      # without consuming those, every repeat of one message stays
+      # "distinct" and nothing collapses at all - which is exactly what
+      # happened to 180 identical mpg123 recovery lines on real hardware.
+      sub(/^[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9][ T][0-9][0-9]:[0-9][0-9]:[0-9][0-9]([.,][0-9]+)? /, "", msg)
       if (msg == "") next
-      if (!(msg in cnt)) order[++n] = msg
+      if (!(msg in cnt)) n++
       cnt[msg]++
       last[msg] = ts
     }
-    END {
-      shown = 0
-      for (i = 1; i <= n; i++) {
-        m = order[i]
-        if (shown >= maxmsg) { extra++; continue }
-        shown++
-        t = last[m]
-        # 2026-09-16T01:59:39+0900 -> 09-16 01:59:39
-        if (length(t) > 18) t = substr(t, 6, 5) " " substr(t, 12, 8)
-        d = (length(m) > maxlen) ? substr(m, 1, maxlen) "..." : m
-        printf "  %s  x%-3d %s\n", t, cnt[m], d
-      }
-      if (extra > 0) printf "  (+%d more distinct messages - run: sentinel-logs %s full)\n", extra, ENVIRON["HOURS"]
-    }')
-  [[ -n "$out" ]] || return
+    END { for (m in cnt) printf "%s\t%d\t%s\n", last[m], cnt[m], m }' | sort)
+  [[ -n "$rows" ]] || return
+  total=$(printf '%s\n' "$rows" | wc -l)
+
   hdr "$label"
-  printf '%s\n' "$out"
+  printf '%s\n' "$rows" | tail -n "$MAXMSG" | awk -F'\t' -v maxlen="$MAXLEN" '
+    {
+      t = $1
+      # 2026-09-16T01:59:39+0900 -> 09-16 01:59:39
+      if (length(t) > 18) t = substr(t, 6, 5) " " substr(t, 12, 8)
+      m = $3
+      if (length(m) > maxlen) m = substr(m, 1, maxlen) "..."
+      printf "  %s  x%-3d %s\n", t, $2, m
+    }'
+  if (( total > MAXMSG )); then
+    echo "  (showing the $MAXMSG most recent of $total distinct messages - full list: sentinel-logs $HOURS full)"
+  fi
 }
 
 export HOURS
@@ -163,6 +171,38 @@ if journalctl -n1 --no-pager >/dev/null 2>&1; then
 else
   hdr "journal"
   echo "  cannot read the journal as $(id -un) - re-run with: sudo sentinel-logs $HOURS"
+fi
+
+# Anything currently failed or stuck activating gets its last lines
+# verbatim, filter bypassed. A crash-looping daemon is often the cause of
+# everything else in the digest, and the filter above can miss its actual
+# message entirely - real hardware showed sentinel-bluealsa failing 312
+# times with only systemd's own "Failed with result 'exit-code'" visible
+# and not one line saying why.
+if journalctl -n1 --no-pager >/dev/null 2>&1; then
+  BROKEN=""
+  for u in sentinel.service syncthing.service bluetooth.service hciuart.service \
+           hostapd.service adguardhome.service sentinel-bluealsa.service \
+           sentinel-bluealsa-aplay.service sentinel-bt-agent.service; do
+    systemctl list-unit-files "$u" >/dev/null 2>&1 || continue
+    st=$(systemctl is-active "$u" 2>/dev/null)
+    [[ "$st" == "failed" || "$st" == "activating" ]] || continue
+    BROKEN="yes"
+    hdr "last lines: $u ($st)"
+    journalctl -u "$u" -n 12 -o cat --no-pager 2>/dev/null | sed 's/^/  /'
+    # Which user it runs as, and whether systemd gives it a private mount
+    # namespace. The latter matters more than it looks: any sandboxing
+    # directive makes systemd build the unit its own mount namespace at
+    # start, and a bind mount created on the host afterwards is not
+    # visible inside it. The service then sees the plain underlying
+    # directory while the host sees the bind-mounted one - so a write test
+    # run from a shell passes while the service still gets EACCES, with
+    # nothing in either output explaining the contradiction.
+    systemctl show "$u" -p User -p Group -p SupplementaryGroups -p ExecStart \
+      -p PrivateTmp -p PrivateMounts -p ProtectSystem -p ProtectHome \
+      -p ReadWritePaths -p StateDirectory 2>/dev/null \
+      | grep -vE '=$' | sed 's/^/    /'
+  done
 fi
 
 echo

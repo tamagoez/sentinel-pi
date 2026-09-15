@@ -80,7 +80,12 @@ say "Analog output card: $CARD"
 # deliberate "quiet but audible" setting (a Bluetooth per-device volume,
 # for instance) and must not be overridden.
 VOL_INFO=$(amixer -c "$CARD" cget numid=1 2>/dev/null)
+VOL_NAME=$(grep -m1 -oE "name='[^']*'" <<<"$VOL_INFO" | cut -d"'" -f2)
 VOL_LINE=$(grep -m1 'type=INTEGER' <<<"$VOL_INFO")
+if [[ -n "$VOL_NAME" && "$VOL_NAME" != *Volume* ]]; then
+  w "numid=1 on card $CARD is '$VOL_NAME', not a volume control - not touching it"
+  VOL_LINE=""
+fi
 VMIN=$(grep -oE 'min=-?[0-9]+' <<<"$VOL_LINE" | head -n1 | cut -d= -f2)
 VMAX=$(grep -oE 'max=-?[0-9]+' <<<"$VOL_LINE" | head -n1 | cut -d= -f2)
 VCUR=$(grep -m1 -oE ': values=-?[0-9]+' <<<"$VOL_INFO" | grep -oE '\-?[0-9]+$')
@@ -109,14 +114,27 @@ for sw in PCM Headphone Master; do
 done
 
 # ---------------------------------------------------------------- 2. routing
-ROUTE=$(amixer -c "$CARD" cget numid=3 2>/dev/null | grep -m1 -oE ': values=[0-9]+' | grep -oE '[0-9]+$')
-if [[ -n "$ROUTE" && "$ROUTE" != "1" ]]; then
+# numid=3 is the analog/HDMI route selector on bcm2835 - but a numid is
+# just an index, so on any other card it addresses something else
+# entirely. Check the control's NAME before writing: real hardware showed
+# numid=3 reading 230 (no route enum has that value) while this check
+# "fixed" it back to 1 on every Guardian cycle, i.e. it was repeatedly
+# writing into an unrelated control. Never write a numid without
+# confirming what it is (same class of mistake as CLAUDE.md #15's
+# numid=1/numid=3 mix-up).
+ROUTE_INFO=$(amixer -c "$CARD" cget numid=3 2>/dev/null)
+ROUTE_NAME=$(grep -m1 -oE "name='[^']*'" <<<"$ROUTE_INFO" | cut -d"'" -f2)
+ROUTE=$(grep -m1 -oE ': values=-?[0-9]+' <<<"$ROUTE_INFO" | grep -oE '\-?[0-9]+$')
+if [[ "$ROUTE_NAME" != *Route* ]]; then
+  w "numid=3 on card $CARD is '${ROUTE_NAME:-unknown}', not a playback route - not touching it"
+  w "  (this card's routing control is elsewhere; value read: ${ROUTE:-?})"
+elif [[ -n "$ROUTE" && "$ROUTE" != "1" ]]; then
   if amixer -c "$CARD" cset numid=3 1 >/dev/null 2>&1; then
-    fixed_msg "output routing (numid=3) was $ROUTE - reset to AUX (headphone jack)"
+    fixed_msg "output routing ($ROUTE_NAME) was $ROUTE - reset to AUX (headphone jack)"
     alsactl store >/dev/null 2>&1 || true
   fi
 elif [[ -n "$ROUTE" ]]; then
-  ok "output routing (numid=3) is already AUX"
+  ok "output routing ($ROUTE_NAME) is already AUX"
 fi
 
 # ---------------------------------------------------------------- 3. asound.conf
@@ -148,12 +166,28 @@ if aplay -L 2>/dev/null | grep -qx 'sentinel_music'; then
   if timeout 5 aplay -D sentinel_music -f S16_LE -r 44100 -c 2 -d 1 -q /dev/zero >/dev/null 2>&1; then
     ok "sentinel_music opens and accepts audio"
   else
-    w "sentinel_music exists in asound.conf but will not open"
-    (( QUIET )) || {
-      echo
-      echo "  See the actual ALSA error with:"
-      echo "    aplay -D sentinel_music -f S16_LE -r 44100 -c 2 -d 1 /dev/zero"
-    }
+    w "sentinel_music exists in asound.conf but will not open:"
+    timeout 5 aplay -D sentinel_music -f S16_LE -r 44100 -c 2 -d 1 /dev/zero 2>&1 \
+      | sed 's/^/       /' >&2
+    # Distinguish "the dmix definition is wrong" from "the card itself
+    # cannot be opened right now". dmix opens its slave with a fixed
+    # format, so a card that is busy, or a bcm2835 left in a stuck state
+    # by a crashed client, fails here with a bare "Invalid argument" and
+    # no hint as to which of the two it is.
+    if timeout 5 aplay -D "hw:$CARD,0" -f S16_LE -r 44100 -c 2 -d 1 -q /dev/zero >/dev/null 2>&1; then
+      w "but hw:$CARD,0 itself opens fine - the dmix definition is the problem"
+    else
+      w "hw:$CARD,0 will not open either - the card is busy or stuck, not a config problem"
+      holders=$(fuser -v /dev/snd/* 2>&1 | tail -n +2 | tr -s ' ' | paste -sd' ' -)
+      [[ -n "$holders" ]] && w "  /dev/snd holders: $holders"
+      (( QUIET )) || {
+        echo
+        echo "  Find what is holding the sound card, then stop it:"
+        echo "    fuser -v /dev/snd/*"
+        echo "    systemctl status sentinel-bluealsa-aplay sentinel-bluealsa"
+        echo "  A card left stuck by a crashed client usually needs a reboot."
+      }
+    fi
   fi
 else
   # Without this PCM, music.py plays to plughw:<card>,0 directly (it no
