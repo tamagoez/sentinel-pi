@@ -260,7 +260,6 @@ try{
       <div class="card"><h3>バックグラウンドタスク</h3><div class="body" style="padding:0">
         <table><thead><tr><th>タスク</th><th>状態</th><th class="num">再起動</th><th class="num">稼働</th></tr></thead>
         <tbody id="tasks"></tbody></table></div></div>
-      <div class="card"><h3>スロットリング</h3><div class="body" id="throttle"></div></div>
     </div>
   </section>
 
@@ -419,6 +418,7 @@ try{
       <button class="p" onclick="saveSettings()">保存</button>
       <button onclick="loadSettings()">再読込</button>
       <button onclick="testWebhook()">Discord にテスト送信</button>
+      <button onclick="testVoice()">音声をテスト再生</button>
       <a href="/api/config/export"><button>設定をエクスポート</button></a>
       <button onclick="$('#set-import-file').click()">設定をインポート</button>
       <input type="file" id="set-import-file" accept="application/json" style="display:none" onchange="importSettings(this.files[0])">
@@ -519,13 +519,13 @@ const fmtUp = s => { const d=Math.floor(s/86400), h=Math.floor(s%86400/3600), m=
   return d ? `${d}日 ${h}時間` : h ? `${h}時間 ${m}分` : `${m}分`; };
 
 const PAGES = [
-  ["dash","ダッシュボード","1"], ["cam","カメラ","2"], ["ev","イベント","3"],
-  ["music","音楽","4"], ["net","ネットワーク","5"], ["arc","アーカイブ","6"],
-  ["fm","ファイル","f"],
-  ["term","端末","7"], ["err","エラー","8"], ["set","設定","9"], ["log","ログ","0"],
+  ["dash","ダッシュボード"], ["cam","カメラ"], ["ev","イベント"],
+  ["music","音楽"], ["net","ネットワーク"], ["arc","アーカイブ"],
+  ["fm","ファイル"],
+  ["term","端末"], ["err","エラー"], ["set","設定"], ["log","ログ"],
 ];
-$("#nav").innerHTML = PAGES.map(([id,label,key]) =>
-  `<a data-p="${id}" onclick="go('${id}')">${label}${id==="err" ? '<b id="err-badge"></b>' : ''}<kbd>${key}</kbd></a>`).join("");
+$("#nav").innerHTML = PAGES.map(([id,label]) =>
+  `<a data-p="${id}" onclick="go('${id}')">${label}${id==="err" ? '<b id="err-badge"></b>' : ''}</a>`).join("");
 
 let CUR = "dash", DATA = {}, WS = null, TERM = null, TWS = null, FIT = null;
 
@@ -572,8 +572,6 @@ function go(p){
 window.addEventListener("hashchange", () => go(location.hash.slice(1)));
 document.addEventListener("keydown", e => {
   if(/^(INPUT|SELECT|TEXTAREA)$/.test(e.target.tagName) || e.target.closest("#term")) return;
-  const hit = PAGES.find(x => x[2] === e.key);
-  if(hit) go(hit[0]);
   if(e.key === "Escape"){ $("#overlay").classList.remove("on"); closeCamSettings(); }
 });
 
@@ -666,14 +664,6 @@ function render(){
      <td><i class="dot ${s.done ? "bad" : s.alive ? "ok" : "warn"}"></i>
        ${s.done ? "停止" : s.alive ? "稼働" : "再起動待ち"}</td>
      <td class="num">${s.restarts}</td><td class="num">${fmtUp(s.uptime)}</td></tr>`).join("");
-
-  const th = sys.throttled || {};
-  $("#throttle").innerHTML = !th.available
-    ? `<span class="faint">vcgencmd が利用できないため取得できません</span>`
-    : (th.flags || []).length
-      ? `<div class="muted" style="font-size:11px;margin-bottom:6px">${esc(th.raw)}</div>` +
-        th.flags.map(f => `<div><i class="dot ${f.includes("履歴") ? "warn" : "bad"}"></i>${esc(f)}</div>`).join("")
-      : `<div><i class="dot ok"></i>異常なし (${esc(th.raw || "0x0")})</div>`;
 
   renderCams();
   renderBluetooth();
@@ -1010,7 +1000,7 @@ async function drawChart(){
   const plotW = W - padL - padR, plotY0 = padT, plotY1 = H - padB;
   const t0 = pts[0].t, t1 = pts[pts.length-1].t || t0+1;
   const px = p => padL + (p.t - t0) / Math.max(1, t1 - t0) * plotW;
-  const tempMin = 30, tempMax = 80, cpuMax = 100;
+  const tempMin = 45, tempMax = 75, cpuMax = 100;
 
   // モードごとの背景帯: 連続する同一モード区間をまとめて塗る
   let segStart = 0;
@@ -1787,6 +1777,9 @@ const GROUPS = [
                       "notify_summary","notify_summary_after","notify_mode_change",
                       "notify_system_events","notify_motion_title","notify_summary_title",
                       "notify_mode_title"]],
+  ["音声アナウンス", ["voice_enabled","voice_volume","voice_rate","voice_lang",
+                      "voice_time_enabled","voice_time_interval_minutes",
+                      "voice_error_enabled","voice_camera_reboot_enabled","voice_other_enabled"]],
   ["ネットワーク記録", ["netlog_enabled","adguard_url","adguard_user","adguard_password",
                         "netlog_poll_seconds","netlog_retention_days"]],
   ["定時処理", ["maintenance_enabled","maintenance_hour","maintenance_minute",
@@ -1826,6 +1819,13 @@ const LABELS = {
   notify_motion_title:"動体検知の文面 ({camera} {mode} {temp} {time})",
   notify_summary_title:"集計通知の文面 ({total} {duration_min} {quiet_min})",
   notify_mode_title:"モード遷移の文面 ({old} {new} {reason})",
+  voice_enabled:"音声アナウンスを有効にする (総元栓)",
+  voice_volume:"音量 (%)", voice_rate:"話す速さ (words/min)",
+  voice_lang:"espeak-ng の言語 (通常 ja のまま)",
+  voice_time_enabled:"時報を読み上げる", voice_time_interval_minutes:"時報の間隔 (分)",
+  voice_error_enabled:"エラー発生時に読み上げる",
+  voice_camera_reboot_enabled:"カメラ破損によるPi再起動時に読み上げる",
+  voice_other_enabled:"その他のシステムイベント (起動・停止・定時処理など) を読み上げる",
   netlog_enabled:"アクセス記録を有効にする", adguard_url:"AdGuard Home の URL",
   adguard_user:"ユーザー名", adguard_password:"パスワード",
   netlog_poll_seconds:"取得間隔 (秒)", netlog_retention_days:"記録の保存日数",
@@ -1913,6 +1913,14 @@ async function unblockWebhookHost(){
     toast(r.message, !r.ok);
     if(r.ok) testWebhook();
   }catch(e){ toast(e.message, true); }
+}
+async function testVoice(){
+  $("#set-msg").textContent = "再生中…";
+  try{
+    const r = await post("/api/voice/test", {text: "音声アナウンスのテストです"});
+    $("#set-msg").textContent = r.message;
+    toast(r.ok ? "再生しました" : `再生失敗: ${r.message}`, !r.ok);
+  }catch(e){ $("#set-msg").textContent = ""; toast(e.message, true); }
 }
 
 /* ---------------- logs ---------------- */

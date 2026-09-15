@@ -3,9 +3,14 @@
 Raspberry Pi 3B+ の挙動 (実装上の前提):
   - 既定のソフトリミットは 60℃。ここで 1.4GHz -> 1.2GHz へ自動降格する。
     これは正常動作であり、危険信号ではない。
-  - 80℃ 以上で段階的にクロックが下がり、vcgencmd get_throttled にビットが立つ。
+  - 80℃ 以上で段階的にクロックが下がる。
   - 85℃ で 600MHz まで落ちる。
 したがって「異常」として扱うのは 72℃ 以上 (設定可能) からとする。
+
+vcgencmd get_throttled によるスロットリング検出・低電圧検出は監視しない
+(CLAUDE.md #24)。実機では常時何らかのビットが立ち続け、エラー扱いにする
+意味がなかったため、監視自体を削除した。電源トラブルの切り分けは
+`vcgencmd get_throttled` を手動で叩けば従来どおり確認できる。
 """
 
 from __future__ import annotations
@@ -13,9 +18,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
-import re
 import shutil
-import subprocess
 import time
 from pathlib import Path
 
@@ -32,18 +35,6 @@ HISTORY: list[dict] = []          # (メモリ上のみ。ディスクには書�
 _MAX_HISTORY = 720                # 5秒間隔で約1時間分
 
 _prev_cpu: tuple[int, int] | None = None
-
-# vcgencmd get_throttled のビット定義
-_THROTTLE_BITS = {
-    0: "低電圧を検出中",
-    1: "ARM周波数を制限中",
-    2: "スロットリング中",
-    3: "温度リミットに到達中",
-    16: "低電圧を検出した履歴あり",
-    17: "ARM周波数制限の履歴あり",
-    18: "スロットリングの履歴あり",
-    19: "温度リミット到達の履歴あり",
-}
 
 
 def read_temp() -> float:
@@ -119,21 +110,6 @@ def read_uptime() -> float:
         return 0.0
 
 
-def read_throttled() -> dict:
-    if shutil.which("vcgencmd") is None:
-        return {"raw": "", "flags": [], "available": False}
-    try:
-        out = subprocess.check_output(["vcgencmd", "get_throttled"], text=True, timeout=3)
-    except Exception:
-        return {"raw": "", "flags": [], "available": False}
-    m = re.search(r"0x([0-9a-fA-F]+)", out)
-    if not m:
-        return {"raw": out.strip(), "flags": [], "available": True}
-    value = int(m.group(1), 16)
-    flags = [desc for bit, desc in _THROTTLE_BITS.items() if value & (1 << bit)]
-    return {"raw": f"0x{value:x}", "flags": flags, "available": True, "value": value}
-
-
 def read_disk() -> dict:
     try:
         total, used, free = shutil.disk_usage(config.DATA_ROOT)
@@ -157,24 +133,16 @@ def snapshot() -> dict:
         "memory": read_memory(),
         "disk": read_disk(),
         "uptime_seconds": round(read_uptime()),
-        "throttled": read_throttled(),
     }
 
 
 async def loop() -> None:
-    last_throttle_check = 0.0
-    throttle_info = {"raw": "", "flags": [], "available": False}
-    prev_active: set[str] = set()
     while True:
         temp = read_temp()
         cpu = read_cpu_percent()
         MODE.report_temperature(temp)
 
         now = time.time()
-        if now - last_throttle_check >= 30:
-            last_throttle_check = now
-            throttle_info = await asyncio.to_thread(read_throttled)
-
         HISTORY.append({
             "t": round(now),
             "temp": round(temp, 1),
@@ -183,26 +151,5 @@ async def loop() -> None:
             "mode": MODE.mode,
         })
         del HISTORY[:-_MAX_HISTORY]
-
-        # CLAUDE.md #1: 周波数低下・温度リミット (bit 1-3) は Pi 3B+ の設計通りの
-        # 挙動で、危険域は 80℃ 以降。log.warning() は core/errors.py の
-        # LogCaptureHandler がそのまま「エラー」タブ・診断バンドルへ吸い上げる
-        # ため、これを毎回 WARNING で出すと「よくスロットリングする」だけで
-        # エラー扱いされ続けてしまう。低電圧検出 (bit 0) だけは電源側の実際の
-        # 問題なので引き続き警告する。状態が変化した瞬間だけログし、同じ状態が
-        # 続く間は再ログしない (スパム防止)。
-        active = set(f for f in throttle_info.get("flags", ()) if "履歴" not in f)
-        if active != prev_active:
-            undervoltage = {f for f in active if "低電圧" in f}
-            thermal_only = active - undervoltage
-            if undervoltage:
-                log.warning("低電圧を検出しています (電源を確認してください): %s",
-                           " / ".join(sorted(undervoltage)))
-            if thermal_only:
-                log.info("スロットリング状態が変化しました (設計通りの挙動です): %s",
-                         " / ".join(sorted(thermal_only)))
-            if not active and prev_active:
-                log.info("スロットリングが解消しました")
-            prev_active = active
 
         await asyncio.sleep(5)

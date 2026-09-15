@@ -26,6 +26,17 @@ STATE_DIR=/run/sentinel-guardian
 UNBLOCK_FILE="$STATE_DIR/adguard-8083-unblock-until"
 DEFAULT_MINUTES=15
 
+# Same candidate paths as sentinel-guardian.sh's check_adguard_bind() — kept
+# in sync deliberately (see below).
+if [[ -z "${AGH_YAML:-}" ]]; then
+  for cand in /mnt/dietpi_userdata/adguardhome/AdGuardHome.yaml \
+              /mnt/dietpi_userdata/AdGuardHome.yaml \
+              /opt/AdGuardHome/AdGuardHome.yaml; do
+    [[ -f "$cand" ]] && { AGH_YAML="$cand"; break; }
+  done
+  AGH_YAML="${AGH_YAML:-/mnt/dietpi_userdata/adguardhome/AdGuardHome.yaml}"
+fi
+
 ok(){ printf '  [OK] %s\n' "$*"; }
 w(){ printf '  [!!] %s\n' "$*" >&2; }
 die(){ printf '[FAIL] %s\n' "$*" >&2; exit 1; }
@@ -33,6 +44,44 @@ die(){ printf '[FAIL] %s\n' "$*" >&2; exit 1; }
 [[ $EUID -eq 0 ]] || die "Run as root: sudo $0 $*"
 command -v iptables >/dev/null || die "iptables not found"
 mkdir -p "$STATE_DIR"
+
+# Opening the firewall alone does nothing: sentinel-guardian.sh's
+# check_adguard_bind() permanently locks AdGuard Home's own http.address to
+# 127.0.0.1:8083, so nothing is actually listening on an externally
+# reachable address even with the port unblocked. rebind_agh() sets it to
+# the given host and restarts AdGuard Home so the change takes effect
+# immediately, instead of waiting for the next 2-minute Guardian cycle.
+# This mirrors check_adguard_bind()'s own awk logic exactly - keep both in
+# sync if AdGuardHome.yaml's format ever changes.
+rebind_agh() {
+  local want_host="$1"
+  [[ -f "$AGH_YAML" ]] || { w "AdGuardHome.yaml not found at $AGH_YAML - cannot rebind, only the firewall was changed"; return 0; }
+  local changed=0
+  if awk '/^http:/{inblk=1;next} /^[^[:space:]]/{inblk=0} inblk && /^[[:space:]]{2}address:[[:space:]]/{found=1} END{exit !found}' "$AGH_YAML"; then
+    local cur
+    cur=$(awk '/^http:/{inblk=1;next} /^[^[:space:]]/{inblk=0}
+               inblk && /^[[:space:]]{2}address:[[:space:]]/{sub(/^[[:space:]]*address:[[:space:]]*/,"");print;exit}' "$AGH_YAML")
+    if [[ "$cur" != "$want_host:$AGH_PORT" ]]; then
+      awk -v want="$want_host:$AGH_PORT" '
+        /^http:/{inblk=1;print;next}
+        /^[^[:space:]]/{inblk=0}
+        inblk && /^[[:space:]]{2}address:[[:space:]]/{print "  address: " want; next}
+        {print}' "$AGH_YAML" > "$AGH_YAML.tmp" && mv "$AGH_YAML.tmp" "$AGH_YAML"
+      changed=1
+    fi
+  elif grep -qE '^bind_host:' "$AGH_YAML"; then
+    if ! grep -qE "^bind_host:[[:space:]]*${want_host//./\\.}[[:space:]]*\$" "$AGH_YAML"; then
+      sed -i -E "s|^bind_host:.*\$|bind_host: $want_host|" "$AGH_YAML"
+      changed=1
+    fi
+  else
+    w "Cannot recognize AdGuardHome.yaml format - only the firewall was changed, manual check needed"
+    return 0
+  fi
+  if (( changed )); then
+    systemctl restart adguardhome 2>/dev/null || systemctl restart AdGuardHome 2>/dev/null || true
+  fi
+}
 
 remove_block() {
   for cmd in iptables ip6tables; do
@@ -66,6 +115,7 @@ case "$cmd" in
     until=$(( $(date +%s) + minutes * 60 ))
     echo "$until" > "$UNBLOCK_FILE"
     remove_block
+    rebind_agh "0.0.0.0"
     ok "Port $AGH_PORT is open for ${minutes} minute(s), until $(date -d "@$until" '+%H:%M:%S' 2>/dev/null || echo "$until")"
     ip=$(ip_addr)
     [[ -n "$ip" ]] && ok "http://$ip:$AGH_PORT/"
@@ -74,6 +124,7 @@ case "$cmd" in
   disable|off)
     rm -f "$UNBLOCK_FILE"
     apply_block
+    rebind_agh "127.0.0.1"
     ok "Port $AGH_PORT is blocked (the permanent default)"
     ;;
   status)
@@ -85,6 +136,14 @@ case "$cmd" in
       ok "Temporarily open until $(date -d "@$until" '+%H:%M:%S' 2>/dev/null || echo "$until") ($(( (until - now) / 60 )) minute(s) left)"
     else
       ok "Blocked (the permanent default)"
+    fi
+    if command -v ss >/dev/null; then
+      listening=$(ss -Hltn "sport = :$AGH_PORT" 2>/dev/null | awk '{print $4}' | paste -sd, -)
+      if [[ -n "$listening" ]]; then
+        ok "AdGuard Home is actually listening on: $listening"
+      else
+        w "Nothing is listening on :$AGH_PORT at all (is adguardhome running?)"
+      fi
     fi
     ;;
   *)
