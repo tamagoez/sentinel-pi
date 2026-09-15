@@ -16,7 +16,7 @@ import re
 import shutil
 import subprocess
 
-from ..core import config
+from ..core import audio, config
 from ..core.state import NORMAL, MODE
 from . import music
 
@@ -119,9 +119,11 @@ def paired_devices() -> list[dict]:
 
 
 def _card() -> str | None:
-    out = _run(["aplay", "-l"])
-    m = re.search(r"^card\s+(\d+)", out, re.M)
-    return m.group(1) if m else None
+    # core/audio.find_output_card() を使う理由は core/audio.py の docstring
+    # 参照 — aplay -l の最初のカードを無条件で使うと、機体によっては
+    # bcm2835 のアナログ出力ではなく HDMI を掴んでしまう。
+    idx = audio.find_output_card()
+    return str(idx) if idx is not None else None
 
 
 def _apply_volume(addr: str) -> None:

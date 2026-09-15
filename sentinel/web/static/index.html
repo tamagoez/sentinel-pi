@@ -149,17 +149,6 @@ td.num{text-align:right;font-variant-numeric:tabular-nums}
 .tl-span:hover{filter:brightness(1.15)}
 .tl-dragband{position:absolute;top:0;bottom:0;background:rgba(120,150,255,.18);
   border-left:1px solid var(--acc);border-right:1px solid var(--acc);pointer-events:none;z-index:4}
-.tl-drill{margin-top:10px;border-top:1px solid var(--line);padding-top:10px}
-.tl-drill-head{display:flex;align-items:center;gap:10px;margin-bottom:8px;font-size:12px;color:var(--dim)}
-.tl-drill-cols{display:flex;gap:8px;overflow-x:auto;padding-bottom:4px}
-.tl-drill-col{flex:none;width:150px;background:var(--bg-deep);border-radius:8px;padding:6px;max-height:420px;overflow-y:auto}
-.tl-drill-col h5{margin:0 0 6px;font-size:10.5px;color:var(--faint);font-weight:600;text-align:center}
-.tl-drill-item{display:flex;flex-direction:column;gap:2px;margin-bottom:6px;font-size:10px}
-.tl-drill-item img{width:100%;border-radius:5px;cursor:pointer;display:block;background:var(--bg-deep)}
-.tl-drill-item .t{color:var(--faint);font-size:9px}
-.tl-drill-item .net{background:var(--p-bg);border-radius:4px;padding:3px 5px;color:var(--dim)}
-.tl-drill-item .net.blocked{background:var(--d-border);color:var(--d-fg)}
-.tl-drill-empty{color:var(--faint);font-size:10px;text-align:center;padding:10px 0}
 @media (max-width:900px){
   .recall-wrap{flex-direction:column}
   .recall-preview{width:100%}
@@ -1228,7 +1217,7 @@ async function loadEvents(){
       $("#ev-day").innerHTML = r.days.map(d => `<option ${d===r.day?"selected":""}>${d}</option>`).join("")
         || `<option>${r.day}</option>`;
     EV_ITEMS = r.items; EV_DAY = r.day;
-    REC_SEL = null; TL_SEL_T = null; TL_RANGE_SEL = null; // 日付が変わったら選択・カーソル・範囲選択は破棄する
+    REC_SEL = null; TL_SEL_T = null; // 日付が変わったら選択・カーソルは破棄する
     $("#ev-sum").textContent = `${r.items.length} 件`;
     renderEvents();
   }catch(e){}
@@ -1281,7 +1270,6 @@ let REC_COLS = [], REC_SEL = null;
 let TL_SCALE = null, TL_REGISTRY = new Map();
 let TL_GAP_ON = false, TL_GAP_MIN = 15, TL_PXMIN = 4, TL_SEL_T = null;
 let TL_NET_SPAN_MIN = 5;   // 同じサービスへのアクセスをこの分数以内の間隔ならまとめて「1期間」にする
-let TL_RANGE_SEL = null;   // ドラッグで選択した範囲 {t0,t1}。あれば分割表示を出す
 const TL_GAP_PX = 40;       // 折り畳んだ空白区間の固定幅 (px)
 const TL_CLUSTER_PX = 26;   // これより近い項目は 1 つのクラスタにまとめる
 const TL_ROW_H = 19;        // URL アクセス行 (期間バー) 1 行の高さ (px)
@@ -1550,7 +1538,7 @@ function renderEventsRecall(){
           <label>閾値 <input type="number" min="1" max="720" value="${TL_GAP_MIN}" onchange="tlSetGapMin(this.value)"> 分</label>
           <label>URL期間統合 <input type="number" min="1" max="120" value="${TL_NET_SPAN_MIN}" onchange="tlSetNetSpanMin(this.value)"> 分</label>
           <span class="spacer"></span>
-          <span class="faint">ホイール:拡大縮小 / Shift+ホイール:移動 / ドラッグ:範囲を分割表示</span>
+          <span class="faint">ホイール:拡大縮小 / Shift+ホイール:移動 / ドラッグ:範囲を拡大</span>
           <button class="zoom-btn" onclick="tlZoom(0.6)">縮小 −</button>
           <button class="zoom-btn" onclick="tlZoom(1.6666)">拡大 +</button>
         </div>
@@ -1562,16 +1550,14 @@ function renderEventsRecall(){
             ${nowX!=null?`<div class="tl-cursor now" style="left:${nowX}px"><span class="tl-cursor-t">現在</span></div>`:""}
           </div>
         </div>
-        <div id="tl-drill-area"></div>
       </div>
       <div class="recall-preview" id="recall-preview">
-        <span class="faint">タイムライン上の項目、または軸をクリックすると、ここに表示されます。ドラッグすると範囲を分割表示します。</span>
+        <span class="faint">タイムライン上の項目、または軸をクリックすると、ここに表示されます。ドラッグすると範囲を拡大表示します。</span>
       </div>
     </div>`;
 
   tlApplySelection();
   bindTlInteractions();
-  if(TL_RANGE_SEL) renderTlDrilldown(); else clearTlDrilldown();
 }
 
 // クリック/選択のたびに全体を再描画すると重く、横スクロール位置も失われる
@@ -1772,55 +1758,25 @@ function tlMouseUp(){
   if(x1 - x0 < 4) return;
   const t0 = TL_SCALE.xToT(x0), t1 = TL_SCALE.xToT(x1);
   if(t1 - t0 < 3) return;
-  TL_RANGE_SEL = {t0, t1};
-  renderTlDrilldown();
+  tlZoomToRange(t0, t1);
 }
 
-// ---- ドラッグで選んだ範囲を、横に並んだ区画へ分割して表示する ----
-const TL_DRILL_SEGMENTS = 6;   // 分割数。多すぎても 1 区画あたりが狭くなるだけなので固定にしている
-function clearTlDrilldown(){
-  TL_RANGE_SEL = null;
-  const area = $("#tl-drill-area");
-  if(area) area.innerHTML = "";
-}
-function renderTlDrilldown(){
-  const area = $("#tl-drill-area");
-  if(!area || !TL_RANGE_SEL) return;
-  const {t0, t1} = TL_RANGE_SEL;
-  const span = Math.max(1, t1 - t0);
-  const segN = TL_DRILL_SEGMENTS;
-  const segDur = span / segN;
-  const cols = [];
-  for(let i = 0; i < segN; i++){
-    const s0 = t0 + i * segDur, s1 = t0 + (i + 1) * segDur;
-    const entries = [];
-    for(const i2 of EV_ITEMS){ if(i2.at >= s0 && i2.at < s1) entries.push({t: i2.at, kind: "img", item: i2}); }
-    for(const it of (REC_COLS.find(tr => tr.key === "net") || {items: []}).items){
-      if(it.t >= s0 && it.t < s1) entries.push({t: it.t, kind: "net", rec: it.rec});
-    }
-    entries.sort((a, b) => a.t - b.t);
-    cols.push({s0, s1, entries});
-  }
-  const colsHtml = cols.map(c => `
-    <div class="tl-drill-col">
-      <h5>${fmtHM(c.s0)} 〜 ${fmtHM(c.s1)}</h5>
-      ${c.entries.length ? c.entries.map(en => en.kind === "img"
-        ? `<div class="tl-drill-item"><img src="${en.item.url}" loading="lazy" onclick="$('#ov-img').src='${en.item.url}';$('#overlay').classList.add('on')">
-             <span class="t">${esc(camName(en.item.camera))} ${new Date(en.t*1000).toLocaleTimeString("ja-JP")}</span></div>`
-        : `<div class="tl-drill-item"><div class="net${en.rec.blocked?" blocked":""}">${esc(en.rec.service)}${en.rec.blocked?" ⨯":""}</div>
-             <span class="t">${new Date(en.t*1000).toLocaleTimeString("ja-JP")}</span></div>`
-      ).join("") : `<div class="tl-drill-empty">記録なし</div>`}
-    </div>`).join("");
-  area.innerHTML = `
-    <div class="tl-drill">
-      <div class="tl-drill-head">
-        <b>範囲の分割表示:</b> ${new Date(t0*1000).toLocaleString("ja-JP")} 〜 ${new Date(t1*1000).toLocaleTimeString("ja-JP")}
-        (${fmtDur(span)} を ${segN} 分割)
-        <span class="spacer"></span>
-        <button class="zoom-btn" onclick="clearTlDrilldown()">閉じる ×</button>
-      </div>
-      <div class="tl-drill-cols">${colsHtml}</div>
-    </div>`;
+// ドラッグで選んだ範囲を、タイムライン全体と同じ見た目 (カメラ/URL の
+// 各トラックをそのまま) のまま、その範囲だけ拡大表示する。以前は範囲を
+// 横に並んだ区画へ分割して別レイアウトで見せていたが、見た目が本体の
+// タイムラインと変わってしまい分かりにくいという指摘があったため、
+// ホイールでのズーム (tlHandleWheel) と全く同じ「TL_PXMIN を上げて
+// 再描画し、選択開始時刻が左端に来るようスクロールする」だけのシンプルな
+// 挙動に変えている。**この場所に区画分割 UI を復活させないでください**
+// — 本体のタイムラインと見た目が分裂する不具合に戻ります。
+function tlZoomToRange(t0, t1){
+  const scroll = $("#tl-scroll");
+  const viewportW = (scroll && scroll.clientWidth) || 800;
+  const spanMin = Math.max(1 / 60, (t1 - t0) / 60);
+  TL_PXMIN = Math.min(60, Math.max(0.3, viewportW / spanMin));
+  renderEventsRecall();
+  const scroll2 = $("#tl-scroll");
+  if(scroll2 && TL_SCALE) scroll2.scrollLeft = Math.max(0, TL_SCALE.toX(t0));
 }
 async function deleteEventsDay(){
   const day = EV_DAY || $("#ev-day").value;

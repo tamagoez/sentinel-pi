@@ -1231,22 +1231,78 @@ querylog が新しい順である以上、同じ「時刻順がおかしい」�
   ズームと同じ「カーソル下の地点が画面上で動かない」挙動 — 画面中央基準
   ではなくカーソル基準にしているのは、ホイール操作は見ている場所を
   そのまま拡大/縮小したいことが大半なため)。
-- **ドラッグ範囲選択 → 分割表示**: `#tl-scroll` に `mousedown`/`mousemove`/
-  `mouseup` を束縛し (`tlMouseDown`/`tlMouseMove`/`tlMouseUp`)、実際に
-  一定距離動いた場合だけドラッグとみなして `TL_RANGE_SEL` を確定します
-  (動きがほぼ無ければ従来どおり `tlScrollClick` のクリック=カーソル設置
-  として扱う — `TL_SUPPRESS_CLICK` フラグで、ドラッグ確定直後に発火する
-  click イベントだけを 1 回だけ握りつぶしています)。`renderTlDrilldown()`
-  が選択範囲を `TL_DRILL_SEGMENTS` (既定 6) 個の等時間区画へ分割し、各区画
-  ではその時間帯のカメラ画像と URL アクセスを時刻順に 1 本のリストへ
-  混ぜて表示します — 個別トラックではなく「その瞬間に何が起きていたか」
-  を時系列で追えるようにするためで、`#ev-view` の描画のたびに
-  `renderTlTrack()` が再構築する通常のタイムラインとは別の
-  `#tl-drill-area` に追記される (タイムライン本体を壊さない) 形にして
-  います。
+- **ドラッグ範囲選択 → その範囲だけ拡大表示** (#38 で見た目を修正済み):
+  `#tl-scroll` に `mousedown`/`mousemove`/`mouseup` を束縛し
+  (`tlMouseDown`/`tlMouseMove`/`tlMouseUp`)、実際に一定距離動いた場合
+  だけドラッグとみなします (動きがほぼ無ければ従来どおり
+  `tlScrollClick` のクリック=カーソル設置として扱う — `TL_SUPPRESS_CLICK`
+  フラグで、ドラッグ確定直後に発火する click イベントだけを 1 回だけ
+  握りつぶしています)。`tlZoomToRange()` が選択範囲を元に `TL_PXMIN`
+  (ホイールズームと同じ変数) を引き上げて `renderEventsRecall()` を
+  呼び直し、選択開始時刻が画面左端に来るようスクロールします — 本体の
+  タイムラインと全く同じ見た目・同じトラック構成のまま、その範囲だけ
+  拡大された状態になります。
 - 1 分未満の期間が常に「1分」に丸められて区別できなくなる問題も
   `fmtDur()` に持ち込んでいました。`core/notify.py` の `_fmt_minsec()`
   (CLAUDE.md #20) と同じ考え方で、60 秒未満は秒表示にしています。
+
+### 37. ALSA の出力カードは「最初に見つかったカード」を無条件で使わない
+
+実機のエラーログで `sentinel-setup-audio-mixing.sh` (#31) が dmix の
+スレーブを開けず失敗していました:
+`ALSA lib pcm_dmix.c:1057:(snd_pcm_dmix_open) unable to open slave` /
+`aplay: main:850: audio open error: Invalid argument`。スクリプト自身の
+実再生テスト (#31 が導入した「実際に鳴らしてみる」検証) がこれを検知し、
+`/etc/asound.conf` を安全に元へ戻していたため機能自体は壊れませんでした
+が、ミキシング (音楽と音声アナウンスの同時再生・イコライザー) は一切
+有効にならないままでした。
+
+原因は `music.py` の `_card_index()` (`bluetooth.py` の `_card()`、
+`voice.py` の `_sound_card()`、`sentinel-guardian.sh` の
+`check_audio()` も同じ実装) が、`aplay -l` に列挙された**最初の**
+`card N:` 行を無条件で使っていたことです。近年の Raspberry Pi カーネル/
+DietPi では HDMI 出力ごとに別カード (`vc4hdmi0` など) が先に並び、
+CLAUDE.md 冒頭の想定どおりの 3.5mm アナログ出力 (bcm2835 の
+"Headphones") はそのあとの番号になることがあります。この機体では実際に
+card 0 が HDMI で、`dmix` が `hw:0,0` を固定フォーマット (S16_LE/44100/
+2ch) で開こうとして失敗していました。amixer 系の音量操作 (numid=1/
+numid=3/SentinelVoice) は間違ったカードへ静かに書き込むだけで気付き
+にくいのに対し、dmix はフォーマットを literal に要求して開こうとする
+ため、ここで初めて表面化した形です。
+
+`core/audio.py` に `find_output_card()` を新設し、"Headphones" (現行の
+命名) を優先、無ければ "bcm2835" (旧来の単一カード構成)、それも無ければ
+最初のカードにフォールバックする優先順位に直しました。`music.py`/
+`bluetooth.py`/`voice.py` はこの共通関数を使うよう変更し、Python を
+呼べない `sentinel-guardian.sh` の `check_audio()` には同じ優先順位の
+`find_output_card()` を bash で複製してあります。**この優先順位を外して
+「最初に見つかったカード」に戻さないでください** — 同じ「dmix がアナログ
+出力ではなく HDMI を掴んで開けない」不具合に戻ります。**4 か所のうち
+どれか 1 つだけ直すのもやめてください** — 例えば `music.py` だけ直すと、
+音楽の dmix ミキシングは直っても Bluetooth 音量や音声アナウンスの音量は
+違うカードを操作し続けることになります (`voice.py` の `SentinelVoice`
+softvol コントロールは `sentinel-setup-audio-mixing.sh` が正しいカードに
+対して作った設定なので、`_sound_card()` が別のカードを見ていると
+そもそもそのコントロールが見つからず失敗します)。
+
+### 38. タイムラインのドラッグ範囲選択は「区画への分割」ではなく「その場拡大」にする
+
+#36 で追加したドラッグ範囲選択は、選択した範囲を横に並んだ区画へ分割し、
+各区画にカメラ/URL データを時系列リストとして表示する専用レイアウトでした。
+しかし本体のタイムライン (カメラ/URL のトラックを実時間軸に重ねる表示)
+と見た目が別物になってしまい、「元の縮小表示と同じように、部分的に拡大
+したように見せてほしい」という指摘がありました。
+
+`renderTlDrilldown()`/`clearTlDrilldown()`/`TL_RANGE_SEL`/
+`TL_DRILL_SEGMENTS`・関連 CSS (`.tl-drill*`) をすべて削除し、
+`tlMouseUp()` はドラッグ確定時に `tlZoomToRange(t0, t1)` を呼ぶだけに
+しました。`tlZoomToRange()` は選択範囲の長さから `TL_PXMIN` (ホイール
+ズーム `tlHandleWheel()` と全く同じ変数) を計算し、
+`renderEventsRecall()` で通常のタイムラインをそのまま再構築してから、
+選択開始時刻が画面左端に来るようスクロールするだけです。**専用の区画
+分割 UI を復活させないでください** — 本体のタイムラインと見た目が分裂
+する、同じ指摘に戻ります。ドラッグ範囲選択は「ホイールズームのショート
+カット」以上のものではない、というのがこの設計の要点です。
 
 ## モジュール構成
 
@@ -1296,6 +1352,12 @@ scripts/sentinel-setup-audio-mixing.sh
 core/config.py      設定の唯一の保管場所。型と範囲を強制する
 core/state.py       モード状態機械。「今どのモードか」の唯一の決定者
 core/supervisor.py  タスク監督。例外で落ちても指数バックオフで再起動する
+core/audio.py       ALSA のアナログ出力カード (3.5mm) を特定する
+                    find_output_card()。aplay -l の最初のカードを無条件
+                    で使うと機体によって HDMI を掴むため、"Headphones"
+                    優先 → "bcm2835" → 最初のカードの順で探す。
+                    music.py/bluetooth.py/voice.py が共通で使う
+                    (CLAUDE.md #37)
 
 modules/camera.py       カメラ (別プロセス)。動体検知 -> MODE.report_motion()
                          個別カメラの上書き設定は config の camera_overrides
@@ -1378,9 +1440,9 @@ web/static/index.html   単一ファイル SPA。イベントページのタイ�
                          トラックは buildNetSpans()/packNetRows() で「点」
                          ではなく期間の横棒・複数行として描く。#tl-scroll に
                          ホイール (拡大縮小)・Shift+ホイール (横移動)・
-                         ドラッグ (範囲選択 -> renderTlDrilldown() で横に
-                         分割してカメラ/URL を時系列表示) を束縛している
-                         (CLAUDE.md #36)
+                         ドラッグ (範囲選択 -> tlZoomToRange() でその範囲
+                         だけ拡大、本体と同じ見た目のまま) を束縛している
+                         (CLAUDE.md #36/#38)
 ```
 
 ### モジュールを追加するとき

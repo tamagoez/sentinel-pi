@@ -168,11 +168,31 @@ check_firewall() {
 }
 
 # ------------------------------------------------------------------ 4. Audio
+# Find the ALSA card index for the 3.5mm analog output (bcm2835
+# "Headphones"). Some kernels/DietPi builds list an HDMI card (e.g.
+# vc4hdmi0) ahead of it, so grabbing the first "card N:" line blindly can
+# pin the wrong output. Prefer a card named "Headphones" (current Pi
+# OS/DietPi naming), fall back to "bcm2835" (older single-card naming),
+# and only then fall back to the first card as a last resort. This same
+# priority is duplicated in sentinel/core/audio.py (used by
+# music.py/bluetooth.py/voice.py) - keep both in sync, see that file's
+# docstring for the real-hardware failure this fixes (CLAUDE.md #42).
+find_output_card() {
+  local list
+  list=$(aplay -l 2>/dev/null) || return 1
+  local card
+  card=$(printf '%s\n' "$list" | grep -im1 '^card [0-9]\+:.*headphones' | grep -oE '^card [0-9]+' | awk '{print $2}')
+  [[ -n "$card" ]] || card=$(printf '%s\n' "$list" | grep -im1 '^card [0-9]\+:.*bcm2835' | grep -oE '^card [0-9]+' | awk '{print $2}')
+  [[ -n "$card" ]] || card=$(printf '%s\n' "$list" | grep -m1 -oE '^card [0-9]+' | awk '{print $2}')
+  [[ -n "$card" ]] || return 1
+  printf '%s\n' "$card"
+}
+
 # Pin output to the 3.5mm jack. numid=3 value 1 = headphone jack.
 check_audio() {
   command -v amixer >/dev/null || return 0
   local card
-  card=$(aplay -l 2>/dev/null | grep -m1 -oE '^card [0-9]+' | awk '{print $2}')
+  card=$(find_output_card)
   [[ -n "$card" ]] || return 0
   local cur
   cur=$(amixer -c "$card" cget numid=3 2>/dev/null | grep -m1 -oE ': values=[0-9]+' | grep -oE '[0-9]+$')

@@ -67,7 +67,7 @@ import subprocess
 import time
 import uuid
 
-from ..core import config
+from ..core import audio, config
 from . import music
 
 log = logging.getLogger("sentinel.voice")
@@ -182,17 +182,10 @@ def _mixing_ready() -> bool:
 
 
 def _sound_card() -> int | None:
-    try:
-        out = subprocess.run(["aplay", "-l"], capture_output=True, text=True, timeout=5).stdout
-    except Exception:
-        return None
-    for line in out.splitlines():
-        if line.startswith("card "):
-            try:
-                return int(line.split()[1].rstrip(":"))
-            except Exception:
-                continue
-    return None
+    # core/audio.find_output_card() を使う理由は core/audio.py の docstring
+    # 参照 — aplay -l の最初のカードを無条件で使うと、機体によっては
+    # bcm2835 のアナログ出力ではなく HDMI を掴んでしまう。
+    return audio.find_output_card()
 
 
 def _apply_volume(percent: int) -> None:
