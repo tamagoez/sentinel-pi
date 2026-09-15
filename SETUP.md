@@ -3,8 +3,8 @@
 日本語版: [SETUP.ja.md](SETUP.ja.md)
 
 Sentinel is installed from a git clone, and `setup.sh` walks you through it.
-It automates everything a script can decide and stops at the seven points
-that need a person (marked **H1**–**H7** below).
+It automates everything a script can decide and stops at the eight points
+that need a person (marked **H1**–**H8** below).
 
 All console output — DietPi's and this project's — is English by design.
 Japanese does not render on a physical HDMI console or a bare serial
@@ -17,7 +17,7 @@ terminal. The Web UI stays Japanese; it renders in a browser.
 | 0 | (on your PC) | flash DietPi, edit `dietpi.txt` |
 | 1 | first boot | DietPi's own first-run setup |
 | 2 | `sudo ./setup.sh` | H1, H2 → `bootstrap.sh` → H3 (reboot) |
-| 3 | `sudo ./setup.sh` | H4, H5 → `install.sh` → H6 → H7 (optional) |
+| 3 | `sudo ./setup.sh` | H4, H5 → `install.sh` → H6 → H7, H8 (optional) |
 
 `setup.sh` remembers where it stopped in `/var/lib/sentinel/setup-stage`, so
 after the reboot you run the same command again and it resumes. Re-running it
@@ -117,6 +117,7 @@ because the order matters:
 | 6 | Audio routed to the 3.5mm jack (`dietpi-set_hardware soundcard rpi-bcm2835-3.5mm`) | — |
 | 7 | SWAP disabled | — |
 | 8 | Tailscale installed (package only, via Tailscale's own install script — no dietpi-software ID exists for it) | — |
+| 9 | Syncthing installed (package only; `install.sh` redirects its storage onto the external drive once it's mounted — see below) | 50 |
 
 - **H3 — the reboot.** Bluetooth, the audio route and the SWAP change need a
   restart. `setup.sh` offers to reboot; nothing has been installed to `/opt`
@@ -169,6 +170,21 @@ which re-checks the whole configuration every 2 minutes and repairs drift.
   always repeat it if you ever run the command again by hand. Say no and
   Tailscale stays installed but disconnected; connect later with the same
   command.
+- **H8 — Syncthing (optional), for Obsidian sync.** `setup.sh` walks
+  through: setting a GUI username/password at `http://<Pi-IP>:8384` (there
+  is none by default), optionally turning off Global Discovery/Relaying
+  under Settings → Connections (Tailscale from H7 already covers "away
+  from home" reachability, so this keeps this Pi's Syncthing off any
+  public discovery network entirely), adding a folder pointed at
+  `<external-drive>/obsidian`, and pairing each of your other devices by
+  Device ID. Install Syncthing (and Tailscale) on those devices too so the
+  "away from home" path works over your own tailnet rather than
+  Syncthing's public relay servers. No Obsidian plugin is needed — just
+  open the synced folder as a vault on each device. See CLAUDE.md #40 for
+  why Syncthing was chosen over Self-hosted LiveSync + CouchDB (no
+  official CouchDB package exists for 32-bit ARM, and even on 64-bit its
+  official guidance assumes far more RAM than this Pi has to spare) and
+  how its storage is kept off the SD card.
 
 ## Running the phases by hand
 
@@ -214,6 +230,7 @@ and repairs it:
 | Hotspot DNS target | hotspot reconfigured | point back at AdGuard |
 | Disk space | accumulation | warn at 92%, keep one diagnostics bundle |
 | yt-dlp version | site changes | try an update weekly |
+| Syncthing home redirected to the external drive | DietPi reinstalling Syncthing, or a boot-time race with the drive mount | re-bind-mount it (checked by comparing device+inode) |
 
 ## Updating
 
@@ -256,4 +273,6 @@ by hand on the box. `journalctl -t sentinel-autoupdate` shows its history.
 | 8083 still reachable | `systemctl start sentinel-guardian`; `journalctl -t sentinel-guardian -n 20` |
 | Network log empty | AdGuard password wrong in the settings tab, or query logging off in AdGuard; also check `tailscale status` if it started right after connecting Tailscale — DNS must have been accepted with `--accept-dns=false` |
 | `setup.sh` starts from the wrong phase | `sudo ./setup.sh --reset` |
+| Syncthing GUI unreachable or devices won't pair | `systemctl status syncthing`; `journalctl -u syncthing -n 60 --no-pager` |
+| Syncthing writing to the SD card instead of the external drive | `stat -c '%d:%i' /mnt/VIDEOSD/syncthing /mnt/dietpi_userdata/syncthing` — the two should match (same bind mount); if not, wait up to 2 minutes for Guardian, or re-run `sudo ./install.sh` |
 | Anything else | `sentinel-diagnose` — bundles system + app state into one archive |

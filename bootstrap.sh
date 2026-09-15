@@ -17,6 +17,10 @@
 #   8. Install Tailscale (package only - joining a tailnet needs a human to
 #      open a login URL in a browser, so that is a manual step in
 #      setup.sh, not here).
+#   9. Install Syncthing (package only - redirecting its storage off the SD
+#      card needs the external drive already mounted, so that is done by
+#      install.sh, after setup.sh's drive-mount step; pairing devices is a
+#      manual step in setup.sh, same reasoning as Tailscale above).
 #
 # A reboot is only needed the first time, when Bluetooth/audio/SWAP
 # actually change - this script tracks that and says so at the end, so
@@ -49,7 +53,7 @@ SETHW=/boot/dietpi/func/dietpi-set_hardware
 SETSW=/boot/dietpi/func/dietpi-set_software
 
 # ---------------------------------------------------------------- 1. Locale
-c "STEP 1/8  Force English UTF-8 locale"
+c "STEP 1/9  Force English UTF-8 locale"
 CUR_LANG=$(grep -m1 '^LANG=' /etc/default/locale 2>/dev/null | cut -d= -f2)
 if [[ "$CUR_LANG" != "en_US.UTF-8" && "$CUR_LANG" != "en_GB.UTF-8" && "$CUR_LANG" != "C.UTF-8" ]]; then
   if [[ -x "$SETSW" ]]; then
@@ -63,7 +67,7 @@ else
 fi
 
 # ---------------------------------------------------------------- 2. Base
-c "STEP 2/8  Install base packages"
+c "STEP 2/9  Install base packages"
 # 5=ALSA  7=FFmpeg  17=Git  130=Python 3 pip  195=yt-dlp
 # Checked by the artifact each ID actually installs, not dietpi-software's
 # own bookkeeping, so a re-run only calls dietpi-software for what is
@@ -97,7 +101,7 @@ fi
 # build-flag pitfall since it does not link ffmpeg at all.
 
 # ---------------------------------------------------------------- 3. DNS
-c "STEP 3/8  Install AdGuard Home + Unbound"
+c "STEP 3/9  Install AdGuard Home + Unbound"
 # 126=AdGuard Home  182=Unbound
 # Installing both in one call makes DietPi wire them together automatically,
 # so re-run it if EITHER is missing rather than checking them separately.
@@ -112,7 +116,7 @@ else
 fi
 
 # ---------------------------------------------------------------- 4. Hotspot
-c "STEP 4/8  Install WiFi Hotspot"
+c "STEP 4/9  Install WiFi Hotspot"
 # 60=WiFi Hotspot (hostapd). Installed after AdGuard so its DHCP can later
 # be pointed at AdGuard for DNS logging.
 if [[ "${SKIP_HOTSPOT:-0}" != "1" ]]; then
@@ -127,7 +131,7 @@ else
 fi
 
 # ---------------------------------------------------------------- 5. Bluetooth
-c "STEP 5/8  Enable Bluetooth"
+c "STEP 5/9  Enable Bluetooth"
 # Bluetooth is a dietpi-config item, not a dietpi-software package,
 # so we call the internal hardware-setup function directly.
 # GUI equivalent: dietpi-config -> 4 Advanced Options -> Bluetooth.
@@ -184,7 +188,7 @@ apt-get install -y --no-install-recommends \
   || w "Some packages failed to install."
 
 # ---------------------------------------------------------------- 6. Audio
-c "STEP 6/8  Route audio to the 3.5mm jack (AUX)"
+c "STEP 6/9  Route audio to the 3.5mm jack (AUX)"
 # "rpi-bcm2835-3.5mm" is the exact name dietpi-set_hardware expects; any
 # other string is treated as "unknown card" and silently resets to default.
 # The helper also sets dtparam=audio=on and snd_bcm2835.enable_hdmi=0 for us,
@@ -227,7 +231,7 @@ else
 fi
 
 # ---------------------------------------------------------------- 7. Resources
-c "STEP 7/8  Reduce resource usage"
+c "STEP 7/9  Reduce resource usage"
 # Disable SWAP: fewer SD card writes, longer card life.
 # 2 cameras + music fit comfortably in 1GB RAM without it.
 SWAP_WAS_ON=0
@@ -246,7 +250,7 @@ systemctl is-active --quiet dietpi-ramlog 2>/dev/null && ok "DietPi-RAMlog activ
   || w "DietPi-RAMlog inactive; consider 'dietpi-software install 103'."
 
 # ---------------------------------------------------------------- 8. Tailscale
-c "STEP 8/8  Install Tailscale (for secure remote access)"
+c "STEP 8/9  Install Tailscale (for secure remote access)"
 # There is no dietpi-software ID for it, so this uses Tailscale's own
 # install script, which detects the distro and adds its apt repo + signing
 # key before installing the package - the officially documented method
@@ -264,6 +268,25 @@ else
     w "Tailscale install failed; install it manually later:"
     w "  curl -fsSL https://tailscale.com/install.sh | sh"
   fi
+fi
+
+# ---------------------------------------------------------------- 9. Syncthing
+c "STEP 9/9  Install Syncthing (for Obsidian sync)"
+# 50=Syncthing. DietPi installs it as a tarball (not apt) to
+# /opt/syncthing/syncthing, running as the 'dietpi' user, with its home/
+# config/database under /mnt/dietpi_userdata/syncthing by default - on the
+# SD card unless dietpi_userdata itself was redirected during DietPi's own
+# first-run setup. A synced Obsidian vault writes far more often than any
+# other config this project touches (every edit, from every device), so
+# install.sh redirects that directory onto the external drive with a bind
+# mount once it's actually mounted (too early to do that here - see the
+# header comment above). Only the package goes in here; pairing devices to
+# it is a manual step in setup.sh (H8), same reasoning as Tailscale (H7).
+if [[ -x /opt/syncthing/syncthing ]]; then
+  ok "Syncthing already installed; skipped"
+else
+  "$DS" install 50 && ok "Syncthing installed (storage redirect + device pairing: see setup.sh H8)" \
+    || w "Syncthing install failed."
 fi
 
 if (( NEEDS_REBOOT )); then

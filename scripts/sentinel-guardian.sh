@@ -256,6 +256,7 @@ check_services() {
   # instead of the hotspot or Bluetooth staying down until a fresh reboot.
   systemctl list-unit-files hciuart.service &>/dev/null && units+=(hciuart.service)
   systemctl list-unit-files hostapd.service &>/dev/null && units+=(hostapd.service)
+  systemctl list-unit-files syncthing.service &>/dev/null && units+=(syncthing.service)
 
   for u in "${units[@]}"; do
     systemctl list-unit-files "$u" &>/dev/null || continue
@@ -344,6 +345,53 @@ check_storage_owner() {
   fi
 }
 
+# ------------------------------------------------------------------ 8b. Syncthing storage
+# install.sh bind-mounts $STORAGE/syncthing onto Syncthing's default home
+# directory (/mnt/dietpi_userdata/syncthing) so a synced Obsidian vault's
+# very frequent writes land on the external drive, not the SD card
+# (CLAUDE.md #40). That bind mount does not naturally survive a
+# dietpi-software reinstall of Syncthing (a fresh update.sh run re-creates
+# a plain directory there) and can also race at boot if $STORAGE itself
+# mounts late. Comparing device+inode (same technique install.sh uses) is
+# how "still redirected" is told apart from "quietly back on the SD card"
+# without depending on mount option text.
+check_syncthing_storage() {
+  command -v syncthing >/dev/null 2>&1 || [[ -x /opt/syncthing/syncthing ]] || return 0
+  local storage="${SENTINEL_STORAGE:-/mnt/VIDEOSD}"
+  local st_home="$storage/syncthing"
+  local st_default=/mnt/dietpi_userdata/syncthing
+  local script="/opt/sentinel/scripts/sentinel-fix-storage-owner.sh"
+  local out
+
+  if [[ -x "$script" ]]; then
+    if out=$("$script" "$st_home" "$storage" dietpi 2>&1); then
+      [[ -n "$out" ]] && fixed "$out"
+    else
+      warn "dietpi still cannot write to $st_home: $out"
+    fi
+    if out=$("$script" "$storage/obsidian" "$storage" dietpi 2>&1); then
+      [[ -n "$out" ]] && fixed "$out"
+    else
+      warn "dietpi still cannot write to $storage/obsidian: $out"
+    fi
+  fi
+
+  [[ -d "$st_home" && -d "$st_default" ]] || return 0
+  local a b
+  a=$(stat -c '%d:%i' "$st_home" 2>/dev/null) || return 0
+  b=$(stat -c '%d:%i' "$st_default" 2>/dev/null) || return 0
+  [[ "$a" == "$b" ]] && return 0
+
+  local was_active=0
+  systemctl is-active --quiet syncthing 2>/dev/null && { was_active=1; systemctl stop syncthing; }
+  if mount --bind "$st_home" "$st_default" 2>/dev/null; then
+    fixed "re-bind-mounted Syncthing home onto $st_home (had reset to $st_default on the SD card)"
+  else
+    warn "could not re-bind-mount Syncthing home onto $st_home"
+  fi
+  (( was_active )) && systemctl start syncthing
+}
+
 # ------------------------------------------------------------------ 9. Storage space
 # Full storage would stall every feature, so warn early and keep one
 # diagnostics bundle on record for later investigation.
@@ -389,6 +437,7 @@ check_services
 check_bluealsa_freshness
 check_hotspot_dns
 check_storage_owner
+check_syncthing_storage
 check_storage
 check_ytdlp
 
