@@ -34,12 +34,33 @@ say(){ logger -t "$LOG_TAG" -p daemon.notice -- "$*"; echo "$*"; }
 warn(){ logger -t "$LOG_TAG" -p daemon.warning -- "$*"; echo "$*" >&2; }
 fixed(){ FIXED=$((FIXED+1)); say "FIXED: $*"; }
 
+# scripts/sentinel-adguard-8083.sh writes this with a Unix timestamp when an
+# admin wants direct :8083 access for a while. While that timestamp is still
+# in the future, AdGuard's web UI needs to actually be reachable from
+# outside — binding it to 127.0.0.1 (below) while only the firewall is open
+# would leave nothing listening on any externally-reachable address, so the
+# "temporary access" would silently do nothing. Both the bind-lock and the
+# firewall block (checked later) read this same marker so they agree on
+# whether we're inside that window.
+UNBLOCK_FILE="$STATE_DIR/adguard-8083-unblock-until"
+agh_unblock_active() {
+  local until=0
+  [[ -f "$UNBLOCK_FILE" ]] && until=$(cat "$UNBLOCK_FILE" 2>/dev/null || echo 0)
+  [[ "$until" =~ ^[0-9]+$ ]] || until=0
+  (( until > $(date +%s) ))
+}
+
 # ------------------------------------------------------------------ 1. AdGuard bind
-# Lock the web UI to localhost. This is the primary line of defense
-# (it's a config file, so it's durable across reboots on its own).
+# Lock the web UI to localhost — except during a sentinel-adguard-8083.sh
+# enable window, when it must bind to 0.0.0.0 instead so the port being
+# opened in the firewall (below) actually reaches a listening socket.
+# This is the primary line of defense the rest of the time (it's a config
+# file, so it's durable across reboots on its own).
 check_adguard_bind() {
   [[ -f "$AGH_YAML" ]] || return 0
   local changed=0
+  local want_host="127.0.0.1"
+  agh_unblock_active && want_host="0.0.0.0"
 
   # New format: top-level "http:" block contains "address:".
   # awk (not a blind sed) so we only touch that one block — the file also
@@ -48,8 +69,8 @@ check_adguard_bind() {
     local cur
     cur=$(awk '/^http:/{inblk=1;next} /^[^[:space:]]/{inblk=0}
                inblk && /^[[:space:]]{2}address:[[:space:]]/{sub(/^[[:space:]]*address:[[:space:]]*/,"");print;exit}' "$AGH_YAML")
-    if [[ "$cur" != "127.0.0.1:$AGH_PORT" ]]; then
-      awk -v want="127.0.0.1:$AGH_PORT" '
+    if [[ "$cur" != "$want_host:$AGH_PORT" ]]; then
+      awk -v want="$want_host:$AGH_PORT" '
         /^http:/{inblk=1;print;next}
         /^[^[:space:]]/{inblk=0}
         inblk && /^[[:space:]]{2}address:[[:space:]]/{print "  address: " want; next}
@@ -58,8 +79,8 @@ check_adguard_bind() {
     fi
   # Old format: top-level bind_host / bind_port.
   elif grep -qE '^bind_host:' "$AGH_YAML"; then
-    if ! grep -qE '^bind_host:[[:space:]]*127\.0\.0\.1[[:space:]]*$' "$AGH_YAML"; then
-      sed -i -E 's|^bind_host:.*$|bind_host: 127.0.0.1|' "$AGH_YAML"
+    if ! grep -qE "^bind_host:[[:space:]]*${want_host//./\\.}[[:space:]]*\$" "$AGH_YAML"; then
+      sed -i -E "s|^bind_host:.*\$|bind_host: $want_host|" "$AGH_YAML"
       changed=1
     fi
     if grep -qE '^bind_port:' "$AGH_YAML" && \
@@ -73,15 +94,18 @@ check_adguard_bind() {
   fi
 
   if (( changed )); then
-    fixed "reset AdGuard Home web UI to 127.0.0.1:$AGH_PORT"
+    fixed "reset AdGuard Home web UI to $want_host:$AGH_PORT"
     systemctl restart adguardhome 2>/dev/null || systemctl restart AdGuardHome 2>/dev/null || true
   fi
 }
 
 # ------------------------------------------------------------------ 2. Verify listen
-# Don't trust the config alone — check what's actually listening.
+# Don't trust the config alone — check what's actually listening. Skipped
+# during an active unblock window since 0.0.0.0 is then the intended state,
+# not something to warn about and revert.
 check_adguard_listen() {
   command -v ss >/dev/null || return 0
+  agh_unblock_active && return 0
   local bad
   bad=$(ss -Hltn "sport = :$AGH_PORT" 2>/dev/null \
         | awk '{print $4}' | grep -vE '^(127\.0\.0\.1|\[::1\]):' || true)
@@ -96,21 +120,19 @@ check_adguard_listen() {
 # Re-checked every run, so anything that clears it (e.g. hostapd) is
 # corrected within 2 minutes.
 #
-# scripts/sentinel-adguard-8083.sh writes $UNBLOCK_FILE with a Unix
-# timestamp when an admin wants direct :8083 access for a while (to log
-# into AdGuard Home itself, which Sentinel otherwise never needs). While
-# that timestamp is still in the future, this function removes the block
-# instead of reapplying it - so "temporary" is enforced by this same
-# 2-minute cycle expiring it, not by a separate long-running process.
-UNBLOCK_FILE="$STATE_DIR/adguard-8083-unblock-until"
+# $UNBLOCK_FILE (see agh_unblock_active() above) is written by
+# scripts/sentinel-adguard-8083.sh when an admin wants direct :8083 access
+# for a while (to log into AdGuard Home itself, which Sentinel otherwise
+# never needs). While that timestamp is still in the future, this function
+# removes the block instead of reapplying it - so "temporary" is enforced
+# by this same 2-minute cycle expiring it, not by a separate long-running
+# process.
 check_firewall() {
   command -v iptables >/dev/null || return 0
 
-  local until=0
-  [[ -f "$UNBLOCK_FILE" ]] && until=$(cat "$UNBLOCK_FILE" 2>/dev/null || echo 0)
-  [[ "$until" =~ ^[0-9]+$ ]] || until=0
-
-  if (( until > $(date +%s) )); then
+  if agh_unblock_active; then
+    local until
+    until=$(cat "$UNBLOCK_FILE" 2>/dev/null || echo 0)
     local removed=0
     for cmd in iptables ip6tables; do
       command -v "$cmd" >/dev/null || continue

@@ -20,7 +20,7 @@ from .core import errors as errors_mod
 from .core import state
 from .core.state import MODE
 from .core.supervisor import SUPERVISOR
-from .modules import bluetooth, camera, maintenance, music, netlog, notify, terminal, thermal
+from .modules import bluetooth, camera, maintenance, music, netlog, notify, terminal, thermal, voice
 from .web import routes
 
 
@@ -77,9 +77,12 @@ async def lifespan(app: FastAPI):
     SUPERVISOR.spawn("notify-send", notify.sender_loop)
     SUPERVISOR.spawn("notify-summary", notify.summary_loop)
     SUPERVISOR.spawn("maintenance", maintenance.loop)
+    SUPERVISOR.spawn("voice", voice.loop)
+    SUPERVISOR.spawn("voice-time-signal", voice.time_signal_loop)
 
     notify.system_event("Sentinel が起動しました",
                         f"データ: {config.DATA_ROOT}", level="good")
+    voice.announce("Sentinel が起動しました", "other")
     log.info("Sentinel の起動が完了しました (port %s)", config.get("port"))
 
     try:
@@ -87,6 +90,7 @@ async def lifespan(app: FastAPI):
     finally:
         log.info("Sentinel を停止します")
         notify.system_event("Sentinel を停止します", level="warn")
+        voice.announce("Sentinel を停止します", "other")
         await SUPERVISOR.shutdown()
         music.shutdown()
         camera.shutdown()

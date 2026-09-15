@@ -54,6 +54,14 @@ for f in bootstrap.sh install.sh; do
 done
 chmod +x "$SRC"/*.sh "$SRC"/scripts/*.sh 2>/dev/null || true
 
+# Keep scripts/sentinel-autoupdate.sh's record of this clone's path fresh,
+# same as install.sh does - covers the clone having moved since the last
+# install.sh run.
+if [[ -d "$SRC/.git" ]]; then
+  mkdir -p /var/lib/sentinel
+  echo "$SRC" > /var/lib/sentinel/repo-path
+fi
+
 # ------------------------------------------------------------------ 1. git pull
 c "STEP 1/3  Pulling the latest code"
 if [[ -d "$SRC/.git" ]]; then

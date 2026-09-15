@@ -21,7 +21,7 @@ from ..core import config
 from ..core import errors as errors_mod
 from ..core.state import MODE
 from ..core.supervisor import SUPERVISOR
-from ..modules import bluetooth, camera, diagnostics, hotspot, maintenance, music, netlog, notify, terminal, thermal
+from ..modules import bluetooth, camera, diagnostics, hotspot, maintenance, music, netlog, notify, terminal, thermal, voice
 
 log = logging.getLogger("sentinel.web")
 router = APIRouter()
@@ -100,6 +100,7 @@ def _overview() -> dict:
         "bluetooth": bluetooth.status(),
         "netlog": {"state": netlog.STATE, "summary": netlog.today_summary()[:10]},
         "notify": notify.STATE,
+        "voice": voice.STATE,
         "maintenance": maintenance.STATE,
         "tasks": SUPERVISOR.stats(),
         "terminal_sessions": len(terminal.SESSIONS),
@@ -465,6 +466,17 @@ async def notify_unblock_webhook_host(request: Request):
     return {"ok": ok, "message": message}
 
 
+# ---------------------------------------------------------------- 音声アナウンス
+
+@router.post("/api/voice/test")
+async def voice_test(request: Request):
+    require(request)
+    body = await request.json()
+    text = str(body.get("text") or "").strip() or "音声アナウンスのテストです"
+    ok, message = await asyncio.to_thread(voice.speak_test, text)
+    return {"ok": ok, "message": message}
+
+
 # ---------------------------------------------------------------- Bluetooth
 
 # 固定パスのルートは、"/{action}" のような可変パスのルートより必ず先に
@@ -807,6 +819,7 @@ async def maintenance_run(request: Request):
 async def system_reboot(request: Request):
     require(request)
     notify.system_event("Web UI から再起動が要求されました", level="warn")
+    voice.announce("Web UIから再起動が要求されました", "other")
 
     async def go():
         await asyncio.sleep(2)

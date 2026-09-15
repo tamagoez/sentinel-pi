@@ -222,6 +222,14 @@ happens.)
 Config and data are preserved. `sudo ./setup.sh --reset` forgets the saved
 progress if you want to walk through the whole guided flow again.
 
+**This also happens automatically.** `sentinel-autoupdate.timer` checks the
+git remote every 30 minutes and runs `update.sh` itself once new commits are
+there — no need to log in and run the command above by hand after every
+merge. It's a quick `git fetch` most cycles (does nothing unless there's
+actually something new), and it backs off (does nothing) if the checkout has
+uncommitted local changes, so it never fights you if you've edited something
+by hand on the box. `journalctl -t sentinel-autoupdate` shows its history.
+
 ## Troubleshooting
 
 | Symptom | Check |

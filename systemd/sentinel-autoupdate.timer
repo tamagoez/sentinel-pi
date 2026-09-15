@@ -1,0 +1,15 @@
+[Unit]
+Description=Run Sentinel auto-update periodically
+
+[Timer]
+# First check 5 minutes after boot (after networking is actually up).
+OnBootSec=5min
+# Then every 30 minutes. This only ever does real work (git pull +
+# bootstrap.sh + install.sh) when the remote actually has new commits -
+# otherwise it's a single quick `git fetch` and exit.
+OnUnitActiveSec=30min
+AccuracySec=1min
+Persistent=false
+
+[Install]
+WantedBy=timers.target

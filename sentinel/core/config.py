@@ -170,6 +170,20 @@ DEFAULTS: dict[str, Any] = {
     "terminal_enabled": True,
     "terminal_shell": "/bin/bash",
     "terminal_notify": True,
+
+    # --- 音声アナウンス (espeak-ng 経由、mpg123 の音楽ライブラリとは別経路) ---
+    "voice_enabled": False,               # 総元栓。False ならどのカテゴリも喋らない
+    "voice_volume": 70,                   # 0-100。ALSA numid=1 (PCM Playback
+                                           # Volume) を直接操作する (bluetooth.py
+                                           # の _apply_volume() と同じコントロール)
+    "voice_rate": 150,                    # espeak-ng -s (words per minute)
+    "voice_lang": "ja",                   # espeak-ng -v。空なら espeak-ng の既定
+    "voice_time_enabled": False,          # 時報 (n 分ごとに現在時刻を読み上げる)
+    "voice_time_interval_minutes": 60,    # 時報の間隔 (分)
+    "voice_error_enabled": True,          # エラー通知 (定時処理の例外など) を喋る
+    "voice_camera_reboot_enabled": True,  # カメラ破損によるPi緊急再起動を喋る
+    "voice_other_enabled": False,         # 上記以外のシステムイベント (起動/停止/
+                                           # 手動再起動/定時処理の開始・完了) を喋る
 }
 
 _LOCK = threading.RLock()
@@ -263,6 +277,9 @@ _RANGES: dict[str, tuple[float, float]] = {
     "timelapse_fps": (1, 30),
     "timelapse_tile_width": (160, 1280),
     "session_hours": (1, 8760),
+    "voice_volume": (0, 100),
+    "voice_rate": (80, 400),
+    "voice_time_interval_minutes": (1, 720),
 }
 
 

@@ -152,12 +152,18 @@ apt-get update -qq
 # without these packages that mount can fail outright. Even with them,
 # such drives have no real Unix ownership - install.sh and Guardian handle
 # that separately by fixing the mount's uid=/gid= options.
+# espeak-ng: voice announcements (modules/voice.py). Chosen over a
+# higher-quality Japanese TTS (e.g. Open JTalk) because its own dictionary
+# alone runs tens of MB - espeak-ng is a few MB and needs no separate
+# dictionary package, matching the RAM 1GB / SD-card constraints this
+# project is built around (see CLAUDE.md "依存を増やさない"). The tradeoff
+# is rougher pronunciation, especially for kanji.
 apt-get install -y --no-install-recommends \
   bluez bluez-alsa-utils \
   mpg123 v4l-utils python3-opencv python3-pil python3-venv \
   fonts-dejavu-core fonts-noto-cjk iptables \
-  exfatprogs ntfs-3g >/dev/null 2>&1 \
-  && ok "Bluetooth-audio, camera and exFAT/NTFS packages installed" \
+  exfatprogs ntfs-3g espeak-ng >/dev/null 2>&1 \
+  && ok "Bluetooth-audio, camera, exFAT/NTFS and voice (espeak-ng) packages installed" \
   || w "Some packages failed to install."
 
 # ---------------------------------------------------------------- 6. Audio

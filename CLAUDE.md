@@ -760,6 +760,171 @@ media_type="image/jpeg", ...)` で返すよう変更しました。`Response` �
 ください。継続的に上書きされるファイルには `read_bytes()` 一発読みの
 `Response` パターンを使ってください。
 
+### 24. `sentinel-adguard-8083.sh enable` はファイアウォールだけでなく AdGuard 自身の bind アドレスも変える
+
+「`enable` を実行してもアクセスできない」という報告がありました。原因は
+#5 で書いた二重の到達性対策のうち、片方 (iptables) しか `enable` が
+動かしていなかったことです。`sentinel-guardian.sh` の
+`check_adguard_bind()` は `AdGuardHome.yaml` の `http.address` を常に
+`127.0.0.1:8083` に固定し、ズレていれば 2 分ごとに戻して `adguardhome`
+を再起動します。`sentinel-adguard-8083.sh enable` は iptables の DROP
+ルールを外すだけで、この bind アドレスには一切触れていませんでした。
+つまり `enable` を実行しても AdGuard Home 自身は相変わらずループバック
+以外のどのアドレスでも一切 listen していないため、ファイアウォールを
+開けても「そもそも誰も listen していないポートに繋ごうとする」状態で、
+接続を拒否される (または到達すらしない) だけでした。
+
+修正は 2 箇所です。
+
+1. `sentinel-guardian.sh` に `agh_unblock_active()` を追加し、
+   `check_adguard_bind()`/`check_adguard_listen()`/`check_firewall()`
+   の 3 つが同じ `$UNBLOCK_FILE` (`sentinel-adguard-8083.sh` が書く
+   Unix タイムスタンプ) を見るようにしました。unblock 有効時は
+   `check_adguard_bind()` が `127.0.0.1` ではなく `0.0.0.0:8083` を
+   強制し、`check_adguard_listen()` は「ループバック以外で listen して
+   いる」という本来の異常検知を一時的にスキップします (unblock 中は
+   それが意図した状態のため)。**この `agh_unblock_active()` の参照を
+   外し、`check_adguard_bind()` が unblock 中かどうかに関係なく常に
+   `127.0.0.1` を強制する実装に戻さないでください** — Guardian の
+   2 分ごとの周期がすぐにまた bind を締め直し、同じ「ファイアウォールは
+   開いているのに繋がらない」に戻ります。
+2. `sentinel-adguard-8083.sh` 自身にも `check_adguard_bind()` と同じ
+   awk ロジックを持つ `rebind_agh()` を追加し、`enable` は
+   `0.0.0.0:8083`、`disable` は `127.0.0.1:8083` への rebind を
+   `adguardhome` の再起動込みで即座に行うようにしました。「次の
+   Guardian 周期 (最大 2 分) まで待たずにこのスクリプト自身がすぐ直す」
+   という既存のコメント (`enable`/`disable` 両方) は元々 iptables に
+   ついてのものでしたが、bind アドレスについても同じことが当てはまる
+   ため揃えています。**この `rebind_agh()` 呼び出しを外して iptables
+   だけを操作する実装に戻さないでください** — Guardian の次の周期を
+   待つだけならまだいいですが、`AGH_YAML` の検出に失敗した場合など
+   Guardian 側が直せないケースでは無期限に到達不能なままになります。
+
+`status` にも `ss` で実際に listen しているアドレスを表示するように
+しました。「iptables は正しいのに繋がらない」のか「そもそも AdGuard が
+listen していない」のかを、設定ファイルの中身を見なくてもこのコマンド
+だけで切り分けられるようにするためです。
+
+### 25. `vcgencmd get_throttled` の常時監視は削除した (エラーにも診断にも出さない)
+
+`thermal.py` はかつて 30 秒ごとに `vcgencmd get_throttled` を呼び、
+ビットの変化をログしていました (低電圧のみ `log.warning()`、それ以外は
+`log.info()`)。実機では USB 2.0 ハブと Ethernet を共有する構成上
+(CLAUDE.md 冒頭の制約表)、"ARM周波数を制限中" 系のビットがほぼ常時
+立ちっぱなしになり、状態変化のたびにログが出るだけで実用上の意味を
+持たなくなっていました。無駄な `subprocess.check_output()` 呼び出しと
+`asyncio.to_thread()` 経由のスレッド消費も、RAM 1GB・SWAP なしの機体では
+チリも積もれば無視できません。
+
+`read_throttled()`・`_THROTTLE_BITS`・`loop()` 内の 30 秒ごとの
+スロットリング監視、および `snapshot()` の `throttled` フィールド、
+Web UI の「スロットリング」カードをすべて削除しました。低電圧検出も
+含めてまるごと削除です — 低電圧は本来なら電源側の実害を示す重要な
+シグナルですが、実機のログで常時ノイズと化している以上、どのビットだけ
+残すかを選別しても同じ「意味を成さない監視」に戻るだけと判断しました。
+**この監視を `snapshot()`/`loop()`/UI に復活させないでください** —
+同じ「常に何かが立っていて役に立たない」状態に戻ります。電源トラブルを
+実際に切り分けたいときは `vcgencmd get_throttled` を手動で叩けば従来
+どおり確認できます (「動作確認の手順」参照)。
+
+### 26. 更新の自動適用は `git fetch` による定期チェック + `update.sh` 呼び出しで行う (常時ポーリングのデーモンにしない)
+
+以前は `main` へのマージを実機へ反映するのに、誰かが手動で SSH して
+`sudo ./update.sh` を実行するしかありませんでした。これを
+`scripts/sentinel-autoupdate.sh` + `sentinel-autoupdate.timer`
+(30 分ごと) で自動化しています。
+
+設計上の要点:
+
+- `update.sh` 自体が `git pull` を行う都合上、実際の git clone の場所を
+  知る必要があります。しかし `install.sh` がアプリ本体をコピーする先
+  (`$APP_DIR` = `/opt/sentinel`、`sentinel-autoupdate.sh` 自身もここに
+  デプロイされる) は git clone そのものではありません。そこで
+  `install.sh`/`update.sh` の両方が、パス解決した直後の `$SRC` を
+  `/var/lib/sentinel/repo-path` に書き出すようにしました。
+  `sentinel-autoupdate.sh` はこのファイルを読むだけで、自分では一切
+  パスを推測しません。**このファイルへの書き出しを省略しないでください**
+  — `sentinel-autoupdate.sh` が「どこを更新すればいいか分からず何も
+  しない」状態に戻ります。
+- 常時起動のデーモンではなく、Guardian と同じ「systemd タイマーで定期的に
+  1 回だけ実行し、何もなければ即終了する」パターンにしています。
+  `git fetch` はネットワーク越しの軽い操作なので 30 分間隔でも負荷は
+  ほぼ無視できますが、これを prunning のない `while true` ループの常駐
+  プロセスにする必要はありません (CLAUDE.md「依存を増やさない」/RAM 1GB
+  制約と同じ考え方)。
+- ローカルに未コミットの変更がある場合は何もせず終了します。
+  `update.sh` 自身の `git pull --ff-only` は untracked/変更のある
+  ワークツリーに対して失敗するだけなので、そのまま自動実行すると毎周期
+  同じ失敗ログが出続けるだけになります。人が `git status`/`git stash`
+  で解決するまで静かに待ちます (`update.sh` 自身の案内文言と同じ方針)。
+- 実際に新しいコミットがあるとき以外は `git fetch` して比較するだけで
+  終わり、`update.sh` (= `bootstrap.sh` + `install.sh` のフルサイクル、
+  `apt-get update` を含む) は呼びません。**この「fetch して比較 ->
+  差分がある時だけ `update.sh` を呼ぶ」の順序を外して毎周期無条件に
+  `update.sh` を呼ぶ実装にしないでください** — 30 分ごとに無駄な
+  `apt-get update` が走り続けるだけで、RAM 1GB・SD カードという制約に
+  逆行します。
+- `git config --global --add safe.directory` を明示的に呼んでいます。
+  このスクリプトは root で無人実行されるため、git clone の所有者が
+  別ユーザー (通常 `setup.sh` を実行した対話ユーザー) だと git の
+  「dubious ownership」ガードに引っかかり、エラーも出さないまま永久に
+  何もしなくなる可能性があります。**この行を外さないでください** —
+  信頼するパスは `/var/lib/sentinel/repo-path` 由来 (自分自身が書いた
+  ものだけ) に限定しているため、`safe.directory` を無条件に許可しても
+  外部から任意のパスを注入される経路にはなりません。
+
+### 27. 音声アナウンス (`modules/voice.py`) は mpg123 と別経路、ALSA numid=1 で音量を持つ
+
+時報・エラー通知・カメラ再起動通知・その他システムイベントを喋る機能を
+追加しました。設計上の判断は #2/#15 で確立済みのパターンをそのまま踏襲
+しています。
+
+- **TTS エンジンは espeak-ng。** Open JTalk のような高品質な日本語 TTS は
+  辞書だけで数十 MB あり、RAM 1GB・SD カードという制約 (「依存を増やさ
+  ない」) に見合いません。espeak-ng は数 MB で完結する代わりに発音は
+  機械的で、辞書を持たないため漢字を読み違えることがあります。**この
+  トレードオフを承知の上での選択です** — 発音品質を優先して Open JTalk
+  などへ差し替える場合は、SD カード容量とインストール時間への影響を
+  必ず確認してください。
+- **音楽ライブラリ (mpg123 固定、CLAUDE.md #2) とは完全に別経路です。**
+  espeak-ng は ALSA へ直接書き込むだけで、mpg123 のキュー・ライブラリ
+  管理には一切触れません。#2 の「mpg123 固定」はあくまで音楽ライブラリの
+  再生エンジンについての制約であり、この単発の短い音声アナウンスとは
+  別物です。
+- **鳴らす前に必ず曲を一時停止します。** bcm2835 の ALSA 出力は dmix
+  なしでは同時に 1 ストリームしか受け付けないため、`music.py` に
+  `bluetooth.py` の `suspend_for_bluetooth()`/`resume_from_bluetooth()`
+  と全く同じパターンで `duck_for_voice()`/`resume_from_voice()` を追加し、
+  `reason="voice"` という別タグで使っています。**この `reason` タグを
+  `"bluetooth"` と共有させないでください** — Bluetooth 接続中の一時停止
+  ("bluetooth") を voice 側が誤って再開してしまう (またはその逆) と、
+  どちらの機能が音楽を止めているのか分からなくなります。
+- **Bluetooth 接続中はアナウンス自体をスキップします。** `bluealsa-aplay`
+  が同じ ALSA デバイスを排他的に使っているため、割り込むと双方の音声が
+  壊れるだけです。ここは「ducking して待つ」のではなく完全にスキップする
+  という判断です — 音楽と違って音声アナウンスは待たせても情報が古く
+  なるだけで実害が小さいため、複雑な調停を作るより単純に諦める方を選んで
+  います。
+- **音量は ALSA numid=1 を直接操作します。** mpg123 はソフトウェアゲイン
+  (`music_volume`) を持つため ALSA ミキサーを一切操作しませんが、
+  espeak-ng はそれをバイパスするので、Bluetooth 再生 (#15) と全く同じ
+  理由でハードウェア側の音量調整が必要です。**numid=3 (`sentinel-
+  guardian.sh` の `check_audio()` が使う出力ルート選択) とは別の
+  コントロールです** — #15 で bluetooth.py がすでに踏んだのと同じ
+  混同をしないでください。
+- **カテゴリごとに独立したオン/オフを持ちます** (`voice_time_enabled`/
+  `voice_error_enabled`/`voice_camera_reboot_enabled`/`voice_other_enabled`
+  + 総元栓 `voice_enabled`)。時報だけ聞きたい、エラーだけ知りたい、と
+  いった個別の使い方を想定しているため、#18/#20 の「開始・終了は同じ
+  秒数で揃える」とは逆に、ここはあえて対応関係を持たない独立スイッチに
+  しています。
+- **時報は壁時計の分境界に揃えて判定します** (`(hour*60+minute) //
+  interval` が変化した瞬間だけ喋る)。単純に「前回から N 分経過したか」
+  というタイマーにすると、サービス再起動のたびに基準時刻がずれ、
+  「n 分ごと」のはずが実際の時計の分とは無関係な半端な時刻に鳴り続ける
+  ことになります。壁時計に揃えることで、サービスが何度再起動されても
+  常に同じ (例: 毎時 0 分・30 分) タイミングで鳴るようにしています。
+
 ## モジュール構成
 
 各モジュールは疎結合で、`core/state.py` の `MODE` を購読するだけです。
@@ -790,6 +955,12 @@ scripts/sentinel-bt-agent.sh
                     ペアリングエージェント。bt-agent (bluez-tools) の
                     NoInputNoOutput リグレッションを避けるため bluetoothctl
                     を直接駆動する (CLAUDE.md #16)
+scripts/sentinel-autoupdate.sh
+                    sentinel-autoupdate.timer (30 分ごと) から起動される。
+                    git clone の場所を install.sh/update.sh が書き出す
+                    /var/lib/sentinel/repo-path から読み、git fetch して
+                    リモートに新しいコミットがあれば update.sh を自動で
+                    実行する (CLAUDE.md #26)
 
 core/config.py      設定の唯一の保管場所。型と範囲を強制する
 core/state.py       モード状態機械。「今どのモードか」の唯一の決定者
@@ -842,6 +1013,11 @@ modules/notify.py       Discord (レート制限対応キュー)。notify_motion
 modules/maintenance.py  4 時の定時処理と再起動。emergency_reboot() は
                          camera.py の破損検知エスカレーション専用の緊急
                          再起動 (タイムラプス生成は省略、CLAUDE.md #22)
+modules/voice.py        espeak-ng 経由の音声アナウンス (時報・エラー・
+                         カメラ再起動・その他システムイベント)。mpg123 の
+                         音楽ライブラリとは別経路、鳴らす前に music.py の
+                         duck_for_voice()/resume_from_voice() で曲を一時
+                         停止し、numid=1 で音量を持つ (CLAUDE.md #27)
 
 web/routes.py           全 HTTP / WebSocket エンドポイント。latest.jpg の
                          ように他プロセスが継続的に上書きするファイルは

@@ -24,7 +24,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 
 from ..core import config
-from . import camera, music, netlog, notify
+from . import camera, music, netlog, notify, voice
 
 log = logging.getLogger("sentinel.maintenance")
 
@@ -573,6 +573,7 @@ async def run_now(*, reboot: bool | None = None) -> dict:
     day = (datetime.now() - timedelta(hours=2)).strftime("%Y-%m-%d")
     started = time.time()
     notify.system_event("定時処理を開始しました", f"対象日: {day}", level="info")
+    voice.announce("定時処理を開始します", "other")
 
     try:
         STATE["stage"] = "カメラと音楽を停止中"
@@ -589,10 +590,13 @@ async def run_now(*, reboot: bool | None = None) -> dict:
             detail, level="good" if ok else "error",
             fields=[{"name": "所要時間", "value": f"{time.time() - started:.0f} 秒",
                      "inline": True}])
+        voice.announce("定時処理が完了しました" if ok else "定時処理が失敗しました",
+                       "other" if ok else "error")
     except Exception as exc:
         log.exception("定時処理が失敗しました")
         STATE.update(last_result="例外", last_output=str(exc))
         notify.system_event("定時処理で例外が発生しました", str(exc), level="error")
+        voice.announce("定時処理で例外が発生しました", "error")
         ok, detail = False, str(exc)
     finally:
         STATE["running"] = False
@@ -600,6 +604,7 @@ async def run_now(*, reboot: bool | None = None) -> dict:
     do_reboot = config.get("reboot_after_maintenance") if reboot is None else reboot
     if do_reboot:
         notify.system_event("再起動します", level="warn")
+        voice.announce("定時処理が完了しました。Piを再起動します", "other")
         await asyncio.sleep(4)     # 通知が飛ぶのを待つ
         await asyncio.to_thread(_reboot)
     else:
@@ -631,6 +636,7 @@ async def emergency_reboot(cid: str, reason: str) -> None:
     notify.system_event(
         "カメラの破損が繰り返し解消しないため、Pi を再起動します",
         f"カメラ: {cid}\n{reason}", level="error")
+    voice.announce(f"カメラ {cid} の破損が解消しないため、Piを再起動します", "camera_reboot")
     try:
         await asyncio.to_thread(music.PLAYER.persist, force=True)
         await asyncio.to_thread(music.PLAYER.stop, terminate=True, reason="corrupt-reboot")

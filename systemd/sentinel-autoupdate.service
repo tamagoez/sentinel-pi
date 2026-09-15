@@ -1,0 +1,8 @@
+[Unit]
+Description=Sentinel auto-update - pull and apply new commits from the tracked git remote
+
+[Service]
+Type=oneshot
+ExecStart=/opt/sentinel/scripts/sentinel-autoupdate.sh
+TimeoutStartSec=1800
+SuccessExitStatus=0

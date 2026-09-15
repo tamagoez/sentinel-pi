@@ -48,6 +48,16 @@ else
          cd ~/sentinel-pi && sudo ./install.sh"
 fi
 
+# Record where this git clone lives so scripts/sentinel-autoupdate.sh (which
+# only ever runs from the *deployed* copy at $APP_DIR, not a git checkout)
+# knows where to `git pull` from later. Only when it actually is one -
+# leaving this unset is how that script recognizes "not installed from a
+# git clone" and stays a no-op instead of guessing a path.
+if [[ -d "$SRC/.git" ]]; then
+  mkdir -p /var/lib/sentinel
+  echo "$SRC" > /var/lib/sentinel/repo-path
+fi
+
 # ---------------------------------------------------------------- 1. Preflight
 c "STEP 1/9  Preflight checks"
 MISSING=()
@@ -273,6 +283,11 @@ echo "     hciuart race, and stale BlueALSA D-Bus connections after any"
 echo "     bluetoothd restart) / hostapd boot races / storage ownership /"
 echo "     service uptime / hotspot DNS / disk space / yt-dlp"
 
+install -m644 "$SRC/systemd/sentinel-autoupdate.service" /etc/systemd/system/
+install -m644 "$SRC/systemd/sentinel-autoupdate.timer" /etc/systemd/system/
+ok "Auto-update registered; checks the git remote every 30 minutes and runs"
+echo "     update.sh automatically once new commits land on it"
+
 # ---------------------------------------------------------------- 8. Main service
 c "STEP 8/9  Register Sentinel service"
 sed -e "s|^User=.*|User=$SVC_USER|" \
@@ -292,7 +307,7 @@ for stale in sentinel-firewall.service sentinel-bt-discoverable.service \
 done
 
 systemctl daemon-reload
-UNITS=(sentinel.service sentinel-guardian.timer)
+UNITS=(sentinel.service sentinel-guardian.timer sentinel-autoupdate.timer)
 [[ -n "$BA" ]] && UNITS+=(sentinel-bluealsa.service sentinel-bluealsa-aplay.service)
 command -v bluetoothctl >/dev/null && UNITS+=(sentinel-bt-agent.service)
 systemctl enable "${UNITS[@]}" >/dev/null 2>&1

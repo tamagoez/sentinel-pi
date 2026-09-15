@@ -367,6 +367,38 @@ def resume_from_bluetooth() -> None:
     PLAYER.play(PLAYER.position)
 
 
+def duck_for_voice() -> bool:
+    """voice.py が音声アナウンスを再生する直前に呼ぶ。
+
+    mpg123 は ALSA へ直接書き込んでおり (CLAUDE.md #2)、bcm2835 の出力は
+    dmix なしでは同時に 1 ストリームしか受け付けないため、曲の再生中に
+    espeak-ng|aplay を鳴らすとデバイス競合で espeak-ng 側が失敗する
+    (もしくは音が割れる)。suspend_for_bluetooth() と全く同じ理由・同じ
+    「完全に手を引いてから (reason だけ変えて) 復帰する」仕組みを
+    "voice" という別の reason で使う — "bluetooth" と衝突させないため
+    (Bluetooth 接続中は既に suspended_by="bluetooth" のはずなので、その
+    場合はここでは何もしない。voice.py 側も Bluetooth 接続中は別途
+    アナウンス自体をスキップする)。
+
+    戻り値は実際に一時停止したかどうか。呼んでいないのに
+    resume_from_voice() を呼んで再生位置を巻き戻さないよう、呼び出し元
+    (voice.py) はこの戻り値を見てから resume を呼ぶこと。"""
+    if PLAYER.suspended_by == "" and (PLAYER.proc is not None or PLAYER.playing):
+        PLAYER.persist(force=True)
+        PLAYER.stop(terminate=True, reason="voice")
+        return True
+    return False
+
+
+def resume_from_voice() -> None:
+    if PLAYER.suspended_by != "voice":
+        return
+    if MODE.mode != NORMAL or not config.get("music_enabled"):
+        PLAYER.suspended_by = ""
+        return
+    PLAYER.play(PLAYER.position)
+
+
 # ---------------------------------------------------------------- yt-dlp
 
 DOWNLOADS: list[dict] = []
