@@ -286,12 +286,25 @@ async def loop() -> None:
             continue
         try:
             entries = await asyncio.to_thread(_fetch_querylog)
+            # AdGuard Home の /control/querylog は新しい順 (降順) で返す。
+            # fresh もこれを引き継いで新しい順になる。
             fresh = _process(entries)
             if fresh:
-                await asyncio.to_thread(_append, fresh)
+                # 日次 JSONL ファイル (read_day/ticker_entries が読む側) は
+                # 昇順 (古い順) を前提にしている — web/routes.py の
+                # netlog_view() は read_day()[-limit:] で「末尾 = 直近」を
+                # 取ってから reverse() しており、maintenance.py の
+                # ticker_entries() もタイムラプスの実時刻と対応させるため
+                # 昇順を読む前提で書かれている。fresh は新しい順なので、
+                # ファイルへはその逆順 (古い順) で書く。
+                await asyncio.to_thread(_append, list(reversed(fresh)))
                 for r in fresh:
                     TODAY_COUNTS[r["service"]] += 1
-                RECENT[:0] = reversed(fresh)
+                # RECENT は逆に「新しい順」を前提にしている
+                # (routes.py の netlog_view() は RECENT[:limit] をそのまま
+                # 返す — reverse していない)。fresh は既に新しい順なので
+                # そのまま先頭へ挿入する。
+                RECENT[:0] = fresh
                 del RECENT[500:]
             STATE.update(ok=True, error="", last_poll=time.time(),
                          entries=STATE["entries"] + len(fresh))

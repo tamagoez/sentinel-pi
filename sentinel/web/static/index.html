@@ -140,6 +140,26 @@ td.num{text-align:right;font-variant-numeric:tabular-nums}
 .tl-cursor .tl-cursor-t{position:absolute;top:1px;left:3px;font-size:10px;color:var(--acc);white-space:nowrap}
 .tl-cursor.now{border-left:1px solid var(--bad)}
 .tl-cursor.now .tl-cursor-t{color:var(--bad)}
+.tl-span{position:absolute;height:16px;border-radius:4px;display:flex;align-items:center;padding:0 5px;
+  font-size:9.5px;overflow:hidden;white-space:nowrap;cursor:pointer;background:var(--p-bg);color:var(--dim);
+  box-shadow:0 0 0 1px var(--line2);transition:left .25s ease,width .25s ease}
+.tl-span.blocked{background:var(--d-border);color:var(--d-fg)}
+.tl-span.sel{box-shadow:0 0 0 2px var(--acc)}
+.tl-span.echo{box-shadow:0 0 0 2px var(--warn)}
+.tl-span:hover{filter:brightness(1.15)}
+.tl-dragband{position:absolute;top:0;bottom:0;background:rgba(120,150,255,.18);
+  border-left:1px solid var(--acc);border-right:1px solid var(--acc);pointer-events:none;z-index:4}
+.tl-drill{margin-top:10px;border-top:1px solid var(--line);padding-top:10px}
+.tl-drill-head{display:flex;align-items:center;gap:10px;margin-bottom:8px;font-size:12px;color:var(--dim)}
+.tl-drill-cols{display:flex;gap:8px;overflow-x:auto;padding-bottom:4px}
+.tl-drill-col{flex:none;width:150px;background:var(--bg-deep);border-radius:8px;padding:6px;max-height:420px;overflow-y:auto}
+.tl-drill-col h5{margin:0 0 6px;font-size:10.5px;color:var(--faint);font-weight:600;text-align:center}
+.tl-drill-item{display:flex;flex-direction:column;gap:2px;margin-bottom:6px;font-size:10px}
+.tl-drill-item img{width:100%;border-radius:5px;cursor:pointer;display:block;background:var(--bg-deep)}
+.tl-drill-item .t{color:var(--faint);font-size:9px}
+.tl-drill-item .net{background:var(--p-bg);border-radius:4px;padding:3px 5px;color:var(--dim)}
+.tl-drill-item .net.blocked{background:var(--d-border);color:var(--d-fg)}
+.tl-drill-empty{color:var(--faint);font-size:10px;text-align:center;padding:10px 0}
 @media (max-width:900px){
   .recall-wrap{flex-direction:column}
   .recall-preview{width:100%}
@@ -277,9 +297,9 @@ try{
     <div class="row" style="margin-bottom:12px">
       <select id="ev-day" style="width:auto" onchange="loadEvents()"></select>
       <select id="ev-view" style="width:auto" onchange="renderEvents()">
+        <option value="timeline" selected>タイムライン表示 (共有時間軸 + プレビュー)</option>
         <option value="grid">グリッド表示</option>
         <option value="camera">カメラ別表示</option>
-        <option value="timeline">タイムライン表示 (共有時間軸 + プレビュー)</option>
       </select>
       <button onclick="loadEvents()">更新</button>
       <button onclick="deleteEventsDay()">この日のイベントを消去</button>
@@ -1198,7 +1218,7 @@ async function addDownload(){
 }
 
 /* ---------------- events ---------------- */
-let EV_ITEMS = [], EV_DAY = "", EV_NET = [];
+let EV_ITEMS = [], EV_DAY = "", EV_NET = [], EV_NET_DAY = "";
 function camName(id){ return ((DATA.cameras||[]).find(c => c.id === id) || {}).name || id; }
 async function loadEvents(){
   try{
@@ -1208,21 +1228,25 @@ async function loadEvents(){
       $("#ev-day").innerHTML = r.days.map(d => `<option ${d===r.day?"selected":""}>${d}</option>`).join("")
         || `<option>${r.day}</option>`;
     EV_ITEMS = r.items; EV_DAY = r.day;
-    REC_SEL = null; TL_SEL_T = null; // 日付が変わったら選択・カーソルは破棄する
+    REC_SEL = null; TL_SEL_T = null; TL_RANGE_SEL = null; // 日付が変わったら選択・カーソル・範囲選択は破棄する
     $("#ev-sum").textContent = `${r.items.length} 件`;
-    EV_NET = [];
-    if($("#ev-view").value === "timeline"){
-      // タイムライン表示のときだけ、その日の URL アクセス記録も取得して重ねる
-      // (本体の R/W・通信は増やしたくないため、必要なときだけ取りに行く)
-      try{ const n = await api(`/api/netlog?day=${EV_DAY}&limit=2000`); EV_NET = n.records || []; }catch(e){}
-    }
     renderEvents();
   }catch(e){}
 }
-function renderEvents(){
+// タイムライン表示は既定表示になったため、ほぼ毎回 URL アクセス記録も
+// 必要になる。ただし「グリッド/カメラ別表示のときは取りに行かない」という
+// 元の節約方針は維持し、実際にタイムラインを描く直前 (かつ日付が変わって
+// いてまだ取得していないとき) にだけ取得する。
+async function renderEvents(){
   const view = $("#ev-view").value;
   if(view === "camera") return renderEventsByCamera();
-  if(view === "timeline") return renderEventsRecall();
+  if(view === "timeline"){
+    if(EV_NET_DAY !== EV_DAY){
+      try{ const n = await api(`/api/netlog?day=${EV_DAY}&limit=2000`); EV_NET = n.records || []; EV_NET_DAY = EV_DAY; }
+      catch(e){ EV_NET = []; }
+    }
+    return renderEventsRecall();
+  }
   return renderEventsGrid();
 }
 function renderEventsGrid(){
@@ -1256,16 +1280,63 @@ function renderEventsByCamera(){
 let REC_COLS = [], REC_SEL = null;
 let TL_SCALE = null, TL_REGISTRY = new Map();
 let TL_GAP_ON = false, TL_GAP_MIN = 15, TL_PXMIN = 4, TL_SEL_T = null;
+let TL_NET_SPAN_MIN = 5;   // 同じサービスへのアクセスをこの分数以内の間隔ならまとめて「1期間」にする
+let TL_RANGE_SEL = null;   // ドラッグで選択した範囲 {t0,t1}。あれば分割表示を出す
 const TL_GAP_PX = 40;       // 折り畳んだ空白区間の固定幅 (px)
 const TL_CLUSTER_PX = 26;   // これより近い項目は 1 つのクラスタにまとめる
+const TL_ROW_H = 19;        // URL アクセス行 (期間バー) 1 行の高さ (px)
+const TL_ROW_PAD = 8;       // 行の上下の余白 (px)
+const TL_IMG_ROW_H = 52;    // カメラ (サムネイル) 行の高さ。従来と同じ
+
+// URL アクセス記録 (時刻順) を、「同じサービスへ TL_NET_SPAN_MIN 分以内の
+// 間隔でアクセスが続いていた区間」ごとにまとめ、開始・終了を持つ「期間」
+// (span) の配列にする。同じ瞬間に複数のサービスへアクセスしていることも
+// 普通にあるため、サービスごとに独立して「今開いている期間」を追いかける
+// (openSpans) — 単純に「直前の記録と同じサービスか」だけを見ると、間に
+// 別サービスの記録が挟まった時点で誤って期間を分断してしまうため。
+function buildNetSpans(items, spanMin){
+  const gapSec = Math.max(1, spanMin) * 60;
+  const open = new Map();   // service -> span (まだ延長されうる直近の期間)
+  const spans = [];
+  for(const it of items){
+    const service = it.rec.service || "";
+    const cur = open.get(service);
+    if(cur && it.t - cur.t1 <= gapSec){
+      cur.t1 = it.t;
+      cur.items.push(it);
+      if(it.rec.blocked) cur.blocked = true;
+    }else{
+      const span = {service, t0: it.t, t1: it.t, items: [it], blocked: !!it.rec.blocked};
+      open.set(service, span);
+      spans.push(span);
+    }
+  }
+  return spans.sort((a, b) => a.t0 - b.t0);
+}
+
+// 期間 (span) を、時間的に重ならないように「行」へ詰めていく (ガントチャート
+// と同じ考え方の単純な区間スケジューリング)。開始時刻順に見て、既存の行の
+// うち直前の終了時刻がこの開始時刻以前のものがあればそこへ、無ければ新しい
+// 行を作る。これにより同時期に複数サービスへアクセスしていた場合だけ自然に
+// 複数行へ分かれ、そうでなければ 1 行に収まる。
+function packNetRows(spans){
+  const rowEnds = [];
+  for(const s of spans){
+    let row = rowEnds.findIndex(end => end <= s.t0);
+    if(row === -1){ row = rowEnds.length; rowEnds.push(0); }
+    s.row = row;
+    rowEnds[row] = s.t1;
+  }
+  return rowEnds.length;
+}
 
 // EV_ITEMS / EV_NET (loadEvents が取得済み) を、トラック配列
-// [{key,title,kind,items:[{t,...}]}] に正規化するだけの処理。
+// [{key,title,kind,items:[{t,...}],heightPx}] に正規化するだけの処理。
 function buildTlTracks(){
   const day = EV_DAY || new Date().toISOString().slice(0,10);
   const camIds = [...new Set(EV_ITEMS.map(i => i.camera))].sort();
   const tracks = camIds.map(cid => ({
-    key: "cam__" + cid, title: camName(cid), kind: "img",
+    key: "cam__" + cid, title: camName(cid), kind: "img", heightPx: TL_IMG_ROW_H,
     items: EV_ITEMS.filter(i => i.camera === cid).sort((a, b) => a.at - b.at)
       .map(i => ({t: i.at, item: i})),
   }));
@@ -1276,7 +1347,17 @@ function buildTlTracks(){
     if(!isFinite(t)) return null;
     return {t, hms, rec: r};
   }).filter(Boolean).sort((a, b) => a.t - b.t);
-  tracks.push({key: "net", title: "URL アクセス", kind: "net", items: netItems});
+  const netSpans = buildNetSpans(netItems, TL_NET_SPAN_MIN);
+  const rows = Math.max(1, packNetRows(netSpans));
+  // 個々の記録 (netItems) は空白区間の判定・他トラックとの時刻相互参照に
+  // 引き続き使うため、期間 (spans) とは別に保持しておく。
+  const itemToSpan = new Map();
+  for(const s of netSpans) for(const it of s.items) itemToSpan.set(it, s);
+  tracks.push({
+    key: "net", title: "URL アクセス", kind: "net",
+    items: netItems, spans: netSpans, itemToSpan,
+    heightPx: rows * TL_ROW_H + TL_ROW_PAD,
+  });
   return tracks;
 }
 
@@ -1362,9 +1443,13 @@ function fmtHM(t){
   return `${String(d.getHours()).padStart(2,"0")}:${String(d.getMinutes()).padStart(2,"0")}`;
 }
 function fmtDur(sec){
+  // 1分未満を常に「1分」に丸めると (0分ばかりの表示になり) 実際の長さが
+  // 区別できなくなる。core/notify.py の _fmt_minsec() と同じ考え方で、
+  // 60秒未満は秒表示にする (CLAUDE.md #20 参照)。
   sec = Math.round(sec);
+  if(sec < 60) return `${Math.max(1, sec)}秒`;
   const h = Math.floor(sec / 3600), m = Math.floor(sec % 3600 / 60);
-  return h ? `${h}時間${m}分` : `${Math.max(1, m)}分`;
+  return h ? `${h}時間${m}分` : `${m}分`;
 }
 
 function renderTlAxis(scale){
@@ -1396,24 +1481,47 @@ function clusterTlItems(items, scale){
 }
 
 function renderTlTrack(track, scale){
+  if(track.kind === "net") return renderTlNetTrack(track, scale);
   const parts = [];
   for(const s of scale.segs){
     if(s.type === "gap") parts.push(`<div class="tl-gapmark" style="left:${s.x0}px;width:${s.w}px"></div>`);
   }
   clusterTlItems(track.items, scale).forEach((c, ci) => {
     const id = `${track.key}__${ci}`;
-    TL_REGISTRY.set(id, {track, cluster: c});
+    TL_REGISTRY.set(id, {kind: "cluster", track, cluster: c});
     const first = c.items[0], n = c.items.length;
     const left = Math.max(0, c.x - 20);
     const selClass = REC_SEL && REC_SEL.id === id ? " sel" : "";
     const ttl = `${new Date(first.t*1000).toLocaleTimeString("ja-JP")}${n>1?` 他 ${n-1} 件`:""}`;
-    if(track.kind === "img"){
-      parts.push(`<div class="tl-item${n>1?" cluster":""}${selClass}" data-id="${esc(id)}" style="left:${left}px"${n>1?` data-n="${n}"`:""} onclick="selectTlItem('${esc(id)}')" title="${esc(ttl)}">
-        <img src="${first.item.url}" loading="lazy"></div>`);
-    }else{
-      const blocked = c.items.some(it => it.rec.blocked);
-      parts.push(`<div class="tl-item net${blocked?" blocked":""}${n>1?" cluster":""}${selClass}" data-id="${esc(id)}" style="left:${left}px"${n>1?` data-n="${n}"`:""} onclick="selectTlItem('${esc(id)}')" title="${esc(ttl)}">${esc((first.rec.service||"").slice(0,10))}</div>`);
-    }
+    parts.push(`<div class="tl-item${n>1?" cluster":""}${selClass}" data-id="${esc(id)}" style="left:${left}px"${n>1?` data-n="${n}"`:""} onclick="selectTlItem('${esc(id)}')" title="${esc(ttl)}">
+      <img src="${first.item.url}" loading="lazy"></div>`);
+  });
+  return parts.join("");
+}
+
+// URL アクセス行は「点」ではなく「期間」(buildNetSpans が作った span) を
+// 幅のある横棒として描く。複数行に詰められている (packNetRows) ため、
+// 同時期に別サービスへアクセスしていても重ならず、1 行に押し込められて
+// 判読できなくなることがない (CLAUDE.md 追記予定の landmine 参照)。
+function renderTlNetTrack(track, scale){
+  const parts = [];
+  for(const s of scale.segs){
+    if(s.type === "gap") parts.push(`<div class="tl-gapmark" style="left:${s.x0}px;width:${s.w}px"></div>`);
+  }
+  track.spans.forEach((span, si) => {
+    const id = `${track.key}__${si}`;
+    TL_REGISTRY.set(id, {kind: "span", track, span});
+    const x0 = scale.toX(span.t0), x1 = scale.toX(span.t1);
+    const left = x0;
+    const width = Math.max(14, x1 - x0);
+    const top = TL_ROW_PAD / 2 + span.row * TL_ROW_H;
+    const selClass = REC_SEL && REC_SEL.id === id ? " sel" : "";
+    const dur = span.t1 > span.t0 ? fmtDur(span.t1 - span.t0) : "瞬間";
+    const ttl = `${esc(span.service)} · ${new Date(span.t0*1000).toLocaleTimeString("ja-JP")}〜`
+      + `${new Date(span.t1*1000).toLocaleTimeString("ja-JP")} (${dur}, ${span.items.length}件)`;
+    parts.push(`<div class="tl-span${span.blocked?" blocked":""}${selClass}" data-id="${esc(id)}" `
+      + `style="left:${left}px;width:${width}px;top:${top}px" onclick="selectTlItem('${esc(id)}')" `
+      + `title="${esc(ttl)}">${esc((span.service||"").slice(0,14))}</div>`);
   });
   return parts.join("");
 }
@@ -1428,8 +1536,8 @@ function renderEventsRecall(){
   TL_SCALE = buildTlScale(REC_COLS);
   const scale = TL_SCALE;
 
-  const labelsHtml = REC_COLS.map(tr => `<div class="tl-label">${esc(tr.title)} <span class="faint">${tr.items.length}</span></div>`).join("");
-  const tracksHtml = REC_COLS.map(tr => `<div class="tl-track" style="width:${scale.totalW}px" data-key="${esc(tr.key)}">${renderTlTrack(tr, scale)}</div>`).join("");
+  const labelsHtml = REC_COLS.map(tr => `<div class="tl-label" style="height:${tr.heightPx}px">${esc(tr.title)} <span class="faint">${tr.items.length}</span></div>`).join("");
+  const tracksHtml = REC_COLS.map(tr => `<div class="tl-track" style="width:${scale.totalW}px;height:${tr.heightPx}px" data-key="${esc(tr.key)}">${renderTlTrack(tr, scale)}</div>`).join("");
 
   const today = new Date().toISOString().slice(0,10);
   const nowX = (EV_DAY || today) === today ? scale.toX(Date.now()/1000) : null;
@@ -1440,7 +1548,9 @@ function renderEventsRecall(){
         <div class="tl-ctrl">
           <label><input type="checkbox" style="width:auto" ${TL_GAP_ON?"checked":""} onchange="tlToggleGap(this.checked)"> 空白区間を省略</label>
           <label>閾値 <input type="number" min="1" max="720" value="${TL_GAP_MIN}" onchange="tlSetGapMin(this.value)"> 分</label>
+          <label>URL期間統合 <input type="number" min="1" max="120" value="${TL_NET_SPAN_MIN}" onchange="tlSetNetSpanMin(this.value)"> 分</label>
           <span class="spacer"></span>
+          <span class="faint">ホイール:拡大縮小 / Shift+ホイール:移動 / ドラッグ:範囲を分割表示</span>
           <button class="zoom-btn" onclick="tlZoom(0.6)">縮小 −</button>
           <button class="zoom-btn" onclick="tlZoom(1.6666)">拡大 +</button>
         </div>
@@ -1452,13 +1562,16 @@ function renderEventsRecall(){
             ${nowX!=null?`<div class="tl-cursor now" style="left:${nowX}px"><span class="tl-cursor-t">現在</span></div>`:""}
           </div>
         </div>
+        <div id="tl-drill-area"></div>
       </div>
       <div class="recall-preview" id="recall-preview">
-        <span class="faint">タイムライン上の項目、または軸をクリックすると、ここに表示されます。</span>
+        <span class="faint">タイムライン上の項目、または軸をクリックすると、ここに表示されます。ドラッグすると範囲を分割表示します。</span>
       </div>
     </div>`;
 
   tlApplySelection();
+  bindTlInteractions();
+  if(TL_RANGE_SEL) renderTlDrilldown(); else clearTlDrilldown();
 }
 
 // クリック/選択のたびに全体を再描画すると重く、横スクロール位置も失われる
@@ -1466,10 +1579,10 @@ function renderEventsRecall(){
 // (トグル・ズームなど「軸そのもの」が変わる操作だけ renderEventsRecall で
 // 再構築する)。
 function tlApplySelection(){
-  $$(".tl-item.sel").forEach(el => el.classList.remove("sel"));
-  $$(".tl-item.echo").forEach(el => el.classList.remove("echo"));
+  $$(".tl-item.sel, .tl-span.sel").forEach(el => el.classList.remove("sel"));
+  $$(".tl-item.echo, .tl-span.echo").forEach(el => el.classList.remove("echo"));
   if(REC_SEL){
-    const el = document.querySelector(`.tl-item[data-id="${CSS.escape(REC_SEL.id)}"]`);
+    const el = document.querySelector(`[data-id="${CSS.escape(REC_SEL.id)}"]`);
     if(el) el.classList.add("sel");
   }
   const scroll = $("#tl-scroll");
@@ -1498,8 +1611,10 @@ function tlApplySelection(){
     }
     if(!best || bestD > tolSec) continue;
     for(const [id, reg] of TL_REGISTRY){
-      if(reg.track.key === tr.key && reg.cluster.items.includes(best)){
-        const el = document.querySelector(`.tl-item[data-id="${CSS.escape(id)}"]`);
+      if(reg.track.key !== tr.key) continue;
+      const items = reg.kind === "span" ? reg.span.items : reg.cluster.items;
+      if(items.includes(best)){
+        const el = document.querySelector(`[data-id="${CSS.escape(id)}"]`);
         if(el && !el.classList.contains("sel")) el.classList.add("echo");
         break;
       }
@@ -1511,43 +1626,48 @@ function selectTlItem(id){
   const reg = TL_REGISTRY.get(id);
   if(!reg) return;
   REC_SEL = {id};
+  if(reg.kind === "span") return selectTlSpan(reg);
   TL_SEL_T = reg.cluster.items[0].t;
   tlApplySelection();
   const prev = $("#recall-preview");
   if(!prev) return;
   const items = reg.cluster.items, n = items.length, first = items[0];
-  if(reg.track.kind === "img"){
-    if(n === 1){
-      const i = first.item;
-      prev.innerHTML = `
-        <img src="${i.url}" onclick="$('#ov-img').src='${i.url}';$('#overlay').classList.add('on')">
-        <div style="margin-top:10px;font-size:14px"><b>${esc(camName(i.camera))}</b></div>
-        <div class="faint" style="font-size:12px;margin-top:2px">${new Date(first.t*1000).toLocaleString("ja-JP")}</div>
-        <div class="faint" style="font-size:11px;margin-top:6px;word-break:break-all">${esc(i.file)}</div>`;
-    }else{
-      prev.innerHTML = `
-        <div style="font-size:13px"><b>${esc(camName(first.item.camera))}</b> · ${n} 件が近接</div>
-        <div class="faint" style="font-size:11px;margin-top:2px">${new Date(first.t*1000).toLocaleTimeString("ja-JP")} 〜 ${new Date(items[n-1].t*1000).toLocaleTimeString("ja-JP")}</div>
-        <div class="cluster-list">${items.map(it => `<img src="${it.item.url}" loading="lazy" onclick="$('#ov-img').src='${it.item.url}';$('#overlay').classList.add('on')" title="${esc(new Date(it.t*1000).toLocaleTimeString('ja-JP'))}">`).join("")}</div>`;
-    }
+  if(n === 1){
+    const i = first.item;
+    prev.innerHTML = `
+      <img src="${i.url}" onclick="$('#ov-img').src='${i.url}';$('#overlay').classList.add('on')">
+      <div style="margin-top:10px;font-size:14px"><b>${esc(camName(i.camera))}</b></div>
+      <div class="faint" style="font-size:12px;margin-top:2px">${new Date(first.t*1000).toLocaleString("ja-JP")}</div>
+      <div class="faint" style="font-size:11px;margin-top:6px;word-break:break-all">${esc(i.file)}</div>`;
   }else{
-    if(n === 1){
-      const r = first.rec;
-      prev.innerHTML = `
-        <div style="font-size:16px"><b>${esc(r.service)}</b>${r.blocked ? ' <span style="color:var(--bad)">(ブロック)</span>' : ""}</div>
-        <div class="faint" style="font-size:12px;margin-top:6px;word-break:break-all">${esc(r.domain || "")}</div>
-        <div class="faint" style="font-size:12px;margin-top:10px">${new Date(first.t*1000).toLocaleString("ja-JP")}</div>`;
-    }else{
-      prev.innerHTML = `
-        <div style="font-size:13px"><b>URL アクセス</b> · ${n} 件が近接</div>
-        <div style="margin-top:8px;display:flex;flex-direction:column;gap:5px">${items.map(it =>
-          `<div class="faint" style="font-size:11.5px">${esc(new Date(it.t*1000).toLocaleTimeString("ja-JP"))} — ${esc(it.rec.service)}${it.rec.blocked?" ⨯":""}</div>`).join("")}</div>`;
-    }
+    prev.innerHTML = `
+      <div style="font-size:13px"><b>${esc(camName(first.item.camera))}</b> · ${n} 件が近接</div>
+      <div class="faint" style="font-size:11px;margin-top:2px">${new Date(first.t*1000).toLocaleTimeString("ja-JP")} 〜 ${new Date(items[n-1].t*1000).toLocaleTimeString("ja-JP")}</div>
+      <div class="cluster-list">${items.map(it => `<img src="${it.item.url}" loading="lazy" onclick="$('#ov-img').src='${it.item.url}';$('#overlay').classList.add('on')" title="${esc(new Date(it.t*1000).toLocaleTimeString('ja-JP'))}">`).join("")}</div>`;
   }
 }
 
+// URL アクセスの「期間」(span) が選択されたときのプレビュー。点ではなく
+// 開始〜終了の期間そのものを主役として見せる (CLAUDE.md 追記予定の
+// landmine 「タイムラインの URL は期間で表示する」参照)。
+function selectTlSpan(reg){
+  const span = reg.span, items = span.items, n = items.length;
+  TL_SEL_T = span.t0;
+  tlApplySelection();
+  const prev = $("#recall-preview");
+  if(!prev) return;
+  const dur = span.t1 > span.t0 ? fmtDur(span.t1 - span.t0) : "瞬間";
+  prev.innerHTML = `
+    <div style="font-size:16px"><b>${esc(span.service)}</b>${span.blocked ? ' <span style="color:var(--bad)">(ブロックあり)</span>' : ""}</div>
+    <div class="faint" style="font-size:12px;margin-top:6px">${new Date(span.t0*1000).toLocaleString("ja-JP")} 〜 ${new Date(span.t1*1000).toLocaleTimeString("ja-JP")}</div>
+    <div class="faint" style="font-size:12px;margin-top:2px">期間: ${dur} · ${n} 件のアクセス</div>
+    <div style="margin-top:8px;display:flex;flex-direction:column;gap:5px;max-height:280px;overflow:auto">${items.map(it =>
+      `<div class="faint" style="font-size:11.5px">${esc(new Date(it.t*1000).toLocaleTimeString("ja-JP"))} — ${esc(it.rec.domain || it.rec.service)}${it.rec.blocked?" ⨯":""}</div>`).join("")}</div>`;
+}
+
 function tlScrollClick(e){
-  if(e.target.closest(".tl-item")) return;
+  if(TL_SUPPRESS_CLICK){ TL_SUPPRESS_CLICK = false; return; }   // 直前のドラッグ範囲選択の click を無視
+  if(e.target.closest(".tl-item, .tl-span")) return;
   const scroll = $("#tl-scroll");
   if(!scroll || !TL_SCALE) return;
   const rect = scroll.getBoundingClientRect();
@@ -1573,7 +1693,135 @@ function tlRerenderKeepingCenterTime(){
 }
 function tlToggleGap(checked){ TL_GAP_ON = !!checked; tlRerenderKeepingCenterTime(); }
 function tlSetGapMin(v){ const n = parseInt(v, 10); if(isFinite(n) && n > 0) TL_GAP_MIN = n; tlRerenderKeepingCenterTime(); }
+function tlSetNetSpanMin(v){ const n = parseInt(v, 10); if(isFinite(n) && n > 0) TL_NET_SPAN_MIN = n; tlRerenderKeepingCenterTime(); }
 function tlZoom(factor){ TL_PXMIN = Math.min(60, Math.max(0.5, TL_PXMIN * factor)); tlRerenderKeepingCenterTime(); }
+
+// ---- マウスホイール (拡大縮小 / Shift+移動) とドラッグ範囲選択 ----
+// #tl-scroll は renderEventsRecall() のたびに innerHTML ごと作り直される
+// ため、リスナーは毎回の描画後にここで付け直す (bindTlInteractions は
+// renderEventsRecall() の末尾から呼ぶ)。
+let TL_DRAG = null;          // {x0, x1, moved} ドラッグ中の状態
+let TL_SUPPRESS_CLICK = false;
+function bindTlInteractions(){
+  const scroll = $("#tl-scroll");
+  if(!scroll) return;
+  scroll.addEventListener("wheel", tlHandleWheel, {passive: false});
+  scroll.addEventListener("mousedown", tlMouseDown);
+}
+function tlHandleWheel(e){
+  if(!TL_SCALE) return;
+  const scroll = $("#tl-scroll");
+  if(!scroll) return;
+  e.preventDefault();
+  if(e.shiftKey){
+    // Shift + ホイール = 時間軸を横に移動 (トラックパッドの横スクロールも
+    // deltaX に載ってくるので、縦ホイールしか無いマウスと両対応させる)。
+    scroll.scrollLeft += (Math.abs(e.deltaX) > Math.abs(e.deltaY) ? e.deltaX : e.deltaY);
+    return;
+  }
+  // カーソル位置の時刻を求め、拡大縮小後もその時刻が同じ画面位置に留まる
+  // ようスクロール位置を復元する (地図アプリのズームと同じ挙動)。
+  const rect = scroll.getBoundingClientRect();
+  const mouseXInViewport = e.clientX - rect.left;
+  const cursorT = TL_SCALE.xToT(mouseXInViewport + scroll.scrollLeft);
+  const factor = e.deltaY < 0 ? 1.18 : (1 / 1.18);
+  TL_PXMIN = Math.min(60, Math.max(0.3, TL_PXMIN * factor));
+  renderEventsRecall();
+  const scroll2 = $("#tl-scroll");
+  if(scroll2 && TL_SCALE) scroll2.scrollLeft = Math.max(0, TL_SCALE.toX(cursorT) - mouseXInViewport);
+}
+function tlMouseDown(e){
+  if(e.button !== 0 || e.shiftKey) return;      // 左クリックのみ。Shift はパン優先
+  if(e.target.closest(".tl-item, .tl-span")) return;
+  const scroll = $("#tl-scroll");
+  if(!scroll || !TL_SCALE) return;
+  const rect = scroll.getBoundingClientRect();
+  const x = e.clientX - rect.left + scroll.scrollLeft;
+  TL_DRAG = {x0: x, x1: x, moved: false};
+  document.addEventListener("mousemove", tlMouseMove);
+  document.addEventListener("mouseup", tlMouseUp);
+  e.preventDefault();   // ドラッグ中にテキスト選択が始まるのを防ぐ
+}
+function tlMouseMove(e){
+  if(!TL_DRAG) return;
+  const scroll = $("#tl-scroll");
+  if(!scroll) return;
+  const rect = scroll.getBoundingClientRect();
+  const x = e.clientX - rect.left + scroll.scrollLeft;
+  if(Math.abs(x - TL_DRAG.x0) > 3) TL_DRAG.moved = true;
+  TL_DRAG.x1 = x;
+  let band = document.getElementById("tl-dragband");
+  if(!band){
+    band = document.createElement("div");
+    band.id = "tl-dragband"; band.className = "tl-dragband";
+    scroll.appendChild(band);
+  }
+  const x0 = Math.min(TL_DRAG.x0, TL_DRAG.x1), x1 = Math.max(TL_DRAG.x0, TL_DRAG.x1);
+  band.style.left = x0 + "px"; band.style.width = Math.max(1, x1 - x0) + "px";
+}
+function tlMouseUp(){
+  document.removeEventListener("mousemove", tlMouseMove);
+  document.removeEventListener("mouseup", tlMouseUp);
+  const drag = TL_DRAG; TL_DRAG = null;
+  const band = document.getElementById("tl-dragband");
+  if(band) band.remove();
+  if(!drag || !TL_SCALE) return;
+  if(!drag.moved){ return; }      // 動きがほぼ無ければクリック扱い (tlScrollClick に任せる)
+  TL_SUPPRESS_CLICK = true;       // 直後に発火する click イベントでカーソルを打たせない
+  const x0 = Math.min(drag.x0, drag.x1), x1 = Math.max(drag.x0, drag.x1);
+  if(x1 - x0 < 4) return;
+  const t0 = TL_SCALE.xToT(x0), t1 = TL_SCALE.xToT(x1);
+  if(t1 - t0 < 3) return;
+  TL_RANGE_SEL = {t0, t1};
+  renderTlDrilldown();
+}
+
+// ---- ドラッグで選んだ範囲を、横に並んだ区画へ分割して表示する ----
+const TL_DRILL_SEGMENTS = 6;   // 分割数。多すぎても 1 区画あたりが狭くなるだけなので固定にしている
+function clearTlDrilldown(){
+  TL_RANGE_SEL = null;
+  const area = $("#tl-drill-area");
+  if(area) area.innerHTML = "";
+}
+function renderTlDrilldown(){
+  const area = $("#tl-drill-area");
+  if(!area || !TL_RANGE_SEL) return;
+  const {t0, t1} = TL_RANGE_SEL;
+  const span = Math.max(1, t1 - t0);
+  const segN = TL_DRILL_SEGMENTS;
+  const segDur = span / segN;
+  const cols = [];
+  for(let i = 0; i < segN; i++){
+    const s0 = t0 + i * segDur, s1 = t0 + (i + 1) * segDur;
+    const entries = [];
+    for(const i2 of EV_ITEMS){ if(i2.at >= s0 && i2.at < s1) entries.push({t: i2.at, kind: "img", item: i2}); }
+    for(const it of (REC_COLS.find(tr => tr.key === "net") || {items: []}).items){
+      if(it.t >= s0 && it.t < s1) entries.push({t: it.t, kind: "net", rec: it.rec});
+    }
+    entries.sort((a, b) => a.t - b.t);
+    cols.push({s0, s1, entries});
+  }
+  const colsHtml = cols.map(c => `
+    <div class="tl-drill-col">
+      <h5>${fmtHM(c.s0)} 〜 ${fmtHM(c.s1)}</h5>
+      ${c.entries.length ? c.entries.map(en => en.kind === "img"
+        ? `<div class="tl-drill-item"><img src="${en.item.url}" loading="lazy" onclick="$('#ov-img').src='${en.item.url}';$('#overlay').classList.add('on')">
+             <span class="t">${esc(camName(en.item.camera))} ${new Date(en.t*1000).toLocaleTimeString("ja-JP")}</span></div>`
+        : `<div class="tl-drill-item"><div class="net${en.rec.blocked?" blocked":""}">${esc(en.rec.service)}${en.rec.blocked?" ⨯":""}</div>
+             <span class="t">${new Date(en.t*1000).toLocaleTimeString("ja-JP")}</span></div>`
+      ).join("") : `<div class="tl-drill-empty">記録なし</div>`}
+    </div>`).join("");
+  area.innerHTML = `
+    <div class="tl-drill">
+      <div class="tl-drill-head">
+        <b>範囲の分割表示:</b> ${new Date(t0*1000).toLocaleString("ja-JP")} 〜 ${new Date(t1*1000).toLocaleTimeString("ja-JP")}
+        (${fmtDur(span)} を ${segN} 分割)
+        <span class="spacer"></span>
+        <button class="zoom-btn" onclick="clearTlDrilldown()">閉じる ×</button>
+      </div>
+      <div class="tl-drill-cols">${colsHtml}</div>
+    </div>`;
+}
 async function deleteEventsDay(){
   const day = EV_DAY || $("#ev-day").value;
   if(!day){ toast("日付を選んでください", true); return; }
