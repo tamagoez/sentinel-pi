@@ -1414,6 +1414,20 @@ Obsidian 内でのリアルタイム差分マージはしない)、同じノー�
   bind 由来でなければ umount (リトライ + `umount -l`) してから bind し
   直します。**このチェックを外して無条件に `mount --bind` を重ねる実装に
   戻さないでください** — 同じ二重マウントに戻ります。
+
+  さらに、これらの障害が実機で実際に重なって起きた際、利用者が手作業で
+  切り分けるのは難しいと判断し、`scripts/sentinel-fix-syncthing-mount.sh`
+  を新設しました。`install.sh` の STEP 4 冒頭 (`sentinel-fix-storage-owner.sh`
+  より前) で毎回呼ばれ、(1) `$STORAGE` 自体が古いマウントオプションの
+  まま (`mount -a` は既にマウント済みのファイルシステムを直さないため、
+  fstab を直しただけでは効きません)、(2) 同じデバイスがどこか別の場所にも
+  二重マウントされている、(3) `$ST_DEFAULT` が bind ではなく生のデバイスに
+  直接奪われている、の 3 つを条件分岐で自動修復します。自動で直せなかった
+  項目は無言で諦めず、その場でコピペ実行できる手動コマンドとしてまとめて
+  表示します。冪等 (問題が無ければ何もせず即終了) なので、`update.sh` の
+  再実行だけで毎回このチェックが走ります。**この自動修復スクリプトの呼び
+  出しを install.sh から外さないでください** — 外すと、次にこの種の障害が
+  起きたとき利用者が再び手作業での切り分けを強いられます。
 - **`install.sh`/Guardian の両方が、このバインドマウントを device+inode
   比較で検証しています** (`stat -c '%d:%i'` が `$STORAGE/syncthing` と
   `/mnt/dietpi_userdata/syncthing` とで一致するかどうか)。`findmnt` の
@@ -1489,6 +1503,16 @@ scripts/sentinel-fix-storage-owner.sh
                     外部ストレージへの書き込み権限を確認し、必要なら
                     fstab のマウントオプションか chown で直す (install.sh
                     と Guardian の両方から呼ばれる)
+scripts/sentinel-fix-syncthing-mount.sh
+                    $STORAGE 自体が古いマウントオプションのまま (mount -a
+                    は既にマウント済みのファイルシステムを直さない)・同じ
+                    デバイスが二重にマウントされている・Syncthing の
+                    バインド先が生のデバイスに直接奪われている、の 3 つを
+                    条件分岐で自動修復する。install.sh の STEP 4 冒頭
+                    (sentinel-fix-storage-owner.sh より前) で毎回呼ばれる
+                    ため、update.sh の再実行だけで反映される。自動で直せな
+                    かった項目はコピペ用の手動コマンドとしてまとめて表示
+                    する (CLAUDE.md #40)
 scripts/sentinel-adguard-8083.sh
                     AdGuard Home の :8083 への直接アクセスを一時的に
                     有効化 / 恒久的に無効化する (人が手動で実行する)

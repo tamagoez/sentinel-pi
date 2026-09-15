@@ -175,6 +175,13 @@ ok "Python environment ready"
 
 # ---------------------------------------------------------------- 4. Data
 c "STEP 4/10  Prepare data directory"
+# Repair a stale/duplicate $STORAGE mount before trusting `mountpoint -q`
+# below - a mount can appear present while still carrying wrong options
+# (mount -a does not fix an already-mounted filesystem) or while the same
+# device is also mounted a second time elsewhere (CLAUDE.md #40). Always
+# safe to run: a clean machine exits immediately without touching anything.
+"$SRC/scripts/sentinel-fix-syncthing-mount.sh" "$SVC_USER" || true
+
 if [[ -d "$STORAGE" ]] && mountpoint -q "$STORAGE"; then
   DATA="$STORAGE/sentinel"
   ok "Using external storage"
