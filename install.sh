@@ -59,7 +59,7 @@ if [[ -d "$SRC/.git" ]]; then
 fi
 
 # ---------------------------------------------------------------- 1. Preflight
-c "STEP 1/9  Preflight checks"
+c "STEP 1/10  Preflight checks"
 MISSING=()
 for bin in python3 ffmpeg mpg123 v4l2-ctl; do
   command -v "$bin" >/dev/null || MISSING+=("$bin")
@@ -99,7 +99,7 @@ python3 -c 'import cv2' 2>/dev/null && ok "OpenCV importable" \
   || die "python3-opencv missing (apt install python3-opencv)."
 
 # ---------------------------------------------------------------- 2. User
-c "STEP 2/9  Create service user"
+c "STEP 2/10  Create service user"
 id "$SVC_USER" &>/dev/null || \
   useradd --system --create-home --home-dir "/home/$SVC_USER" --shell /bin/bash "$SVC_USER"
 for g in video audio bluetooth plugdev systemd-journal; do
@@ -138,7 +138,7 @@ chmod 440 /etc/sudoers.d/sentinel
 visudo -cf /etc/sudoers.d/sentinel >/dev/null && ok "sudoers: reboot + CPU governor switch + hotspot SSID + audio mixing"
 
 # ---------------------------------------------------------------- 3. Deploy
-c "STEP 3/9  Deploy application files"
+c "STEP 3/10  Deploy application files"
 mkdir -p "$APP_DIR/scripts"
 rm -rf "$APP_DIR/sentinel"
 cp -r "$SRC/sentinel" "$APP_DIR/"
@@ -174,7 +174,7 @@ chown -R "$SVC_USER:$SVC_USER" "$APP_DIR"
 ok "Python environment ready"
 
 # ---------------------------------------------------------------- 4. Data
-c "STEP 4/9  Prepare data directory"
+c "STEP 4/10  Prepare data directory"
 if [[ -d "$STORAGE" ]] && mountpoint -q "$STORAGE"; then
   DATA="$STORAGE/sentinel"
   ok "Using external storage"
@@ -216,8 +216,93 @@ else
   w "$SVC_USER cannot write to $DATA; the service will fail to start until this is fixed."
 fi
 
-# ---------------------------------------------------------------- 5. Old services
-c "STEP 5/9  Disable legacy services"
+# ---------------------------------------------------------------- 5. Syncthing
+c "STEP 5/10  Prepare Syncthing storage (Obsidian sync)"
+# Syncthing (bootstrap.sh STEP 9) keeps its home/config/index database, by
+# default, under /mnt/dietpi_userdata/syncthing - normally on the SD card,
+# same as everything else DietPi installs there unless dietpi_userdata
+# itself was redirected during DietPi's own first-run setup. A synced
+# Obsidian vault writes far more often than anything else this project
+# touches (every edit, from every device), so that directory is bind-
+# mounted onto $STORAGE here instead, matching CLAUDE.md #3's reasoning
+# for keeping high-frequency writes off the SD card.
+#
+# A bind mount, not a symlink or an edited systemd unit: DietPi generates
+# (and can regenerate) syncthing.service's ExecStart line, so hard-coding
+# its exact -home flag syntax here would be guessing at something this
+# project does not own. A bind mount needs none of that - it works at the
+# filesystem level, transparently to Syncthing, and (unlike a symlink
+# pointing outside dietpi_userdata) survives any systemd path sandboxing
+# DietPi's unit applies to the literal /mnt/dietpi_userdata/syncthing path.
+if [[ -x /opt/syncthing/syncthing ]]; then
+  ST_HOME="$STORAGE/syncthing"
+  ST_DEFAULT=/mnt/dietpi_userdata/syncthing
+  ST_VAULTS="$STORAGE/obsidian"
+  mkdir -p "$ST_HOME" "$ST_VAULTS"
+
+  for d in "$ST_HOME" "$ST_VAULTS"; do
+    if FIX_OUT=$("$SRC/scripts/sentinel-fix-storage-owner.sh" "$d" "$STORAGE" dietpi 2>&1); then
+      [[ -n "$FIX_OUT" ]] && ok "$FIX_OUT" || ok "dietpi can write to $d"
+    else
+      w "$FIX_OUT"
+    fi
+  done
+
+  # Already bind-mounted from a previous run? A bind mount makes the target
+  # report the *source* directory's device+inode, so comparing those is a
+  # reliable, filesystem-agnostic way to tell "already redirected" apart
+  # from "still the plain directory DietPi created" without depending on
+  # mount option text (which findmnt can report in a confusing, stacked
+  # way for autofs-backed drives - see sentinel-fix-storage-owner.sh).
+  SAME_MOUNT=0
+  if [[ -d "$ST_DEFAULT" ]]; then
+    A=$(stat -c '%d:%i' "$ST_HOME" 2>/dev/null || echo a)
+    B=$(stat -c '%d:%i' "$ST_DEFAULT" 2>/dev/null || echo b)
+    [[ -n "$A" && "$A" == "$B" ]] && SAME_MOUNT=1
+  fi
+
+  if (( SAME_MOUNT )); then
+    ok "Syncthing home already redirected to $ST_HOME"
+  else
+    ST_WAS_RUNNING=0
+    if systemctl is-active --quiet syncthing 2>/dev/null; then
+      ST_WAS_RUNNING=1
+      systemctl stop syncthing 2>/dev/null || true
+    fi
+
+    # One-time migration, and only one-time: only when the default location
+    # actually has data and the target is still empty, so re-running this
+    # step (every install.sh / update.sh) never overwrites either side.
+    if [[ -d "$ST_DEFAULT" ]] && [[ -n "$(ls -A "$ST_DEFAULT" 2>/dev/null)" ]] \
+       && [[ -z "$(ls -A "$ST_HOME" 2>/dev/null)" ]]; then
+      if cp -a "$ST_DEFAULT"/. "$ST_HOME"/; then
+        ok "Migrated existing Syncthing data to $ST_HOME"
+      else
+        w "Failed to migrate existing Syncthing data from $ST_DEFAULT"
+      fi
+    fi
+
+    mkdir -p "$ST_DEFAULT"
+    grep -qF " $ST_DEFAULT " /etc/fstab || \
+      echo "$ST_HOME $ST_DEFAULT none bind 0 0" >> /etc/fstab
+    systemctl daemon-reload
+
+    if MNT_OUT=$(mount --bind "$ST_HOME" "$ST_DEFAULT" 2>&1); then
+      ok "Bind-mounted $ST_HOME onto $ST_DEFAULT"
+    else
+      w "Bind mount failed: $MNT_OUT"
+      w "Syncthing will keep using $ST_DEFAULT on the SD card until this is fixed."
+    fi
+
+    (( ST_WAS_RUNNING )) && { systemctl start syncthing 2>/dev/null || true; }
+  fi
+  systemctl enable --now syncthing >/dev/null 2>&1 || true
+else
+  w "Syncthing not installed; skipping storage redirect (see bootstrap.sh STEP 9)."
+fi
+
+# ---------------------------------------------------------------- 6. Old services
+c "STEP 6/10  Disable legacy services"
 for old in camguard music-player; do
   if systemctl list-unit-files | grep -q "^$old\.service"; then
     systemctl disable --now "$old" 2>/dev/null || true
@@ -225,8 +310,8 @@ for old in camguard music-player; do
   fi
 done
 
-# ---------------------------------------------------------------- 6. Bluetooth
-c "STEP 6/9  Configure Bluetooth services"
+# ---------------------------------------------------------------- 7. Bluetooth
+c "STEP 7/10  Configure Bluetooth services"
 BA=$(command -v bluealsad || command -v bluealsa || true)
 if [[ -n "$BA" ]]; then
   install -m644 "$SRC/systemd/sentinel-bluealsa.service" /etc/systemd/system/
@@ -276,8 +361,8 @@ if [[ -f /etc/bluetooth/main.conf ]]; then
   fi
 fi
 
-# ---------------------------------------------------------------- 7. Guardian
-c "STEP 7/9  Register Guardian (drift repair)"
+# ---------------------------------------------------------------- 8. Guardian
+c "STEP 8/10  Register Guardian (drift repair)"
 install -m644 "$SRC/systemd/sentinel-guardian.service" /etc/systemd/system/
 install -m644 "$SRC/systemd/sentinel-guardian.timer" /etc/systemd/system/
 sed -i -e "s|^Environment=SENTINEL_DATA=.*|Environment=SENTINEL_DATA=$DATA|" \
@@ -297,8 +382,8 @@ ok "Auto-update registered; checks the git remote every 30 minutes and runs"
 echo "     update.sh automatically once new commits land on it (toggle:"
 echo "     system_autoupdate_enabled in the Web UI settings tab)"
 
-# ---------------------------------------------------------------- 8. Main service
-c "STEP 8/9  Register Sentinel service"
+# ---------------------------------------------------------------- 9. Main service
+c "STEP 9/10  Register Sentinel service"
 sed -e "s|^User=.*|User=$SVC_USER|" \
     -e "s|^Group=.*|Group=$SVC_USER|" \
     -e "s|^Environment=SENTINEL_STORAGE=.*|Environment=SENTINEL_STORAGE=$STORAGE|" \
@@ -328,8 +413,8 @@ ok "Enabled: ${UNITS[*]}"
 systemctl reset-failed "${UNITS[@]}" 2>/dev/null || true
 systemctl restart "${UNITS[@]}"
 
-# ---------------------------------------------------------------- 9. First run
-c "STEP 9/9  Run Guardian once now"
+# ---------------------------------------------------------------- 10. First run
+c "STEP 10/10  Run Guardian once now"
 SENTINEL_DATA="$DATA" "$APP_DIR/scripts/sentinel-guardian.sh" || \
   w "Some Guardian checks failed on first run; see 'journalctl -t sentinel-guardian'."
 
@@ -345,6 +430,12 @@ fi
 sleep 3
 if systemctl is-active --quiet sentinel; then
   IP=$(hostname -I 2>/dev/null | awk '{print $1}')
+  ST_LINE=""
+  if [[ -x /opt/syncthing/syncthing ]]; then
+    ST_LINE="  Syncthing   http://${IP:-<this-Pi-IP>}:8384 (Obsidian sync) - set a GUI
+              password and pair devices during H8 of setup.sh if you have not yet
+"
+  fi
   cat <<EOS
 
 == Install complete ==
@@ -353,7 +444,7 @@ if systemctl is-active --quiet sentinel; then
   AdGuard     locked to localhost now; blocked externally by default - run
               'sudo sentinel-adguard-8083 enable [MINUTES]' to open :8083
               (log in with the admin password set during H5 of setup.sh)
-  Data        $DATA
+${ST_LINE}  Data        $DATA
   Logs        journalctl -u sentinel -f
   Guardian    journalctl -t sentinel-guardian -f
   Diagnostics sentinel-diagnose

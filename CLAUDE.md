@@ -1345,6 +1345,100 @@ up` 実行後の DNS 設定は tailscaled 側の永続状態であり、勝手�
 無いため、CLAUDE.md #12 のような周期的な自己修復は今のところ不要と判断
 しています。
 
+### 40. Obsidian の同期は CouchDB/LiveSync ではなく Syncthing で行う。ホームディレクトリは外部ストレージへバインドマウントする
+
+「PC・iPad・スマホの Obsidian を自動同期し、外出先では Tailscale 経由で
+安全に同期したい」という要望がありました。Obsidian コミュニティでは
+Self-hosted LiveSync + CouchDB が第一候補として知られていますが、この
+機体には採用しませんでした。
+
+- **CouchDB には 32bit ARM (armhf) 向けの公式パッケージが存在しません**
+  ([apache/couchdb#885](https://github.com/apache/couchdb/issues/885))。
+  DietPi を 32bit で導入している場合、Docker を使わない前提では CouchDB
+  はそもそも導入不可能です。
+- **64bit (arm64) で導入できたとしても、CouchDB (Erlang/OTP VM) は
+  この機体には重すぎます。** 公式ドキュメント系の導入ガイドは
+  4GB RAM を前提にしており ([Micro Focus/OpenText の CouchDB 前提要件](https://www.microfocus.com/documentation/file-dynamics/6.6/guides/content/install/couchdb/installing_couchdb.htm))、
+  CLAUDE.md 冒頭の制約表のとおりこの Pi は RAM 1GB・SWAP なしで、しかも
+  `sentinel.service` だけで `MemoryMax=700M` を予約済みです。新しい常駐
+  デーモンにそれだけの余地はありません。
+
+代わりに **Syncthing** (`dietpi-software install 50`) を使っています。
+Go 製の単一バイナリで armhf/arm64 どちらもビルドがあり、DietPi に
+組み込みの導入 ID が存在するため、この項目の bootstrap.sh 導入は他の
+dietpi-software 項目と全く同じパターンで済みます。**この選択を
+CouchDB/LiveSync に戻さないでください** — 32bit 機では文字通り導入
+できず、64bit 機でも RAM 予算を脅かします。
+
+Syncthing はファイル単位でしか同期しないため (LiveSync のような
+Obsidian 内でのリアルタイム差分マージはしない)、同じノートを 2 台から
+ほぼ同時に編集すると `.sync-conflict-*` ファイルが作られるだけで自動
+マージはされません。通常は 1 人が 1 台ずつ順番に編集する使い方が
+大半なので実害は小さいと判断していますが、この制約は Syncthing を選んだ
+以上ついて回ります。
+
+- **DietPi の Syncthing はホーム/設定/インデックス DB を既定で
+  `/mnt/dietpi_userdata/syncthing` (通常 SD カード上) に置きます。**
+  同期される Obsidian Vault はこのプロジェクトが触るどの設定よりも
+  高頻度に書き込まれます (全端末・全編集のたびに) — CLAUDE.md #3 の
+  「高頻度の書き込みは `/dev/shm` にだけ行う」と同じ理由で、SD カードの
+  摩耗を避けるため `install.sh` がこのディレクトリを `$STORAGE/syncthing`
+  (外部ストレージ) へ**バインドマウント**しています。実際に同期される
+  Vault のフォルダ自体も `$STORAGE/obsidian` に置くよう `setup.sh` の
+  H8 で案内しています。
+- **シンボリックリンクではなくバインドマウントを使っている理由**:
+  DietPi が生成する `syncthing.service` の `ExecStart` (実際の `-home`
+  フラグの綴り) は DietPi 側の実装詳細であり、このプロジェクトが把握・
+  固定できるものではありません。そこを直接書き換えるコードは、DietPi が
+  Syncthing を再導入するたびに (`update.sh` が `bootstrap.sh` を毎回
+  再実行するため、通常のアップデートで容易に起こり得ます) 上書きされて
+  静かに壊れます。バインドマウントはファイルシステム層で完結するため
+  この問題を受けず、また DietPi のユニットに systemd のパスサンドボックス
+  (`ReadWritePaths=` など) が掛かっていた場合でも、シンボリックリンクと
+  違って `/mnt/dietpi_userdata/syncthing` という**その場所自体**が
+  読み書き対象になるため影響を受けません。**この判断を、ExecStart や
+  `-home` フラグを直接書き換える実装、あるいはシンボリックリンクに
+  戻さないでください** — どちらも同じ「DietPi の再導入で静かに壊れる」
+  不具合に戻ります。
+- **`install.sh`/Guardian の両方が、このバインドマウントを device+inode
+  比較で検証しています** (`stat -c '%d:%i'` が `$STORAGE/syncthing` と
+  `/mnt/dietpi_userdata/syncthing` とで一致するかどうか)。`findmnt` の
+  オプション文字列を見るより頑丈な判定方法です — CLAUDE.md #8 で
+  `findmnt` がマウントの重なり (autofs + 実体) を 1 つの呼び出しに複数行
+  まとめて返し、意図しない分岐に落ちた実例があるのと同じ理由で避けて
+  います。一致していなければ (DietPi の再導入・起動直後のレース等で
+  ズレていれば) Guardian の `check_syncthing_storage()` が 2 分ごとに
+  再マウントします。**この device+inode 比較をやめて `findmnt`/`mount`
+  出力の文字列一致に戻さないでください** — 同じ「一見動いているのに
+  実は判定が外れている」不具合を作り込むリスクに戻ります。
+- **所有権の修正は `sentinel-fix-storage-owner.sh` を `dietpi` ユーザー
+  向けに呼び出して再利用しています** (`<data-dir> <mountpoint> <user>`
+  という既存の汎用シグネチャのまま、ユーザーだけ `sentinel` から
+  `dietpi` に変えて呼ぶ)。**ただし 1 つ制約が残っています**:
+  このスクリプトの exFAT/NTFS 分岐 (`fix_fat_mount()`) はリマウント前に
+  `sentinel.service` だけを止める実装になっており、`dietpi` ユーザーや
+  `syncthing.service` を止めません。今回のインストール手順では
+  Syncthing がまだ `$STORAGE/syncthing` に触れていない段階でこの関数を
+  呼んでいるため実害はありませんが、もし将来 `$STORAGE` が exFAT/NTFS
+  で、かつ Syncthing が既に稼働中の状態でこの関数のリマウントが必要に
+  なるケースがあれば、`sentinel.service` を止めるだけではアンマウントが
+  "busy" のまま失敗する可能性があります。**この既知の制約を認識せずに
+  `sentinel-fix-storage-owner.sh` の対象ユーザーを安易に増やさないで
+  ください** — 今のところ安全な理由 (呼び出し順序) を、変更のたびに
+  確認し直してください。
+- **Syncthing 自身の公開ディスカバリ/リレーサーバーへの依存は、GUI から
+  オフにするよう案内しています** (`setup.sh` H8)。Tailscale (#39) が
+  既に「外出先からの安全な到達性」を提供しているため、Syncthing 側でも
+  同じ役割を持つ公開インフラに頼る必要がなく、オフにすることでこの
+  Pi の Syncthing がどんな公開ディスカバリ網にも一切載らないようにできます
+  — このプロジェクト全体の「WAN に何も晒さない」という設計 (#39 の
+  HTTPS を張らない方針と同じ思想) に揃えるためです。自動化はしておらず
+  (GUI のトグルのため)、案内のみです。
+- **Guardian は `syncthing.service` を `check_services()` の監視対象にも
+  追加しています** (存在すれば)。GUI 認証が未設定かどうかまでは検証して
+  いません — `sentinel` 自身の Web UI パスワードにも同様の自動検証が
+  無いのと同じ基準で、今回もスコープ外としています。
+
 ## モジュール構成
 
 各モジュールは疎結合で、`core/state.py` の `MODE` を購読するだけです。

@@ -15,6 +15,7 @@
 #   H5  log in to AdGuard Home once, while it is still reachable directly
 #   H6  set the Web UI password / Discord webhook / AdGuard password
 #   H7  connect to Tailscale for secure remote access (optional)
+#   H8  set up Syncthing for Obsidian sync (optional)
 #
 # Progress is kept in /var/lib/sentinel/setup-stage, so after the reboot in
 # H3 you run the same command again and it continues where it left off.
@@ -349,6 +350,54 @@ EOS
   else
     w "Skipped. Connect later with: sudo tailscale up --accept-dns=false"
   fi
+fi
+
+# ---- H8: Syncthing (optional) ---------------------------------------
+human "H8  Set up Syncthing for Obsidian sync (optional)"
+IP=$(my_ip)
+if [[ ! -x /opt/syncthing/syncthing ]]; then
+  w "Syncthing is not installed (bootstrap.sh should have installed it)."
+  w "Install it with: sudo dietpi-software install 50"
+else
+  cat <<EOS
+     Open  http://${IP:-<this-Pi-IP>}:8384  and, in Actions -> Settings -> GUI:
+
+       1. Set a GUI Authentication User and Password right away - there is
+          none by default, and the GUI is reachable from your whole LAN.
+       2. Under Settings -> Connections, consider turning off "Global
+          Discovery" and "Enable Relaying". With Tailscale already set up
+          (H7), this Pi does not need Syncthing's own public discovery/
+          relay servers to stay reachable while you are away from home -
+          it stays reachable over your private tailnet instead, and this
+          keeps it off any public discovery infrastructure entirely.
+          See CLAUDE.md #40.
+
+     Then add a folder to sync:
+
+       3. Click "Add Folder" and set its path to exactly:
+
+              $STORAGE/obsidian
+
+          (add a subfolder per vault if you sync more than one, e.g.
+          $STORAGE/obsidian/Notes)
+       4. Install Syncthing on each other device (PC/iPad/phone) too, and
+          open its GUI or app there.
+       5. Back on this Pi, click "Add Remote Device" and enter each
+          device's ID (shown in its own Syncthing GUI/app under Actions ->
+          Show ID, or scan its QR code) - once per device.
+       6. On each device, accept the connection request from this Pi when
+          it appears, then share the same folder back to it, pointed at
+          that device's own Obsidian vault folder.
+       7. In Obsidian on each device, just open that folder as the vault -
+          no plugin is needed; Syncthing keeps the files themselves in
+          sync underneath it.
+
+     For the "away from home" path to work without relying on Syncthing's
+     own public relay/discovery servers, install Tailscale on each of
+     those devices too and join them to the same tailnet - Syncthing then
+     finds this Pi over it automatically, the same as on the home LAN.
+
+EOS
 fi
 
 ok "Setup complete."

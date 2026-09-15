@@ -3,8 +3,8 @@
 English: [SETUP.md](SETUP.md)
 
 Sentinel は `git clone` してから `setup.sh` を実行して導入します。`setup.sh`
-はスクリプトで判断できる部分は自動で進め、人の判断が要る 7 か所
-(**H1**〜**H7**、下記) で止まって尋ねます。
+はスクリプトで判断できる部分は自動で進め、人の判断が要る 8 か所
+(**H1**〜**H8**、下記) で止まって尋ねます。
 
 DietPi 本体とこのプロジェクトのコンソール出力は、意図的にすべて英語です。
 物理 HDMI コンソールや素のシリアル端末では日本語グリフが正しく描画されない
@@ -17,7 +17,7 @@ DietPi 本体とこのプロジェクトのコンソール出力は、意図的�
 | 0 | (お使いの PC 上で) | DietPi を書き込み、`dietpi.txt` を編集 |
 | 1 | 初回起動 | DietPi 自体の初期設定 |
 | 2 | `sudo ./setup.sh` | H1・H2 → `bootstrap.sh` → H3 (再起動) |
-| 3 | `sudo ./setup.sh` | H4・H5 → `install.sh` → H6 → H7 (任意) |
+| 3 | `sudo ./setup.sh` | H4・H5 → `install.sh` → H6 → H7・H8 (任意) |
 
 `setup.sh` は進捗を `/var/lib/sentinel/setup-stage` に記録するため、H3 の
 再起動後は同じコマンドを実行するだけで続きから再開します。いつ再実行しても
@@ -119,6 +119,7 @@ sudo ./setup.sh
 | 6 | 音声を 3.5mm ジャックへ ( `dietpi-set_hardware soundcard rpi-bcm2835-3.5mm` ) | — |
 | 7 | SWAP を無効化 | — |
 | 8 | Tailscale を導入 (パッケージのみ。dietpi-software に ID が無いため Tailscale 自身のインストールスクリプトを使う) | — |
+| 9 | Syncthing を導入 (パッケージのみ。保存先を外部ドライブへ切り替えるのは、ドライブがマウントされたあとの `install.sh` — 下記参照) | 50 |
 
 - **H3 — 再起動。** Bluetooth・音声出力・SWAP の変更は再起動しないと反映
   されません。`setup.sh` はここで再起動するか尋ねます。まだ `/opt` には
@@ -173,6 +174,21 @@ sudo ./setup.sh
   必要があります (前回の指定は憶えていません) — 手動で再度実行するときは
   必ず付け直してください。断った場合も Tailscale 自体は導入済みのまま
   未接続で残るので、同じコマンドでいつでも後から接続できます。
+- **H8 — Syncthing (任意)、Obsidian の同期用。** `setup.sh` の案内に
+  沿って進めます: `http://<PiのIP>:8384` で GUI のユーザー名/パスワードを
+  設定 (既定では未設定です)、任意で設定 → 接続 の「グローバル
+  ディスカバリ」「リレーを有効化」をオフに (H7 の Tailscale が既に
+  「外出先からの到達性」を担っているため、これによりこの Pi の
+  Syncthing をどんな公開ディスカバリ網にも一切載せずに済みます)、
+  外部ドライブ上の `obsidian` フォルダを共有フォルダとして追加、各端末を
+  デバイス ID でペアリング。「外出先」の経路が Syncthing 自身の公開
+  リレーサーバーではなく自分の tailnet 経由で働くよう、各端末にも
+  Syncthing (と Tailscale) を導入してください。Obsidian 側にプラグインは
+  不要です — 各端末で、同期されたフォルダをそのまま Vault として開くだけ
+  です。Syncthing を Self-hosted LiveSync + CouchDB より選んだ理由
+  (32bit ARM 向けの CouchDB 公式パッケージが存在しないこと、64bit でも
+  公式ガイドがこの Pi よりずっと多い RAM を前提にしていること) と、
+  保存先を SD カードから外す仕組みは CLAUDE.md #40 を参照してください。
 
 ## 各フェーズを個別に実行する場合
 
@@ -218,6 +234,7 @@ WiFi ホットスポットも起動後にこれを触ることがあります。
 | ホットスポットの DNS 転送先 | ホットスポットの再設定 | AdGuard へ向け直す |
 | ディスク使用量 | 蓄積 | 92% で警告し、診断バンドルを 1 つ保持 |
 | yt-dlp のバージョン | サイト側の変更 | 週 1 回の更新を試行 |
+| Syncthing の保存先の外部ドライブへのリダイレクト | DietPi による Syncthing の再導入、ドライブマウントとの起動時競合 | device+inode 比較で検知し、バインドマウントし直す |
 
 ## 更新するとき
 
@@ -259,4 +276,6 @@ git リモートを確認し、新しいコミットがあれば自分で `updat
 | 8083 がまだ外から開ける | `systemctl start sentinel-guardian`。`journalctl -t sentinel-guardian -n 20` |
 | ネットワークログが空 | 設定タブの AdGuard パスワードが違う、または AdGuard 側でクエリログが無効。Tailscale 接続の直後に空になった場合は `tailscale status` を確認 — `--accept-dns=false` を付けずに接続していないか |
 | `setup.sh` が想定と違うフェーズから始まる | `sudo ./setup.sh --reset` |
+| Syncthing の GUI に繋がらない、端末がペアリングできない | `systemctl status syncthing`、`journalctl -u syncthing -n 60 --no-pager` |
+| Syncthing が外部ドライブではなく SD カードに書き込んでいる | `stat -c '%d:%i' /mnt/VIDEOSD/syncthing /mnt/dietpi_userdata/syncthing` — 一致していれば正常 (同じバインドマウント)。一致していなければ Guardian の次の周期 (最大 2 分) を待つか、`sudo ./install.sh` を再実行 |
 | それ以外 | `sentinel-diagnose` — システムとアプリの状態を 1 つのアーカイブにまとめます |
