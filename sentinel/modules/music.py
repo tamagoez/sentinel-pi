@@ -46,7 +46,7 @@ import threading
 import time
 from pathlib import Path
 
-from ..core import config, state
+from ..core import audio, config, state
 from ..core.state import CRITICAL, ECO, MODE, NORMAL
 
 log = logging.getLogger("sentinel.music")
@@ -77,17 +77,7 @@ _EQ_RETRY_COOLDOWN_SEC = 60.0
 
 
 def _card_index() -> int | None:
-    try:
-        out = subprocess.run(["aplay", "-l"], capture_output=True, text=True, timeout=5).stdout
-    except Exception:
-        return None
-    for line in out.splitlines():
-        if line.startswith("card "):
-            try:
-                return int(line.split()[1].rstrip(":"))
-            except Exception:
-                continue
-    return None
+    return audio.find_output_card()
 
 
 def _mixing_ready() -> bool:
