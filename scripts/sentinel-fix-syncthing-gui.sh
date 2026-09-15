@@ -140,6 +140,12 @@ else
   exit 1
 fi
 
+# Syncthing exits immediately on a permission problem, so it can burn
+# through systemd's default 5-starts-in-10s limit and stick at
+# failed (start-limit-hit), where a plain `systemctl start` is ignored
+# with "Start request repeated too quickly" (CLAUDE.md #9). Clear the
+# counter first - a no-op on a healthy unit.
+systemctl reset-failed syncthing 2>/dev/null || true
 systemctl start syncthing 2>/dev/null || systemctl enable --now syncthing >/dev/null 2>&1 || true
 
 for _ in 1 2 3 4 5 6 7 8 9 10; do

@@ -1583,6 +1583,60 @@ mpg123 はどのケースでもエラーを出しません。デバイスは開�
 `sentinel-fix-audio-output.sh` 側へ 1 本化しました (CLAUDE.md #37 の
 「4 か所のうち 1 つだけ直すな」を、そもそも複製を減らして守るため)。
 
+**実機のログで判明した続き (2 点)**
+
+`:8384` がまだ開けない原因は、GUI の bind アドレス以前に **Syncthing が
+そもそも起動できていない**ことでした。ログはこうです:
+
+```
+WRN Failed to correct directory permissions
+    (error="chmod /mnt/dietpi_userdata/syncthing: operation not permitted")
+ERR Failed to acquire lock
+    (error="open /mnt/dietpi_userdata/syncthing/syncthing.lock: permission denied")
+syncthing.service: Start request repeated too quickly.
+```
+
+1. **`$ST_DEFAULT` (`/mnt/dietpi_userdata/syncthing`) が root 所有のまま
+   でした。** `install.sh` の `mkdir -p "$ST_DEFAULT"` は root で走るので
+   `root:root 0755` になります。その上に bind マウントが載っている間は
+   exFAT 側の `uid=`/`gid=` が効くので問題になりませんが、**bind が外れて
+   いる瞬間 (マウント修復スクリプトが一度 umount した直後や、bind に失敗
+   した場合) は素の root 所有ディレクトリが露出**し、`dietpi` で動く
+   Syncthing は lock ファイルすら作れません。`mkdir` の直後に
+   `chown dietpi:$SVC_USER` + `chmod 0775` を掛け、Guardian も
+   「マウントポイントでないとき」だけ同じ修正を毎周期行います。
+   **この chown を外さないでください** — bind が外れた瞬間に Syncthing が
+   起動不能になる状態に戻ります。
+2. **起動失敗の連発で `failed (start-limit-hit)` に固定されていました**
+   (CLAUDE.md #9 と全く同じ罠)。権限エラーで即死するため systemd の既定
+   「10 秒に 5 回」をすぐ超え、以後の `systemctl start` は
+   `Start request repeated too quickly` で**無視**されます。つまり権限を
+   直しても自動では起き上がりません。`install.sh`・
+   `sentinel-fix-syncthing-gui.sh`・Guardian の
+   `check_syncthing_storage()` の**すべての** `systemctl start syncthing`
+   の前に `systemctl reset-failed syncthing` を入れました。**この
+   reset-failed を外さないでください。**
+
+あわせて、`install.sh` の dietpi 書き込みテストの対象を `$ST_HOME`
+(`$STORAGE/syncthing`) から **`$ST_DEFAULT`** へ変え、bind マウント確定後に
+実行するようにしました。**Syncthing が実際に開くのは `$ST_DEFAULT` 側**
+であり、bind が効いていない場合この 2 つは別のディレクトリです — 今回は
+まさにその状況で、テストは `$ST_HOME` を見て「書ける」と報告していました。
+失敗時は `ls -ld` と `id -nG dietpi` も出すので、次は journalctl を見に
+行かなくても切り分けられます。
+
+**mpg123 の stderr を捨てていました**
+
+音楽側は「無音」ではなく、`mpg123 が停止していたため復帰させます` が
+繰り返し記録される = **mpg123 が即死し続けている**状態でした。ところが
+`_spawn()` は `stderr=subprocess.DEVNULL` で起動していたため、ALSA の
+「デバイスを開けない/使用中」といった死因がすべて捨てられていました。
+`stderr=subprocess.PIPE` にし、専用スレッドで読み続けて (読まないと
+mpg123 側のパイプが詰まります) 直近 5 行を保持し、復帰ループが死亡を
+検知した時点で `last_error` とログに載せるようにしました。**この
+stderr を再び DEVNULL に戻さないでください** — 同じ「即死し続けるのに
+理由が分からない」状態に戻ります。
+
 ## モジュール構成
 
 各モジュールは疎結合で、`core/state.py` の `MODE` を購読するだけです。

@@ -369,6 +369,16 @@ check_syncthing_storage() {
   chgrp -R "$svc_user" "$st_home" "$storage/obsidian" 2>/dev/null || true
   chmod -R g+rwX "$st_home" "$storage/obsidian" 2>/dev/null || true
 
+  # When $st_default is a plain directory rather than our bind mount, it
+  # was created by root (install.sh's mkdir) and Syncthing - running as
+  # dietpi - cannot write its lock file there. Hand it over. Once the bind
+  # mount covers it this is a no-op (exFAT has no per-directory
+  # ownership), so it is safe to run unconditionally every cycle.
+  if [[ -d "$st_default" ]] && ! mountpoint -q "$st_default" 2>/dev/null; then
+    chown dietpi:"$svc_user" "$st_default" 2>/dev/null || true
+    chmod 0775 "$st_default" 2>/dev/null || true
+  fi
+
   [[ -d "$st_home" && -d "$st_default" ]] || return 0
   local a b
   a=$(stat -c '%d:%i' "$st_home" 2>/dev/null) || return 0
@@ -401,7 +411,10 @@ check_syncthing_storage() {
   else
     warn "could not re-bind-mount Syncthing home onto $st_home"
   fi
-  (( was_active )) && systemctl start syncthing
+  # reset-failed first: Syncthing exits fast on a permission problem and
+  # can be sitting at failed (start-limit-hit), where start is ignored
+  # (CLAUDE.md #9).
+  (( was_active )) && { systemctl reset-failed syncthing 2>/dev/null; systemctl start syncthing; }
 }
 
 # ------------------------------------------------------------------ 8c. Syncthing GUI reachability
