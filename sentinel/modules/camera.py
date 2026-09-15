@@ -40,6 +40,7 @@ CAMERA_OVERRIDE_KEYS = (
     "jpeg_quality", "live_fps", "normal_fps", "eco_fps",
     "motion_threshold", "motion_area_ratio", "motion_area_max_ratio",
     "motion_interval", "motion_warmup_seconds", "cam_autofocus",
+    "motion_confirm_checks", "motion_release_checks",
     "save_cooldown", "reconnect_seconds",
 )
 
@@ -342,6 +343,23 @@ def _worker(cid: str, device: str, stop: "Event", cfg: dict) -> None:
     corrupt_hist: deque = deque(maxlen=_CORRUPT_HIST_LEN)
     last_corrupt_reconnect = 0.0
     corrupt_reconnect_backoff = _CORRUPT_RECONNECT_COOLDOWN
+    # 動体判定のヒステリシス。1 回の判定 (raw_hit) は照明のちらつき・虫・
+    # 圧縮ノイズなど 1 サイクルだけの偶然でも簡単に閾値を跨ぐため、これを
+    # そのまま「動体あり」として通知にまで流すと、実機で報告された
+    # 「動体が無いのに 0 分の検知が大量に通知される」不具合になる。逆に、
+    # 本物の動体が続いている最中でも 1 サイクルだけ ratio がたまたま
+    # 閾値を割ることがあり (対象がわずかに静止する・背景と同化するなど)、
+    # raw_hit をそのまま公開すると「継続的に動体がいるのに検知がブツブツ
+    # 途切れる」不具合になる。core/state.py の ModeManager が温度の
+    # ヒステリシスでモードのバタつきを防いでいるのと同じ考え方を、ここでも
+    # 「連続 N 回 raw_hit が続いたら初めて動体 "開始" とみなす
+    # (motion_confirm_checks)」「連続 N 回 raw_miss が続いたら初めて動体
+    # "終了" とみなす (motion_release_checks)」という形で適用する。
+    # motion_flag に書く・notify に流れる「公開用の motion」はこの確定後の
+    # 状態であり、生の raw_hit そのものではない。
+    motion_confirmed = False
+    motion_hit_streak = 0
+    motion_miss_streak = 0
     known_ok_patterns: set = set()
     last_corrupt_pattern = None
     corrupt_pattern_streak = 0
@@ -548,7 +566,7 @@ def _worker(cid: str, device: str, stop: "Event", cfg: dict) -> None:
             if now - last_motion_check >= float(cfg["motion_interval"]):
                 gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
                 small = cv2.GaussianBlur(cv2.resize(gray, (160, 120)), (21, 21), 0)
-                motion = False
+                raw_hit = False
                 ratio = None
                 lo = float(cfg["motion_area_ratio"])
                 hi = float(cfg.get("motion_area_max_ratio", 1.0))
@@ -566,19 +584,44 @@ def _worker(cid: str, device: str, stop: "Event", cfg: dict) -> None:
                     # 上限 (motion_area_max_ratio) は、画面のほとんどが一度に
                     # 変化するケース (オートフォーカスの再合焦・露出/照明の変化)
                     # を、局所的な物体の動きと区別して除外するためのもの。
-                    motion = lo <= ratio < hi
+                    raw_hit = lo <= ratio < hi
                 prev = small
                 last_motion_check = now
+
+                # ヒステリシス: 1 回だけの raw_hit/raw_miss では公開状態を
+                # 動かさない。motion_confirm_checks 回連続で raw_hit が続いて
+                # 初めて「動体開始」、motion_release_checks 回連続で raw_miss
+                # が続いて初めて「動体終了」とする (上のコメント参照)。
+                if raw_hit:
+                    motion_hit_streak += 1
+                    motion_miss_streak = 0
+                else:
+                    motion_miss_streak += 1
+                    motion_hit_streak = 0
+                confirm_n = max(1, int(cfg.get("motion_confirm_checks", 2)))
+                release_n = max(1, int(cfg.get("motion_release_checks", 2)))
+                if not motion_confirmed and motion_hit_streak >= confirm_n:
+                    motion_confirmed = True
+                elif motion_confirmed and motion_miss_streak >= release_n:
+                    motion_confirmed = False
+                motion = motion_confirmed
+
                 if cfg.get("motion_debug_log", True):
                     # since_open: 直近のカメラオープンからの経過秒数。warm が
                     # 解消しない不具合 (eco で毎サイクル 0 付近に戻り続ける、
                     # など) をログだけから追えるようにするために入れている。
+                    # raw_hit/streak も残し、ヒステリシスが効きすぎ/効かなさ
+                    # すぎのどちらで調整すべきかを診断ログだけで判断できる
+                    # ようにしている。
                     _log_motion_debug(cid, {
                         "t": datetime.now().strftime("%H:%M:%S"),
                         "mode": mode, "viewers": viewers, "warm": warm,
                         "since_open": round(now - cam_opened_at, 2),
                         "ratio": round(ratio, 4) if ratio is not None else None,
                         "lo": lo, "hi": hi, "threshold": int(cfg["motion_threshold"]),
+                        "raw_hit": raw_hit, "hit_streak": motion_hit_streak,
+                        "miss_streak": motion_miss_streak,
+                        "confirm_n": confirm_n, "release_n": release_n,
                         "motion": motion, "reconnects": reconnects,
                     })
                 if motion:

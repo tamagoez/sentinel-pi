@@ -37,12 +37,27 @@ _LOOP: asyncio.AbstractEventLoop | None = None
 # カメラ ID -> 色 (安定した割り当てのため ID のハッシュから決める)
 _PALETTE = [0x4C8DFF, 0x30B27B, 0xE0913C, 0xB86BD8, 0xD8566B, 0x39B5B5]
 
-# 動体イベントの集計
+# 動体イベントの集計。「検知しました」(開始) と「検知が落ち着きました」
+# (終了、集計値つき) は同じ episode_key (grouped=False ならカメラID、
+# grouped=True なら "__all__") を単位として対応させる。
+#
+# 以前はこの集計ウィンドウ (_window_open/_window_start/_last_motion_any/
+# _window_counts) がカメラを問わずグローバルな 1 本しかなく、対象機種の
+# 標準構成である USB カメラ 2 台構成で notify_motion_grouped=False (カメラ
+# ごとに即時通知) のとき、カメラ A・B それぞれ別々に「検知しました」が
+# 届いているのに、「検知が落ち着きました」は両カメラの検知回数・時間帯を
+# 合算した 1 通しか届かない、という開始・終了のカメラ単位の不一致があった。
+# さらに、あるカメラの検知が一瞬 (1 回) だけで終わっても、たまたま近い時刻
+# に別カメラの検知でグローバルウィンドウが延命されていると、本来ごく短い
+# はずの検知が実際より長い「検知期間」として報告されることもあった。
+# episode_key ごとに独立したウィンドウを持つことで、「検知しました」
+# 1 回 -> (そのカメラ/まとめ単位の検知はまとめる) -> 「検知が落ち着き
+# ました」1 回、という対応を episode_key 単位でも保証する。
 _last_sent: dict[str, float] = {}
-_window_counts: Counter = Counter()
-_window_start: float = 0.0
-_last_motion_any: float = 0.0
-_window_open: bool = False
+_window_counts: dict[str, Counter] = {}
+_window_start: dict[str, float] = {}
+_last_motion_any: dict[str, float] = {}
+_window_open: dict[str, bool] = {}
 
 # notify_motion_grouped=True のときに使う、カメラ横断のまとめ通知の状態。
 # camera_id -> 直近検知時刻。フラッシュ (送信) のたびにクリアする。
@@ -50,13 +65,13 @@ _pending_cameras: dict[str, float] = {}
 _last_group_sent: float = 0.0
 
 # 「動体の1エピソード (検知開始〜落ち着きましたで対応する1組)」の境界判定
-# に使う、通知専用の直近検知時刻。grouped=False ではカメラID、grouped=True
-# では "__all__" をキーにする。動体が途切れずに続いている間はここが更新
-# され続けるだけで、notify_summary_after 以上の空白ができて初めて次の検知
-# が「新しいエピソード」= 開始通知の対象になる。summary_loop() が同じ
-# notify_summary_after を使って終了 (「検知が落ち着きました」) を判定して
-# いるのと必ず同じ秒数にすること - ずれると開始だけが何度も届き、終了が
-# 追いつかない不具合に戻る。
+# に使う、通知専用の直近検知時刻。キーは上の episode_key と同じ (grouped=
+# False ではカメラID、grouped=True では "__all__")。動体が途切れずに続いて
+# いる間はここが更新され続けるだけで、notify_summary_after 以上の空白が
+# できて初めて次の検知が「新しいエピソード」= 開始通知の対象になる。
+# summary_loop() が同じ notify_summary_after を使って終了 (「検知が落ち
+# 着きました」) を判定しているのと必ず同じ秒数にすること - ずれると開始
+# だけが何度も届き、終了が追いつかない不具合に戻る (CLAUDE.md #18)。
 _last_motion_seen: dict[str, float] = {}
 
 STATE = {"sent": 0, "failed": 0, "queued": 0, "last_error": "", "last_sent_at": 0.0}
@@ -64,6 +79,20 @@ STATE = {"sent": 0, "failed": 0, "queued": 0, "last_error": "", "last_sent_at": 
 
 def _color_for(cid: str) -> int:
     return _PALETTE[sum(cid.encode()) % len(_PALETTE)]
+
+
+def _fmt_minsec(seconds: float) -> str:
+    """秒数を人が読める長さの文字列にする。分単位だけに丸めると 60 秒
+    未満はすべて「0 分」に潰れて区別が付かなくなり、実機で「短い検知が
+    何度も 0 分の滞在として表示される」と報告された (実際には数秒〜数十秒
+    の本物の検知で、長さの情報が丸めで失われていただけだった)。1 分未満は
+    秒で、それ以上は分 (+端数の秒) で表示し、常に実際の長さが分かるように
+    する。"""
+    seconds = max(0, round(seconds))
+    if seconds < 60:
+        return f"{seconds}秒"
+    minutes, rem = divmod(seconds, 60)
+    return f"{minutes}分{rem}秒" if rem else f"{minutes}分"
 
 
 def _post(payload: dict) -> float:
@@ -183,14 +212,24 @@ def system_event(title: str, description: str = "", *, level: str = "info",
 
 
 def on_motion(camera_id: str, capture_path: str = "") -> None:
-    """カメラモジュールから呼ばれる (別スレッド)。"""
-    global _window_start, _last_motion_any, _window_open, _last_group_sent
+    """カメラモジュールから呼ばれる。"""
+    global _last_group_sent
     now = time.time()
-    _last_motion_any = now
-    _window_counts[camera_id] += 1
-    if not _window_open:
-        _window_open = True
-        _window_start = now
+    # 集計ウィンドウの単位 (episode_key) は、下の「開始・終了」判定と必ず
+    # 同じにする (grouped=False ならカメラID、grouped=True なら "__all__")。
+    # ここより前にこの値を確定させ、以降すべての集計 (_window_*) をこの
+    # キーだけに書き込む — グローバルな 1 本の集計に戻すと、2 台カメラ
+    # 構成で片方の一瞬の検知がもう片方の検知に巻き込まれて実際より長い
+    # 「検知期間」になったり、逆に開始通知の数と終了通知の数が合わなく
+    # なったりする不具合に戻る (上のコメント参照)。
+    grouped = bool(config.get("notify_motion_grouped"))
+    episode_key = "__all__" if grouped else camera_id
+
+    _last_motion_any[episode_key] = now
+    _window_counts.setdefault(episode_key, Counter())[camera_id] += 1
+    if not _window_open.get(episode_key, False):
+        _window_open[episode_key] = True
+        _window_start[episode_key] = now
 
     if not config.get("notify_motion"):
         return
@@ -207,8 +246,6 @@ def on_motion(camera_id: str, capture_path: str = "") -> None:
     # 「その秒数以上静かだった後の検知」だけが新しい開始になり、常に
     # 開始 1 回 -> (その間の検知はまとめる) -> 終了 1 回、で対応する。
     reset_gap = float(config.get("notify_summary_after"))
-    grouped = bool(config.get("notify_motion_grouped"))
-    episode_key = "__all__" if grouped else camera_id
     is_new_episode = (now - _last_motion_seen.get(episode_key, 0.0)) >= reset_gap
     _last_motion_seen[episode_key] = now
 
@@ -363,39 +400,48 @@ async def sender_loop() -> None:
 
 
 async def summary_loop() -> None:
-    """無検知が続いたら、その期間の統計を 1 通にまとめて送る。"""
-    global _window_open, _window_counts, _window_start
+    """無検知が続いたら、その期間の統計を 1 通にまとめて送る。episode_key
+    (grouped=False ならカメラID、grouped=True なら "__all__") ごとに独立に
+    判定する — on_motion() 側の「検知しました」と同じ単位で閉じるため
+    (上の _window_* のコメント参照)。"""
     while True:
         await asyncio.sleep(15)
-        if not _window_open or not config.get("notify_motion"):
+        if not config.get("notify_motion"):
             continue
-        quiet = time.time() - _last_motion_any
-        if quiet < float(config.get("notify_summary_after")):
-            continue
+        now = time.time()
+        summary_after = float(config.get("notify_summary_after"))
+        for episode_key in list(_window_open):
+            if not _window_open.get(episode_key):
+                continue
+            last_any = _last_motion_any.get(episode_key, now)
+            quiet = now - last_any
+            if quiet < summary_after:
+                continue
 
-        total = sum(_window_counts.values())
-        if total == 0:
-            _window_open = False
-            continue
-        duration = _last_motion_any - _window_start
-        if not config.get("notify_summary"):
-            # 集計通知自体は無効でも、次の無検知ウィンドウのために状態は
-            # 通常どおりリセットする (でないと総数が積み上がり続ける)。
-            _window_counts = Counter()
-            _window_open = False
-            continue
-        fields = [{"name": cid, "value": f"{n} 回", "inline": True}
-                  for cid, n in _window_counts.most_common(10)]
-        fields.append({"name": "検知期間",
-                       "value": f"{datetime.fromtimestamp(_window_start):%H:%M} 〜 "
-                                f"{datetime.fromtimestamp(_last_motion_any):%H:%M} "
-                                f"({duration / 60:.0f} 分)",
-                       "inline": False})
-        fields.append({"name": "静穏時間", "value": f"{quiet / 60:.0f} 分", "inline": True})
-        fields.append({"name": "現在のモード", "value": MODE.mode, "inline": True})
-        title = _fmt("notify_summary_title", "検知が落ち着きました — 合計 {total} 回", {
-            "total": total, "duration_min": f"{duration / 60:.0f}", "quiet_min": f"{quiet / 60:.0f}",
-        })
-        _enqueue(_embed(title, color=0x6C7A89, fields=fields))
-        _window_counts = Counter()
-        _window_open = False
+            counts = _window_counts.get(episode_key) or Counter()
+            total = sum(counts.values())
+            if total == 0:
+                _window_open[episode_key] = False
+                continue
+            duration = last_any - _window_start.get(episode_key, last_any)
+            if not config.get("notify_summary"):
+                # 集計通知自体は無効でも、次の無検知ウィンドウのために状態は
+                # 通常どおりリセットする (でないと総数が積み上がり続ける)。
+                _window_counts[episode_key] = Counter()
+                _window_open[episode_key] = False
+                continue
+            fields = [{"name": cid, "value": f"{n} 回", "inline": True}
+                      for cid, n in counts.most_common(10)]
+            fields.append({"name": "検知期間",
+                           "value": f"{datetime.fromtimestamp(_window_start.get(episode_key, last_any)):%H:%M} 〜 "
+                                    f"{datetime.fromtimestamp(last_any):%H:%M} "
+                                    f"({_fmt_minsec(duration)})",
+                           "inline": False})
+            fields.append({"name": "静穏時間", "value": _fmt_minsec(quiet), "inline": True})
+            fields.append({"name": "現在のモード", "value": MODE.mode, "inline": True})
+            title = _fmt("notify_summary_title", "検知が落ち着きました — 合計 {total} 回", {
+                "total": total, "duration_min": f"{duration / 60:.0f}", "quiet_min": f"{quiet / 60:.0f}",
+            })
+            _enqueue(_embed(title, color=0x6C7A89, fields=fields))
+            _window_counts[episode_key] = Counter()
+            _window_open[episode_key] = False

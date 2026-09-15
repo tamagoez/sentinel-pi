@@ -441,9 +441,10 @@ try{
       <div class="row">
         <button onclick="applyRecommendedMotion()">推奨設定を適用</button>
         <span class="faint" style="font-size:12px">
-          オートフォーカスの誤検知を抑える方向の値に一括設定します
-          (オートフォーカス無効化・起動直後の判定休止を延長・面積比の下限を
-          引き上げ、など)。適用後カメラは再起動されます。
+          誤検知を抑えつつ、本物の動体は途切れず検知できる方向の値に
+          一括設定します (オートフォーカス無効化・起動直後の判定休止を
+          延長・面積比の下限を引き上げ・開始/終了それぞれに連続判定を
+          要求、など)。適用後カメラは再起動されます。
         </span>
       </div>
       <div class="row" style="margin-top:12px">
@@ -812,6 +813,8 @@ const MOTION_RECOMMENDED = {
   motion_area_max_ratio: 0.55,
   motion_interval: 1.0,
   motion_warmup_seconds: 4.0,
+  motion_confirm_checks: 2,   // 開始は 2 回連続 (既定の motion_interval=1秒なら約2秒) で確定
+  motion_release_checks: 3,   // 終了は 3 回連続無検知 (約3秒) まで粘り、ブツブツ途切れを防ぐ
   cam_autofocus: false,
   save_cooldown: 8.0,
 };
@@ -907,6 +910,7 @@ const CAM_SETTING_LABELS = {
   normal_fps:"通常時の FPS", eco_fps:"エコ時の FPS", motion_threshold:"動体の輝度差閾値",
   motion_area_ratio:"動体の面積比 (下限)", motion_area_max_ratio:"動体の面積比 (上限)",
   motion_interval:"判定間隔 (秒)", motion_warmup_seconds:"起動直後の判定休止 (秒)",
+  motion_confirm_checks:"開始に必要な連続検知回数", motion_release_checks:"終了に必要な連続無検知回数",
   cam_autofocus:"オートフォーカス",
   save_cooldown:"保存の間隔 (秒)", reconnect_seconds:"再接続間隔 (秒)",
 };
@@ -1774,8 +1778,8 @@ const GROUPS = [
   ["カメラ", ["cam_width","cam_height","cam_eco_width","cam_eco_height","jpeg_quality",
               "live_fps","normal_fps","eco_fps","retention_days","reconnect_seconds"]],
   ["動体検知", ["motion_threshold","motion_area_ratio","motion_area_max_ratio","motion_interval",
-                "motion_warmup_seconds","cam_autofocus","save_cooldown",
-                "motion_debug_log"]],
+                "motion_warmup_seconds","motion_confirm_checks","motion_release_checks",
+                "cam_autofocus","save_cooldown","motion_debug_log"]],
   ["音楽", ["music_enabled","music_autoplay_on_presence","music_volume","music_repeat",
             "music_shuffle","mpg123_buffer_kb","alsa_device"]],
   ["Bluetooth", ["bt_enabled","bt_poll_seconds"]],
@@ -1801,6 +1805,8 @@ const LABELS = {
   motion_area_max_ratio:"動体の面積比 (上限、これ以上は画面全体の変化として無視)",
   motion_interval:"判定間隔 (秒)",
   motion_warmup_seconds:"起動直後の判定休止 (秒、オートフォーカス対策)",
+  motion_confirm_checks:"動体「開始」に必要な連続検知回数 (誤検知の抑制)",
+  motion_release_checks:"動体「終了」に必要な連続無検知回数 (途切れの抑制)",
   cam_autofocus:"オートフォーカスを有効にする (対応機種のみ)",
   save_cooldown:"保存の間隔 (秒)",
   motion_debug_log:"動体判定の診断ログを記録する (下の「診断ログを取得」用)",
