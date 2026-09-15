@@ -42,6 +42,7 @@ CAMERA_OVERRIDE_KEYS = (
     "motion_interval", "motion_warmup_seconds", "cam_autofocus",
     "motion_confirm_checks", "motion_release_checks",
     "save_cooldown", "reconnect_seconds",
+    "corrupt_min_area_ratio", "corrupt_reboot_threshold",
 )
 
 
@@ -217,13 +218,29 @@ def read_motion_debug_log(cid: str) -> str:
 # パターンに一致する。再起動しても直らないのは、原因が USB 帯域という
 # 物理的な制約であり、プロセスを再起動しても帯域そのものは増えないため。
 #
-# 対策: 画面を粗い横バンドに分けて標準偏差を見る。一部のバンドだけが
-# 不自然に平坦 (デコードされずに単色/直前データで埋まった) で、かつ他の
-# バンドは通常どおり分散があるフレームを「破損」とみなし、そのフレームの
-# 公開 (latest.jpg・動体判定・保存) を丸ごとスキップする。これにより
+# 対策: 画面を粗い 2 次元グリッドに分けてセルごとに標準偏差を見る。一部の
+# セルだけが不自然に平坦 (デコードされずに単色/直前データで埋まった) で、
+# かつ他のセルは通常どおり分散があるフレームを「破損」とみなし、そのフレー
+# ムの公開 (latest.jpg・動体判定・保存) を丸ごとスキップする。これにより
 # 「見た目の不具合」自体は確実に消える (直前の正常なフレームが latest.jpg
 # に残り続けるだけになる)。画面全体が均一に暗い/白飛びしているだけの
-# 正常なシーン (全バンドが揃って平坦) は誤検知しないよう除外している。
+# 正常なシーン (全セルが揃って平坦) は誤検知しないよう除外している。
+#
+# **横方向のバンド (行) だけで判定していたときの検出漏れ**: 以前は画面を
+# 横一列のバンドに分け、「連続する行がまとまって平坦か」だけを見ていた。
+# 破損が画面の上下どちらかを丸ごと覆う場合はこれで検出できるが、破損が
+# 左右どちらかに偏る (縦方向の帯として出る) 場合、各行の中に破損部分
+# (平坦) と正常部分 (分散あり) が両方含まれることになり、行全体の標準
+# 偏差は正常部分の分散に引きずられて「平坦」と判定されない — 結果として
+# 検出そのものをすり抜けていた。実機で「約 70% の面積が単色で埋まって
+# いるのに、たまに検知をすり抜ける」と報告されたのはこれが原因だった
+# 可能性が高い (破損の向きによって検出できたりできなかったりする)。
+# 2 次元グリッドでセルごとに独立して判定し、面積比をそのまま「破損の
+# 疑いがあるか」の指標にすることで、破損が上下・左右・中央の矩形ブロック
+# など、どの向き・どの位置に出ても面積ベースで直接検出できるようにした。
+# **このグリッド分割をやめて横バンドだけの判定に戻さないでください** —
+# 同じ「破損の向きによっては検知をすり抜ける」不具合に戻ります。
+#
 # 破損が短時間に連発する場合は、UVC セッションが詰まっている可能性を
 # 考えて再接続する (直らなければ間隔を倍々に伸ばして無意味な再接続の
 # 連発を避ける)。それでも直らなければ帯域不足そのものが原因なので、
@@ -238,10 +255,14 @@ def read_motion_debug_log(cid: str) -> str:
 # まさにこのケースだった可能性が高い。同じ位置が _CORRUPT_LEARN_STREAK
 # 回連続したら「そのカメラの通常の絵」として学習し、以後は破損として
 # 扱わない (known_ok_patterns)。
-_CORRUPT_BANDS = 8
+_CORRUPT_GRID_COLS = 8
+_CORRUPT_GRID_ROWS = 6
 _CORRUPT_FLAT_STD = 3.0
-_CORRUPT_MIN_RUN = 3          # 8 バンド中 3 (37.5%) 以上が連続で平坦なら疑う
-_CORRUPT_CONTRAST_MULT = 4.0  # 平坦バンドと非平坦バンドの標準偏差の比
+# 全セルの何割が平坦なら疑うか。行単位だった頃の 37.5% (3/8 バンド) より
+# 引き下げている — セル単位の判定は行全体を巻き込まれず正確に「平坦な
+# 面積」を測れるため、より小さな破損領域でも過検知にならずに拾える。
+_CORRUPT_MIN_AREA_RATIO = 0.12
+_CORRUPT_CONTRAST_MULT = 4.0  # 平坦セルと非平坦セルの標準偏差の比
 _CORRUPT_HIST_LEN = 20
 _CORRUPT_RATE_THRESHOLD = 0.5
 _CORRUPT_RECONNECT_COOLDOWN = 20.0
@@ -261,35 +282,51 @@ _CORRUPT_LEARN_STREAK = 8
 _CORRUPT_REBOOT_THRESHOLD = 4
 
 
-def _frame_corruption_ratio(frame) -> tuple[float, tuple[bool, ...]] | None:
-    """粗い縦バンドの標準偏差から、フレームの一部だけが不自然に単色で
-    埋まっていないかを調べる。破損していなければ None、破損の疑いが
-    あれば (平坦なバンドの割合, バンドごとの平坦フラグのタプル) を返す。
-    後者は _worker() 側で「同じ位置が毎回引っかかっていないか」(=
-    レターボックスやビネットなどカメラ本来の絵である可能性) を追跡する
-    ために使う。64x48 に正規化してから判定するため、解像度が変わっても
-    バンド位置 (画面の上から何割目か) の意味は変わらない。"""
+def _frame_corruption_ratio(
+        frame, min_area_ratio: float = _CORRUPT_MIN_AREA_RATIO) -> tuple[float, tuple[bool, ...]] | None:
+    """粗い 2 次元グリッド (_CORRUPT_GRID_COLS x _CORRUPT_GRID_ROWS) の
+    セルごとの標準偏差から、フレームの一部だけが不自然に単色で埋まって
+    いないかを調べる。破損していなければ None、破損の疑いがあれば
+    (平坦なセルの面積比, セルごとの平坦フラグのタプル) を返す。後者は
+    _worker() 側で「同じ位置が毎回引っかかっていないか」(= レター
+    ボックスやビネットなどカメラ本来の絵である可能性) を追跡するために
+    使う。64x48 に正規化してから判定するため、解像度が変わってもセル
+    位置 (画面のどのあたりか) の意味は変わらない。
+
+    行 (横バンド) 単位ではなく 2 次元グリッドで判定しているのは、破損が
+    画面の左右どちらかに偏る場合 (縦方向の帯として出る場合) を確実に
+    拾うため — 行全体の標準偏差で見ると、その行に破損部分と正常部分が
+    両方含まれるだけで正常部分の分散に引きずられ「平坦」と判定されず、
+    検出をすり抜けてしまう (上のコメント参照)。
+
+    min_area_ratio は corrupt_min_area_ratio (カメラごとに上書き可能、
+    CAMERA_OVERRIDE_KEYS) をそのまま渡す想定。カメラによって USB 帯域の
+    逼迫具合や許容できる誤検知率が違うため、既定の 0.12 では感度が合わない
+    場合に調整できるようにしている。"""
     import cv2
     try:
         small = cv2.resize(frame, (64, 48), interpolation=cv2.INTER_AREA)
         gray = cv2.cvtColor(small, cv2.COLOR_BGR2GRAY).astype("float32")
     except Exception:
         return None
-    band_h = gray.shape[0] // _CORRUPT_BANDS
-    if band_h < 1:
+    h, w = gray.shape
+    cell_h = h // _CORRUPT_GRID_ROWS
+    cell_w = w // _CORRUPT_GRID_COLS
+    if cell_h < 1 or cell_w < 1:
         return None
-    stds = [float(gray[i * band_h:(i + 1) * band_h].std()) for i in range(_CORRUPT_BANDS)]
+    stds: list[float] = []
+    for r in range(_CORRUPT_GRID_ROWS):
+        for c in range(_CORRUPT_GRID_COLS):
+            cell = gray[r * cell_h:(r + 1) * cell_h, c * cell_w:(c + 1) * cell_w]
+            stds.append(float(cell.std()))
     flat = [s < _CORRUPT_FLAT_STD for s in stds]
-    best_run = run = 0
-    for f in flat:
-        run = run + 1 if f else 0
-        best_run = max(best_run, run)
-    if best_run < _CORRUPT_MIN_RUN:
+    flat_ratio = sum(flat) / len(flat)
+    if flat_ratio < min_area_ratio:
         return None
     non_flat = [s for s, f in zip(stds, flat) if not f]
     if not non_flat or max(non_flat) < _CORRUPT_FLAT_STD * _CORRUPT_CONTRAST_MULT:
         return None  # 画面全体が単に平坦なだけ (正常なシーン) は対象外
-    return best_run / _CORRUPT_BANDS, tuple(flat)
+    return flat_ratio, tuple(flat)
 
 
 # ---------------------------------------------------------------- ワーカー
@@ -505,7 +542,8 @@ def _worker(cid: str, device: str, stop: "Event", cfg: dict) -> None:
             failures = 0
             frames += 1
 
-            corrupt_result = _frame_corruption_ratio(frame)
+            corrupt_result = _frame_corruption_ratio(
+                frame, float(cfg.get("corrupt_min_area_ratio", _CORRUPT_MIN_AREA_RATIO)))
             if corrupt_result is not None:
                 _, corrupt_pattern = corrupt_result
                 # 同じ位置のバンドだけが何度も引っかかる場合は、破損では
@@ -563,7 +601,8 @@ def _worker(cid: str, device: str, stop: "Event", cfg: dict) -> None:
                     cap = None
                     applied_res = None
                     corrupt_unresolved_reconnects += 1
-                    if corrupt_unresolved_reconnects >= _CORRUPT_REBOOT_THRESHOLD:
+                    reboot_threshold = int(cfg.get("corrupt_reboot_threshold", _CORRUPT_REBOOT_THRESHOLD))
+                    if corrupt_unresolved_reconnects >= reboot_threshold:
                         # 再接続を繰り返しても直らない = ソフト側で打てる手を
                         # 尽くした。原因究明に使える情報 (device・破損/許容
                         # 件数・これまでの再接続回数) を添えて、親プロセスへ

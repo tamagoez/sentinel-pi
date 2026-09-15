@@ -98,6 +98,20 @@ async def lifespan(app: FastAPI):
         log.info("停止処理が完了しました")
 
 
+# asyncio.create_task() が返す Task はイベントループから弱参照でしか
+# 保持されない。どこにも強参照を残さずに create_task() の戻り値を捨てると、
+# ガベージコレクタがタスクを実行途中で回収してしまうことがある (公式ドキュ
+# メントが明記している既知の落とし穴)。_on_corrupt_reboot() は以前この
+# 戻り値を捨てていたため、緊急再起動 (CLAUDE.md #22) が「要求はログに出る
+# のに実際には Pi が再起動しない」という実害のある不具合になっていた —
+# emergency_reboot() 自体が複数回 await asyncio.sleep() を挟む (通知が
+# 飛ぶのを待つ、など) ため、GC に回収される猶予が十分にあった。
+# **この参照を外して `asyncio.create_task(...)` の戻り値を捨てる実装に
+# 戻さないでください** — 同じ「要求だけ出て実際には再起動されない」
+# 不具合に戻ります。
+_background_tasks: set[asyncio.Task] = set()
+
+
 def _on_corrupt_reboot(cid: str, info: dict) -> None:
     """camera.ON_CORRUPT_REBOOT フック。破損フレームが繰り返しの再接続
     でも解消しないときに camera.py から呼ばれる (同期呼び出し、CLAUDE.md
@@ -107,7 +121,9 @@ def _on_corrupt_reboot(cid: str, info: dict) -> None:
     reason = (f"再接続 {info.get('unresolved_reconnects')} 回でも解消せず"
              f" (device={info.get('device')}, corrupt_frames={info.get('corrupt_frames')},"
              f" corrupt_tolerated={info.get('corrupt_tolerated')}, reconnects={info.get('reconnects')})")
-    asyncio.create_task(maintenance.emergency_reboot(cid, reason))
+    task = asyncio.create_task(maintenance.emergency_reboot(cid, reason))
+    _background_tasks.add(task)
+    task.add_done_callback(_background_tasks.discard)
 
 
 async def _to_thread_safe(fn):

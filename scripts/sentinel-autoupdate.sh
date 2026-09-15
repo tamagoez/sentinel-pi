@@ -20,6 +20,11 @@ set -uo pipefail
 STATE_DIR=/var/lib/sentinel
 REPO_FILE="$STATE_DIR/repo-path"
 LOG_TAG=sentinel-autoupdate
+# Same default/override convention as sentinel-guardian.sh - install.sh
+# patches this Environment= line in the deployed systemd unit to the
+# actual storage path, same as it already does for sentinel-guardian.service.
+DATA="${SENTINEL_DATA:-/mnt/VIDEOSD/sentinel}"
+CONFIG_JSON="$DATA/config.json"
 
 say(){ logger -t "$LOG_TAG" -p daemon.notice -- "$*"; echo "$*"; }
 warn(){ logger -t "$LOG_TAG" -p daemon.warning -- "$*"; echo "$*" >&2; }
@@ -27,6 +32,28 @@ warn(){ logger -t "$LOG_TAG" -p daemon.warning -- "$*"; echo "$*" >&2; }
 if [[ $EUID -ne 0 ]]; then
   warn "must run as root"
   exit 1
+fi
+
+# Respect the "自動更新を有効にする" toggle in the Web UI settings tab
+# (system_autoupdate_enabled, core/config.py). This script has no direct
+# access to config.py's own path-resolution logic (it's a separate bash
+# process), so it reads config.json directly via python3 (already a hard
+# dependency of the app itself) - defaulting to enabled if the file is
+# missing/unreadable/the key absent, matching config.py's own DEFAULTS
+# fallback behavior.
+if [[ -f "$CONFIG_JSON" ]]; then
+  enabled=$(python3 -c "
+import json, sys
+try:
+    with open(sys.argv[1], encoding='utf-8') as f:
+        d = json.load(f)
+    print('0' if d.get('system_autoupdate_enabled', True) is False else '1')
+except Exception:
+    print('1')
+" "$CONFIG_JSON" 2>/dev/null || echo 1)
+  if [[ "$enabled" != "1" ]]; then
+    exit 0
+  fi
 fi
 
 # Nothing recorded yet (never installed from a git clone, or install.sh
