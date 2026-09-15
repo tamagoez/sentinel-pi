@@ -669,6 +669,53 @@ confirm_n/release_n に届く前に途切れているからか」をログだけ
 `motion_confirm_checks`/`motion_release_checks`/`motion_threshold` の
 どれを調整すべきか判断してください。
 
+### 22. カメラの破損が再接続でも解消しないときは、原因情報を残してから Pi ごと再起動する
+
+#19 の破損フレーム対策は「再接続しても直らなければ、これ以上ソフト側で
+できることはない」という前提で止めていました。しかしユーザーからは
+「再接続を試みても対処できない場合は Pi を reboot してほしい、かつ原因を
+解明できるようにしてほしい」という要望があり、実際 USB コントローラ自体が
+詰まっている・ケーブルやハブの物理的な問題など、プロセスの再接続では
+届かない原因はあり得ます。
+
+`camera.py` の `_worker()` に `corrupt_unresolved_reconnects` というカウンタ
+を追加しました。強制再接続 (#19) のたびに +1 し、直近 `_CORRUPT_HIST_LEN`
+枚が丸ごと正常だった (=本当に解消した) ときだけ 0 に戻します。1 枚良い
+フレームが来ただけでリセットする `corrupt_reconnect_backoff` より基準を
+厳しくしているのは、破損と正常が入り混じるカメラで「解消した」と誤判定
+してエスカレーションが一生起こらなくなるのを避けるためです。このカウンタ
+が `_CORRUPT_REBOOT_THRESHOLD` (既定 4 回) に達すると、`corrupt_reboot_request`
+ファイルに **device・corrupt_frames・corrupt_tolerated・reconnects・
+unresolved_reconnects** を添えて書き出し、`log.error()` も出します
+(自動的に `/api/errors` と診断バンドルに載る、CLAUDE.md「エラー収集の
+仕組み」参照)。**この情報を削らないでください** — 「原因を解明できる
+ように」という要望の核心で、機体が再起動されたあとでもこれが唯一の
+手がかりになります。
+
+実際に Pi を再起動する処理は `camera.py` からは行いません。カメラの
+ワーカーはあくまで「別プロセス」であり、複数カメラが同時に閾値へ達した
+ときに二重に `sudo reboot` を呼んでしまう競合を避けたいため、
+`camera.py` は `ON_CORRUPT_REBOOT` フック (`ON_MOTION` と同じパターン) 経由で
+要求を通知するだけに留め、`main.py` の `camera.loop()` 呼び出し元が
+`maintenance.emergency_reboot()` へ委譲します。`emergency_reboot()` は
+日次の `run_now()` と同じ「音楽・カメラを止めてから `_reboot()`」という
+手順・sudo フォールバックをそのまま再利用します (タイムラプス生成だけは
+省略 — 異常系なので原因究明を優先し、時間のかかる処理を挟まない)。
+**この委譲をやめて `camera.py` (=ワーカーが直接触れる側) から直接
+`sudo reboot` を呼ぶ実装や、`_reboot()` の sudo フォールバックを重複して
+書く実装に戻さないでください** — 複数カメラの二重再起動や、既存の
+再起動手順とのズレに戻ります。
+
+`camera.py` の `loop()` 側にも `last_reboot_attempt` による 10 分の
+クールダウンを設けています。複数カメラがほぼ同時に要求しても 1 回しか
+再起動しないための重複排除であると同時に、万一 `sudo reboot` が実際には
+実行されなかった場合 (sudoers の設定漏れなど) に**永久に諦めたままには
+ならない**ようにするためのものでもあります — クールダウンが明けたあとに
+まだ破損が続いていれば、`corrupt_unresolved_reconnects` は伸び続けている
+ので自然に再度要求されます。**このクールダウンを外して「一度要求したら
+二度と要求しない」実装にしないでください** — 最初の再起動要求が何らかの
+理由で失敗した場合に復旧手段が無くなります。
+
 ## モジュール構成
 
 各モジュールは疎結合で、`core/state.py` の `MODE` を購読するだけです。
@@ -719,7 +766,12 @@ modules/camera.py       カメラ (別プロセス)。動体検知 -> MODE.repor
                          回連続で閾値超えが続いて初めて「開始」、
                          motion_release_checks 回連続で閾値割れが続いて初めて
                          「終了」とする (1 回の判定をそのまま公開しない、
-                         CLAUDE.md #21)
+                         CLAUDE.md #21)。破損が強制再接続 (#19) を
+                         _CORRUPT_REBOOT_THRESHOLD 回繰り返しても解消しない
+                         場合は corrupt_reboot_request を書き、
+                         ON_CORRUPT_REBOOT フック経由で Pi 再起動を要求する
+                         (実際の再起動は maintenance.emergency_reboot() に
+                         委譲、CLAUDE.md #22)
 modules/music.py        mpg123 制御、位置復帰、yt-dlp キュー
 modules/thermal.py      温度と CPU -> MODE.report_temperature()
 modules/bluetooth.py    A2DP 接続検知 -> 音楽の退避と復帰。この Pi 自身の
@@ -743,7 +795,9 @@ modules/notify.py       Discord (レート制限対応キュー)。notify_motion
                          1 本に戻さないこと (CLAUDE.md #20)。検知期間/
                          静穏時間は _fmt_minsec() で 60 秒未満は秒表示
                          (CLAUDE.md #20)
-modules/maintenance.py  4 時の定時処理と再起動
+modules/maintenance.py  4 時の定時処理と再起動。emergency_reboot() は
+                         camera.py の破損検知エスカレーション専用の緊急
+                         再起動 (タイムラプス生成は省略、CLAUDE.md #22)
 
 web/routes.py           全 HTTP / WebSocket エンドポイント
 web/static/index.html   単一ファイル SPA
