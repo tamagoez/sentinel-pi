@@ -3,8 +3,8 @@
 日本語版: [SETUP.ja.md](SETUP.ja.md)
 
 Sentinel is installed from a git clone, and `setup.sh` walks you through it.
-It automates everything a script can decide and stops at the six points that
-need a person (marked **H1**–**H6** below).
+It automates everything a script can decide and stops at the seven points
+that need a person (marked **H1**–**H7** below).
 
 All console output — DietPi's and this project's — is English by design.
 Japanese does not render on a physical HDMI console or a bare serial
@@ -17,7 +17,7 @@ terminal. The Web UI stays Japanese; it renders in a browser.
 | 0 | (on your PC) | flash DietPi, edit `dietpi.txt` |
 | 1 | first boot | DietPi's own first-run setup |
 | 2 | `sudo ./setup.sh` | H1, H2 → `bootstrap.sh` → H3 (reboot) |
-| 3 | `sudo ./setup.sh` | H4, H5 → `install.sh` → H6 |
+| 3 | `sudo ./setup.sh` | H4, H5 → `install.sh` → H6 → H7 (optional) |
 
 `setup.sh` remembers where it stopped in `/var/lib/sentinel/setup-stage`, so
 after the reboot you run the same command again and it resumes. Re-running it
@@ -116,6 +116,7 @@ because the order matters:
 | 5 | Bluetooth, plus bluez / bluez-alsa-utils / mpg123 / v4l-utils / python3-opencv from APT | — |
 | 6 | Audio routed to the 3.5mm jack (`dietpi-set_hardware soundcard rpi-bcm2835-3.5mm`) | — |
 | 7 | SWAP disabled | — |
+| 8 | Tailscale installed (package only, via Tailscale's own install script — no dietpi-software ID exists for it) | — |
 
 - **H3 — the reboot.** Bluetooth, the audio route and the SWAP change need a
   restart. `setup.sh` offers to reboot; nothing has been installed to `/opt`
@@ -158,6 +159,16 @@ which re-checks the whole configuration every 2 minutes and repairs drift.
   2. the **Discord webhook URL**
   3. the **AdGuard Home password** — the one from H5, needed to read the
      query log
+- **H7 — Tailscale (optional).** `setup.sh` offers to run `tailscale up
+  --accept-dns=false`. Accept and it prints a login URL — open it on any
+  device to authenticate; the command waits until you do. The
+  `--accept-dns=false` flag keeps this Pi resolving DNS through AdGuard
+  Home instead of Tailscale's own resolver, which would otherwise silently
+  stop Sentinel's network log from seeing anything this Pi itself looks
+  up. That flag is not remembered between `tailscale up` invocations —
+  always repeat it if you ever run the command again by hand. Say no and
+  Tailscale stays installed but disconnected; connect later with the same
+  command.
 
 ## Running the phases by hand
 
@@ -168,6 +179,7 @@ sudo ./bootstrap.sh      # prerequisites
 reboot
 dietpi-drive_manager     # mount /mnt/VIDEOSD
 sudo ./install.sh        # the application itself
+sudo tailscale up --accept-dns=false   # optional: secure remote access
 ```
 
 ## Verifying it stuck
@@ -242,6 +254,6 @@ by hand on the box. `journalctl -t sentinel-autoupdate` shows its history.
 | Can't pair Bluetooth | `systemctl status sentinel-bt-agent`; `bluetoothctl show` should say `Discoverable: yes` |
 | A `sentinel-bluealsa*` unit shows `failed (start-limit-hit)` | `sudo systemctl reset-failed sentinel-bluealsa.service sentinel-bluealsa-aplay.service && sudo systemctl restart sentinel-bluealsa.service sentinel-bluealsa-aplay.service` (Guardian also does this automatically within 2 minutes) |
 | 8083 still reachable | `systemctl start sentinel-guardian`; `journalctl -t sentinel-guardian -n 20` |
-| Network log empty | AdGuard password wrong in the settings tab, or query logging off in AdGuard |
+| Network log empty | AdGuard password wrong in the settings tab, or query logging off in AdGuard; also check `tailscale status` if it started right after connecting Tailscale — DNS must have been accepted with `--accept-dns=false` |
 | `setup.sh` starts from the wrong phase | `sudo ./setup.sh --reset` |
 | Anything else | `sentinel-diagnose` — bundles system + app state into one archive |

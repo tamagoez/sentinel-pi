@@ -3,8 +3,8 @@
 English: [SETUP.md](SETUP.md)
 
 Sentinel は `git clone` してから `setup.sh` を実行して導入します。`setup.sh`
-はスクリプトで判断できる部分は自動で進め、人の判断が要る 6 か所
-(**H1**〜**H6**、下記) で止まって尋ねます。
+はスクリプトで判断できる部分は自動で進め、人の判断が要る 7 か所
+(**H1**〜**H7**、下記) で止まって尋ねます。
 
 DietPi 本体とこのプロジェクトのコンソール出力は、意図的にすべて英語です。
 物理 HDMI コンソールや素のシリアル端末では日本語グリフが正しく描画されない
@@ -17,7 +17,7 @@ DietPi 本体とこのプロジェクトのコンソール出力は、意図的�
 | 0 | (お使いの PC 上で) | DietPi を書き込み、`dietpi.txt` を編集 |
 | 1 | 初回起動 | DietPi 自体の初期設定 |
 | 2 | `sudo ./setup.sh` | H1・H2 → `bootstrap.sh` → H3 (再起動) |
-| 3 | `sudo ./setup.sh` | H4・H5 → `install.sh` → H6 |
+| 3 | `sudo ./setup.sh` | H4・H5 → `install.sh` → H6 → H7 (任意) |
 
 `setup.sh` は進捗を `/var/lib/sentinel/setup-stage` に記録するため、H3 の
 再起動後は同じコマンドを実行するだけで続きから再開します。いつ再実行しても
@@ -118,6 +118,7 @@ sudo ./setup.sh
 | 5 | Bluetooth、および APT からの bluez / bluez-alsa-utils / mpg123 / v4l-utils / python3-opencv | — |
 | 6 | 音声を 3.5mm ジャックへ ( `dietpi-set_hardware soundcard rpi-bcm2835-3.5mm` ) | — |
 | 7 | SWAP を無効化 | — |
+| 8 | Tailscale を導入 (パッケージのみ。dietpi-software に ID が無いため Tailscale 自身のインストールスクリプトを使う) | — |
 
 - **H3 — 再起動。** Bluetooth・音声出力・SWAP の変更は再起動しないと反映
   されません。`setup.sh` はここで再起動するか尋ねます。まだ `/opt` には
@@ -161,6 +162,17 @@ sudo ./setup.sh
   2. **Discord Webhook URL**
   3. **AdGuard Home のパスワード** — H5 で使ったもの。クエリログを読むのに
      必要です
+- **H7 — Tailscale (任意)。** `setup.sh` が `tailscale up --accept-dns=false`
+  を実行するか尋ねます。承諾するとログイン用 URL が表示されるので、任意の
+  端末でそれを開いて認証してください。コマンドは認証が終わるまで待機します。
+  `--accept-dns=false` を付けるのは、この Pi の DNS 解決を Tailscale 自身の
+  リゾルバへ切り替えさせず、引き続き AdGuard Home (127.0.0.1) に向けさせる
+  ためです — さもないと、この Pi 自身が行う名前解決について、AdGuard の
+  クエリログをそのまま読んでいる Sentinel のネットワークログが静かに
+  途絶えます。このフラグは `tailscale up` を実行するたびに毎回指定し直す
+  必要があります (前回の指定は憶えていません) — 手動で再度実行するときは
+  必ず付け直してください。断った場合も Tailscale 自体は導入済みのまま
+  未接続で残るので、同じコマンドでいつでも後から接続できます。
 
 ## 各フェーズを個別に実行する場合
 
@@ -171,6 +183,7 @@ sudo ./bootstrap.sh      # 前提ソフト
 reboot
 dietpi-drive_manager     # /mnt/VIDEOSD をマウント
 sudo ./install.sh        # アプリ本体
+sudo tailscale up --accept-dns=false   # 任意: 安全な外部アクセス
 ```
 
 ## 定着したことの確認
@@ -244,6 +257,6 @@ git リモートを確認し、新しいコミットがあれば自分で `updat
 | Bluetooth がペアリングできない | `systemctl status sentinel-bt-agent`。`bluetoothctl show` で `Discoverable: yes` になっているか |
 | `sentinel-bluealsa*` が `failed (start-limit-hit)` になっている | `sudo systemctl reset-failed sentinel-bluealsa.service sentinel-bluealsa-aplay.service && sudo systemctl restart sentinel-bluealsa.service sentinel-bluealsa-aplay.service` (Guardian も 2 分以内に自動で同じことをします) |
 | 8083 がまだ外から開ける | `systemctl start sentinel-guardian`。`journalctl -t sentinel-guardian -n 20` |
-| ネットワークログが空 | 設定タブの AdGuard パスワードが違う、または AdGuard 側でクエリログが無効 |
+| ネットワークログが空 | 設定タブの AdGuard パスワードが違う、または AdGuard 側でクエリログが無効。Tailscale 接続の直後に空になった場合は `tailscale status` を確認 — `--accept-dns=false` を付けずに接続していないか |
 | `setup.sh` が想定と違うフェーズから始まる | `sudo ./setup.sh --reset` |
 | それ以外 | `sentinel-diagnose` — システムとアプリの状態を 1 つのアーカイブにまとめます |

@@ -14,6 +14,7 @@
 #   H4  mount the external drive on /mnt/VIDEOSD (dietpi-drive_manager)
 #   H5  log in to AdGuard Home once, while it is still reachable directly
 #   H6  set the Web UI password / Discord webhook / AdGuard password
+#   H7  connect to Tailscale for secure remote access (optional)
 #
 # Progress is kept in /var/lib/sentinel/setup-stage, so after the reboot in
 # H3 you run the same command again and it continues where it left off.
@@ -312,4 +313,42 @@ cat <<EOS
        cd $SRC && sudo ./update.sh
 
 EOS
+
+# ---- H7: Tailscale (optional) --------------------------------------
+human "H7  Connect to Tailscale for secure remote access (optional)"
+if ! command -v tailscale >/dev/null; then
+  w "tailscale is not installed (bootstrap.sh should have installed it)."
+  w "Install it with: curl -fsSL https://tailscale.com/install.sh | sh"
+  w "then run: sudo tailscale up --accept-dns=false"
+elif tailscale status >/dev/null 2>&1 && ! tailscale status 2>/dev/null | grep -q '^Logged out'; then
+  ok "Already connected to a Tailscale network."
+else
+  cat <<'EOS'
+     Tailscale gives this Pi a private, encrypted address reachable from
+     anywhere, without opening any port on your router or running a
+     public HTTPS reverse proxy - the encryption is WireGuard, handled by
+     Tailscale itself, on top of the LAN-only design everything else here
+     assumes (see CLAUDE.md, "Deliberate omissions").
+
+     --accept-dns=false keeps this Pi resolving DNS through AdGuard Home
+     (127.0.0.1) instead of switching to Tailscale's own resolver -
+     otherwise Sentinel's network log, which reads straight from AdGuard's
+     query log, would go quiet for anything this Pi itself looks up.
+     See CLAUDE.md #39 if you ever run 'tailscale up' again by hand: this
+     flag is not remembered between runs, so it needs repeating each time.
+EOS
+  if ask_yn "Connect to Tailscale now?" Y; then
+    echo "     Starting the login flow - open the URL it prints, on any device,"
+    echo "     to authenticate. This command waits until you do (or times out)."
+    if tailscale up --accept-dns=false; then
+      ok "Connected to Tailscale."
+    else
+      w "tailscale up did not complete. Run it again any time:"
+      w "  sudo tailscale up --accept-dns=false"
+    fi
+  else
+    w "Skipped. Connect later with: sudo tailscale up --accept-dns=false"
+  fi
+fi
+
 ok "Setup complete."
