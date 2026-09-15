@@ -86,6 +86,16 @@ DEFAULTS: dict[str, Any] = {
                                            # 含む) はオートフォーカスの再合焦が起きや
                                            # すいため、この秒数は動体判定そのものを
                                            # スキップする
+    "motion_confirm_checks": 2,           # 動体「開始」とみなすまでに連続で閾値超え
+                                           # が必要な判定回数。1 回だけの判定 (照明の
+                                           # ちらつき・虫・圧縮ノイズなど) で即座に
+                                           # 通知まで流れてしまうのを防ぐヒステリシス
+                                           # (camera.py _worker() 参照)
+    "motion_release_checks": 3,           # 動体「終了」とみなすまでに連続で閾値割れ
+                                           # が必要な判定回数。本物の動体が続いている
+                                           # 最中に 1 回だけ ratio が閾値を割っただけで
+                                           # 検知が途切れて見えるのを防ぐ。開始より
+                                           # 少し長めにして、粘る方向に倒している
     "cam_autofocus": True,                # False でオートフォーカスを無効化 (対応
                                            # している機種のみ)。合焦動作そのものを
                                            # 動体と誤検知するカメラ向け
@@ -238,6 +248,8 @@ _RANGES: dict[str, tuple[float, float]] = {
     "motion_area_max_ratio": (0.05, 1.0),
     "motion_interval": (0.2, 10.0),
     "motion_warmup_seconds": (0.0, 30.0),
+    "motion_confirm_checks": (1, 10),
+    "motion_release_checks": (1, 10),
     "save_cooldown": (1.0, 300.0),
     "retention_days": (1, 3650),
     "music_volume": (0, 100),

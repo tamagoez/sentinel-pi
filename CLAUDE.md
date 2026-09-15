@@ -620,6 +620,55 @@ eco/critical で誰も見ておらず、かつフレーム間隔が長いとき�
    カメラ構成で開始・終了の単位が再びずれ、同じ「意味の薄い 0 分」報告に
    戻ります。
 
+### 21. 動体判定はヒステリシスで「開始」「終了」を確定する (1 回の判定だけで即断しない)
+
+#20 は通知側の表示・集計の不具合でしたが、実機からさらに「動体が無いのに
+0 分の検知が大量に通知される (=誤検知)」「継続的に動体がいるのに検知が
+ブツブツ途切れる」という報告があり、これは通知側ではなく検知そのものの
+不具合でした。
+
+`camera.py` の動体判定は、1 サイクル分のフレーム差分の面積比
+(`ratio`) が `motion_area_ratio`〜`motion_area_max_ratio` の範囲に
+入っているかどうかを見ているだけで、この 1 回の判定結果をそのまま
+`motion_flag` の書き込み (= notify.py への通知トリガー) に使っていました。
+1 回の判定は照明のちらつき・虫・圧縮ノイズなど一瞬の偶然でも簡単に閾値を
+跨ぐため、これをそのまま公開すると「動体が無いのに何度も検知される」に
+なります。逆に本物の動体が続いている最中でも、対象がわずかに静止した・
+背景と同化したなどで 1 サイクルだけ ratio が閾値を割ることがあり、これを
+そのまま公開すると「継続的に動体がいるのに検知が途切れて見える」になり
+ます。どちらも「1 回の判定を、そのまま公開状態として扱っている」ことが
+共通の原因です。
+
+`core/state.py` の `ModeManager` が温度のヒステリシス (`temp_eco_c`/
+`temp_recover_c`) でモードのバタつきを防いでいるのと同じ考え方を、動体
+判定にも適用しました。`_worker()` は 1 回ごとの判定を `raw_hit` として
+別に保持し、連続 `motion_confirm_checks` 回 `raw_hit` が続いて初めて
+「動体開始」、連続 `motion_release_checks` 回 `raw_miss` (= 非 raw_hit)
+が続いて初めて「動体終了」と確定します (`motion_confirmed` 変数)。
+`motion_flag` に書く・notify.py に流れる「公開用の motion」は、常に
+この確定後の状態であり、`raw_hit` そのものではありません。**この
+ヒステリシスを外して `raw_hit` をそのまま公開状態として使う実装に
+戻さないでください** — 同じ「誤検知の乱発」「検知のブツブツ途切れ」に
+戻ります。
+
+既定値は `motion_confirm_checks=2`・`motion_release_checks=3` です。
+開始より終了を少し長めにして「粘る」方向に倒しているのは、動体が完全に
+消えたと確信できるまで通知を送らない方が、途切れて何度も「開始」が届く
+より実用上ましだと判断したためです。値はカメラごとに上書きできます
+(`CAMERA_OVERRIDE_KEYS`) — 動きの速い被写体を扱うカメラでは
+`motion_confirm_checks` を小さく、逆に誤検知が多いカメラでは大きく、
+といった個別調整を想定しています。「推奨設定を適用」ボタン
+(`MOTION_RECOMMENDED`) にもこの 2 つを含めています。
+
+診断ログ (`motion_debug_log`) には `raw_hit`/`hit_streak`/`miss_streak`/
+`confirm_n`/`release_n` を追加しました。「`motion` が動かないのは
+`raw_hit` 自体が閾値に届いていないからか、それとも streak が
+confirm_n/release_n に届く前に途切れているからか」をログだけで切り分け
+られるようにするためです。次に「誤検知が多い」「検知が途切れる」と
+報告されたら、まずこのログで `raw_hit` の実際のパターンを見てから
+`motion_confirm_checks`/`motion_release_checks`/`motion_threshold` の
+どれを調整すべきか判断してください。
+
 ## モジュール構成
 
 各モジュールは疎結合で、`core/state.py` の `MODE` を購読するだけです。
@@ -665,7 +714,12 @@ modules/camera.py       カメラ (別プロセス)。動体検知 -> MODE.repor
                          motion_warmup_seconds (開いた直後は判定を休止) を持つ。
                          USB 帯域不足による破損フレーム (単色ブロック化/フレーム
                          混在) は _frame_corruption_ratio() で検出し、latest.jpg
-                         への公開・動体判定・保存の前に捨てる (CLAUDE.md #19)
+                         への公開・動体判定・保存の前に捨てる (CLAUDE.md #19)。
+                         動体判定自体もヒステリシスを持つ — motion_confirm_checks
+                         回連続で閾値超えが続いて初めて「開始」、
+                         motion_release_checks 回連続で閾値割れが続いて初めて
+                         「終了」とする (1 回の判定をそのまま公開しない、
+                         CLAUDE.md #21)
 modules/music.py        mpg123 制御、位置復帰、yt-dlp キュー
 modules/thermal.py      温度と CPU -> MODE.report_temperature()
 modules/bluetooth.py    A2DP 接続検知 -> 音楽の退避と復帰。この Pi 自身の
