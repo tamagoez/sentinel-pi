@@ -248,13 +248,46 @@ check_services() {
     systemctl list-unit-files "$u" &>/dev/null || continue
     systemctl is-enabled --quiet "$u" 2>/dev/null || {
       systemctl enable "$u" >/dev/null 2>&1 && fixed "enabled $u"; }
-    systemctl is-active --quiet "$u" || {
-      # A unit stuck "failed (start-limit-hit)" ignores a plain start
-      # ("start request repeated too quickly"); reset-failed clears that
-      # counter and is a harmless no-op otherwise.
-      systemctl reset-failed "$u" 2>/dev/null
-      systemctl start "$u" >/dev/null 2>&1 && fixed "started $u"; }
+    unit_needs_start "$u" || continue
+    # A unit stuck "failed (start-limit-hit)" ignores a plain start
+    # ("start request repeated too quickly"); reset-failed clears that
+    # counter and is a harmless no-op otherwise.
+    systemctl reset-failed "$u" 2>/dev/null
+    systemctl start "$u" >/dev/null 2>&1 && fixed "started $u"
   done
+}
+
+# `systemctl is-active` reports "inactive" for a Type=oneshot unit that ran
+# to completion and does not RemainAfterExit - that is its normal resting
+# state, not a fault. hciuart.service (the RPi's UART Bluetooth attach) is
+# exactly such a unit, and treating "inactive" as broken made Guardian
+# restart it on every single cycle: real hardware logged
+# "FIXED: started hciuart.service x5" within 9 minutes of uptime, i.e. one
+# per cycle, forever. That is not harmless noise - each restart
+# re-attaches the Bluetooth UART, which can knock bluetoothd's controller
+# out, which check_bluetooth() then "repairs" by restarting
+# bluetooth.service, which drags the BlueALSA units with it, which opens
+# and closes the bcm2835 ALSA device over and over. That open/close churn
+# is precisely what leaves the card in the wedged state behind
+# "music is playing but silent" (CLAUDE.md #45).
+# **Do not go back to a bare `systemctl is-active` check here** - it puts
+# the whole Bluetooth/audio restart cascade back on a 2-minute timer.
+unit_needs_start() {
+  local u="$1" state type rae since
+  state=$(systemctl show "$u" -p ActiveState --value 2>/dev/null)
+  [[ "$state" == "failed" ]] && return 0
+  case "$state" in active|activating|reloading|deactivating) return 1 ;; esac
+  type=$(systemctl show "$u" -p Type --value 2>/dev/null)
+  rae=$(systemctl show "$u" -p RemainAfterExit --value 2>/dev/null)
+  if [[ "$type" == "oneshot" && "$rae" != "yes" ]]; then
+    # Has it ever run? An empty InactiveEnterTimestamp means it never did,
+    # so one start is a real repair; anything else means it already did
+    # its job and going inactive was the expected ending.
+    since=$(systemctl show "$u" -p InactiveEnterTimestamp --value 2>/dev/null)
+    [[ -z "$since" ]] && return 0
+    return 1
+  fi
+  return 0
 }
 
 # ------------------------------------------------------------------ 6b. BlueALSA freshness
@@ -506,13 +539,22 @@ check_adguard_listen
 check_firewall
 check_audio
 check_bluetooth
+# Before check_services, not after: if the distro's own bluealsa.service is
+# holding the org.bluealsa D-Bus name, sentinel-bluealsa.service cannot
+# start no matter how many times check_services tries. Real hardware showed
+# the wrong order plainly - "started sentinel-bluealsa.service" at 14:20:23,
+# then "disabled bluealsa.service - it was holding org.bluealsa" ten seconds
+# later, i.e. the start was doomed before it was attempted. Clearing the
+# conflict first means check_services starts a unit that can actually run,
+# and saves a round of BlueALSA restarts (which churn the ALSA device -
+# CLAUDE.md #45).
+check_bluealsa_dbus
 check_services
 check_bluealsa_freshness
 check_hotspot_dns
 check_storage_owner
 check_syncthing_storage
 check_syncthing_gui
-check_bluealsa_dbus
 check_storage
 check_ytdlp
 

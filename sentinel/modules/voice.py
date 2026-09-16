@@ -72,6 +72,9 @@ from . import music
 
 log = logging.getLogger("sentinel.voice")
 
+# 同じ dmix エラーでログを埋めないための直近メッセージ。
+_mix_warned: str = ""
+
 _QUEUE: "asyncio.Queue[str]" = asyncio.Queue(maxsize=20)
 _LOOP: asyncio.AbstractEventLoop | None = None
 
@@ -173,12 +176,36 @@ def _mixing_ready() -> bool:
     ただ無音になるだけなので、そのときだけ曲を完全に止めてから喋る
     旧来の経路 (music.duck_for_voice()/resume_from_voice()) へ自動的に
     フォールバックする — 「重ねて鳴らせないなら、せめて交互にでも鳴らす」
-    という段階的劣化。"""
-    try:
-        out = subprocess.run(["aplay", "-L"], capture_output=True, text=True, timeout=5).stdout
-    except Exception:
+    という段階的劣化。
+
+    **`aplay -L` に名前があるかどうかでは判定しない。** あの一覧は
+    /etc/asound.conf に定義が書いてあることしか意味せず、dmix はスレーブ
+    (`hw:N,0`) を開いて初めて失敗する。名前は出続けるのに開けない状態で
+    `aplay -D sentinel_voice` を実行すると、ducking もされないまま何も
+    鳴らず、しかも音楽側も同じ理由で無音、という「エラーが無いのに
+    どちらも鳴らない」状態になっていた。core/audio.pcm_opens() で実物を
+    試す (CLAUDE.md #8 の can_write() と同じ原則)。"""
+    if not config.get("audio_mixing_enabled"):
         return False
-    return "sentinel_voice" in out.splitlines()
+    ok, err = audio.pcm_opens("sentinel_voice")
+    if not ok and err:
+        global _mix_warned
+        if err != _mix_warned:
+            _mix_warned = err
+            log.warning("sentinel_voice (dmix) を開けないため、曲を止めてから読み上げます: %s", err)
+    return ok
+
+
+def _fallback_device() -> str | None:
+    """dmix が使えないときに aplay へ渡すデバイス。
+
+    `-D` を付けずに鳴らすと ALSA の既定デバイスへ流れる。複数カードある
+    Pi では既定が HDMI になることが多く、「読み上げたつもりなのに 3.5mm
+    からは何も聞こえない」というエラーの出ない無音になる — music.py の
+    _spawn() が同じ理由で plughw を明示しているのと同じ対策
+    (CLAUDE.md #37)。"""
+    card = _sound_card()
+    return f"plughw:{card},0" if card is not None else None
 
 
 def _sound_card() -> int | None:
@@ -275,7 +302,7 @@ def speak_test(text: str) -> tuple[bool, str]:
     mixing = _mixing_ready()
     ducked = music.duck_for_voice() if not mixing else False
     try:
-        _speak_sync(text, "sentinel_voice" if mixing else None)
+        _speak_sync(text, "sentinel_voice" if mixing else _fallback_device())
     finally:
         if ducked:
             music.resume_from_voice()
@@ -302,7 +329,8 @@ async def loop() -> None:
         mixing = await asyncio.to_thread(_mixing_ready)
         ducked = await asyncio.to_thread(music.duck_for_voice) if not mixing else False
         try:
-            await asyncio.to_thread(_speak_sync, text, "sentinel_voice" if mixing else None)
+            await asyncio.to_thread(_speak_sync, text,
+                                    "sentinel_voice" if mixing else _fallback_device())
         finally:
             if ducked:
                 await asyncio.to_thread(music.resume_from_voice)

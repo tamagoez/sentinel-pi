@@ -147,6 +147,7 @@ chmod +x "$APP_DIR/scripts/"*.sh
 ln -sf "$APP_DIR/scripts/sentinel-diagnose.sh" /usr/local/bin/sentinel-diagnose
 ln -sf "$APP_DIR/scripts/sentinel-logs.sh" /usr/local/bin/sentinel-logs
 ln -sf "$APP_DIR/scripts/sentinel-adguard-8083.sh" /usr/local/bin/sentinel-adguard-8083
+ln -sf "$APP_DIR/scripts/sentinel-tailscale.sh" /usr/local/bin/sentinel-tailscale
 for f in setup.sh update.sh bootstrap.sh install.sh; do
   cp -f "$SRC/$f" "$APP_DIR/" 2>/dev/null || true
 done

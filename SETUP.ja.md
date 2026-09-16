@@ -278,4 +278,7 @@ git リモートを確認し、新しいコミットがあれば自分で `updat
 | `setup.sh` が想定と違うフェーズから始まる | `sudo ./setup.sh --reset` |
 | Syncthing の GUI に繋がらない、端末がペアリングできない | `systemctl status syncthing`、`journalctl -u syncthing -n 60 --no-pager` |
 | Syncthing が外部ドライブではなく SD カードに書き込んでいる | `stat -c '%d:%i' /mnt/VIDEOSD/syncthing /mnt/dietpi_userdata/syncthing` — 一致していれば正常 (同じバインドマウント)。一致していなければ Guardian の次の周期 (最大 2 分) を待つか、`sudo ./install.sh` を再実行 |
+| 音楽が「再生中」なのに無音 | `sudo sentinel-logs 2 full` の audio ブロックを見ます。`open sentinel_music` が FAILS なら Guardian が次の周期 (最大 2 分) で asound.conf を直します。急ぐときは `sudo /opt/sentinel/scripts/sentinel-fix-audio-output.sh`。切り分けとして設定タブの「音楽と音声アナウンスを同時に鳴らす」をオフにすると dmix を使わない経路になります |
+| Tailscale を後から設定したい | `sudo sentinel-tailscale up` — 表示されたログイン URL をスマホや PC のブラウザで開きます。状態は `sentinel-tailscale status` |
+| 状況をまとめて貼りたい | `sudo sentinel-logs` — いま問題になっている所だけを短く出します (`sentinel-logs 6 full` で範囲拡大 + 音声の実地テスト) |
 | それ以外 | `sentinel-diagnose` — システムとアプリの状態を 1 つのアーカイブにまとめます |

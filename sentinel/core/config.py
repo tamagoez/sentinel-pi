@@ -133,6 +133,14 @@ DEFAULTS: dict[str, Any] = {
     "music_shuffle_seed": 0,              # 0 なら起動時に生成
     "music_autoplay_on_presence": True,
     "mpg123_buffer_kb": 1024,             # アンダーラン対策のバッファ
+    "audio_mixing_enabled": True,         # ALSA dmix で音楽と音声アナウンスを
+                                           # 同時に鳴らす (CLAUDE.md #31)。
+                                           # False にすると dmix を一切使わず、
+                                           # 音楽はアナログ出力へ直接、読み上げ
+                                           # は曲を止めてから鳴らす #31 以前の
+                                           # 挙動に戻る。dmix・イコライザー・
+                                           # 同時再生のどれかを疑うときの切り分け
+                                           # 用スイッチ (オフでも音は鳴る)
     "alsa_device": "",                    # 空なら sentinel_music (dmix 経由、
                                            # 音声アナウンスと同時に鳴らせる。
                                            # CLAUDE.md #31) を使う

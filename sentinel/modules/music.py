@@ -75,7 +75,14 @@ _last_applied_eq: tuple | None = None
 # 一度失敗したら _EQ_RETRY_COOLDOWN_SEC が経つまで _apply_audio_mixing()
 # を呼ばない (mpg123 自体の再起動 = _spawn() はこの成否に関わらず進む)。
 _eq_sync_failed_at: float = 0.0
+
+# 直近に asound.conf へ実際に書かれた EQ の有無 (要求値ではない)。
+_last_effective_eq: bool | None = None
 _EQ_RETRY_COOLDOWN_SEC = 60.0
+
+
+# 同じ dmix エラーでログを埋めないための直近メッセージ。
+_mix_warned: str = ""
 
 
 def _card_index() -> int | None:
@@ -93,14 +100,43 @@ def _asound_card() -> int | None:
     return int(m.group(1)) if m else None
 
 
-def _mixing_ready() -> bool:
-    """sentinel-setup-audio-mixing.sh が sentinel_music という named PCM を
-    実際に用意できているか (voice.py の _mixing_ready() と対になる)。"""
+def _asound_eq_on() -> bool:
+    """/etc/asound.conf に LADSPA (mbeq) 段が実際に書かれているか。
+    sentinel-setup-audio-mixing.sh は EQ 付きの構成が開けなければ黙って
+    EQ 無しへ落とすし、sentinel-fix-audio-output.sh も壊れた asound.conf
+    を EQ 無しで書き直す。Player 側の記憶だけを信じると、ファイルの実態と
+    ズレたまま二度と直らない。"""
     try:
-        out = subprocess.run(["aplay", "-L"], capture_output=True, text=True, timeout=5).stdout
+        return "type ladspa" in Path("/etc/asound.conf").read_text(errors="replace")
     except Exception:
         return False
-    return "sentinel_music" in out.splitlines()
+
+
+def _mixing_ready() -> bool:
+    """sentinel_music (dmix 経由) が **実際に開けるか** (voice.py の
+    _mixing_ready() と対になる)。
+
+    以前は `aplay -L` の一覧に名前があるかどうかだけを見ていた。しかし
+    その一覧は /etc/asound.conf に定義が書いてあることしか意味せず、dmix
+    はスレーブ (`hw:N,0`) を開いて初めて失敗する — カード番号のズレ、他の
+    プロセスによるカードの占有、bcm2835 が開閉の連発で固まった状態
+    (CLAUDE.md #45) のいずれでも、名前は一覧に出続けるのに開けない。
+    その状態で mpg123 に `-a sentinel_music` を渡すと、**エラーも音も
+    出ないまま無音になる**。core/audio.pcm_opens() で実物を試す
+    (CLAUDE.md #8 の can_write() と同じ原則)。
+
+    設定タブの audio_mixing_enabled を切ると、この経路自体を使わずに
+    常にアナログ出力へ直接書く (dmix / 音声アナウンスとの同時再生 /
+    イコライザーを疑うときの切り分け用スイッチ)。"""
+    if not config.get("audio_mixing_enabled"):
+        return False
+    ok, err = audio.pcm_opens("sentinel_music")
+    if not ok and err:
+        global _mix_warned
+        if err != _mix_warned:
+            _mix_warned = err
+            log.warning("sentinel_music (dmix) を開けないため、アナログ出力へ直接再生します: %s", err)
+    return ok
 
 
 def resolve_eq_bands(track_name: str | None) -> list[float]:
@@ -120,10 +156,10 @@ def resolve_eq_bands(track_name: str | None) -> list[float]:
     return out
 
 
-def _apply_audio_mixing(enabled: bool, bands: list[float] | None) -> bool:
+def _apply_audio_mixing(enabled: bool, bands: list[float] | None) -> tuple[bool, bool]:
     card = _card_index()
     if card is None:
-        return False
+        return False, False
     script = config.APP_ROOT.parent / "scripts" / "sentinel-setup-audio-mixing.sh"
     args = ["sudo", "-n", str(script), str(card), "on" if enabled else "off"]
     if enabled:
@@ -132,12 +168,24 @@ def _apply_audio_mixing(enabled: bool, bands: list[float] | None) -> bool:
         p = subprocess.run(args, capture_output=True, text=True, timeout=30)
     except Exception as exc:
         log.warning("音声ミキシング設定の更新に失敗しました: %s", exc)
-        return False
+        return False, False
     if p.returncode != 0:
         log.warning("sentinel-setup-audio-mixing.sh が失敗しました: %s",
                     (p.stderr or p.stdout or "").strip())
-        return False
-    return True
+        audio.invalidate_pcm_cache()
+        return False, False
+    # asound.conf が書き換わった = 前回の「開ける/開けない」の判定はもう古い。
+    audio.invalidate_pcm_cache()
+    # スクリプトは LADSPA プラグインが無い / EQ 付きの構成が再生テストに
+    # 失敗した場合、黙って EQ 無しへ落として成功する (CLAUDE.md #32)。
+    # 最後の EQ_ACTIVE= 行がそのときの実際の状態なので、こちらを覚えて
+    # おかないと「要求は on、ファイルは off」というズレが毎曲ごとの再構成
+    # (= 曲間ギャップ) を招く。
+    effective = enabled
+    for line in (p.stdout or "").splitlines():
+        if line.startswith("EQ_ACTIVE="):
+            effective = line.split("=", 1)[1].strip() == "on"
+    return True, effective
 
 
 class Player:
@@ -331,7 +379,11 @@ class Player:
         限り毎回この 30 秒ブロックを踏んで実質的に復帰できなくなるのを
         防ぐため。mpg123 自体の再起動 (_spawn()) は、この EQ 再同期が
         失敗しても play() 側でそのまま続行される。"""
-        global _last_applied_eq, _eq_sync_failed_at
+        global _last_applied_eq, _eq_sync_failed_at, _last_effective_eq
+        if not config.get("audio_mixing_enabled"):
+            # dmix を使わない設定。asound.conf を書き換える意味がない
+            # (音楽はアナログ出力へ直接流れ、EQ は LADSPA 段ごと無効)。
+            return False
         enabled = bool(config.get("music_eq_enabled"))
         bands = resolve_eq_bands(track_name) if enabled else None
         card = _card_index()
@@ -345,16 +397,22 @@ class Player:
         # asound.conf をバックアップへ戻した場合 (CLAUDE.md #31)、key 上は
         # 「適用済み」なのに実際には sentinel_music が存在しない、という
         # ズレが残るため。
-        stale_file = card is not None and _asound_card() != card
+        stale_file = (card is not None and _asound_card() != card) or \
+                     (_last_effective_eq is not None and _asound_eq_on() != _last_effective_eq)
         if key == _last_applied_eq and not stale_file:
             return False
         now = time.time()
         if now - _eq_sync_failed_at < _EQ_RETRY_COOLDOWN_SEC:
             return False
-        if not _apply_audio_mixing(enabled, bands):
+        applied, effective = _apply_audio_mixing(enabled, bands)
+        if not applied:
             _eq_sync_failed_at = now
             return False
         _last_applied_eq = key
+        # 要求ではなく「実際にファイルへ書かれた状態」を覚える。ここで
+        # 要求側 (enabled) を覚えてしまうと、スクリプトが EQ 無しへ落とした
+        # 機体で毎曲ごとに再構成が走り、曲間にギャップが出続ける。
+        _last_effective_eq = effective
         if self.proc is not None:
             log.info("イコライザー設定が変わったため mpg123 を再起動します (enabled=%s)", enabled)
             self._send("S")
@@ -569,6 +627,20 @@ def set_track_eq_bands(track_name: str, bands: dict) -> dict:
     return cur
 
 
+def restart_playback() -> None:
+    """audio_mixing_enabled を切り替えた直後に呼ぶ (routes.py の
+    put_config から)。mpg123 の出力先 (`-a sentinel_music` か
+    `-a plughw:N,0` か) は起動時の引数で決まるため、プロセスを作り直さ
+    ないと切り替わらない — 設定を変えたのに次に曲が変わるまで何も起き
+    ない、という「効いていないように見える」状態を避けるため。"""
+    audio.invalidate_pcm_cache()
+    if PLAYER.proc is None and not PLAYER.playing:
+        return
+    pos = PLAYER.position
+    PLAYER.stop(terminate=True, reason="")
+    PLAYER.play(pos)
+
+
 def refresh_eq() -> None:
     """設定タブでイコライザーの有効/バンドを変更した直後に呼ぶ (routes.py
     の put_config から)。次に曲が切り替わるのを待たず、今かかっている曲
@@ -745,6 +817,11 @@ async def loop() -> None:
                 log.warning("mpg123 が停止していたため復帰させます (mpg123: %s)", tail)
             else:
                 log.warning("mpg123 が停止していたため復帰させます")
+            # 死因が ALSA 側なら dmix の判定も古い。キャッシュを捨てて
+            # 次の play() で sentinel_music を実際に開き直させる — 開け
+            # なければアナログ出力へ直接落ちるので、同じデバイスで死に
+            # 続ける復帰ループにはならない。
+            audio.invalidate_pcm_cache()
             await asyncio.to_thread(PLAYER.play, PLAYER.position)
 
         PLAYER.persist()
