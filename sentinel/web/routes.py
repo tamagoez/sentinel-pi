@@ -471,7 +471,16 @@ async def music_action(action: str, request: Request):
         url = str(body.get("url") or "").strip()
         if not url.startswith(("http://", "https://")):
             raise HTTPException(400, "URL が不正です")
-        music.enqueue_download(url)
+        try:
+            music.enqueue_download(url, str(body.get("category") or ""))
+        except ValueError as exc:
+            raise HTTPException(400, str(exc))
+    elif action == "category_filter":
+        # "" = フィルタなし (全曲)。存在しないフォルダ名を指定しても
+        # scan() 側が静かに全曲へフォールバックするだけなので、ここでは
+        # 検証せず素通しする。
+        config.update({"music_category_filter": str(body.get("category") or "")})
+        await asyncio.to_thread(p.scan)
     else:
         raise HTTPException(400, "不明な操作です")
     return {"ok": True, "status": p.status()}
@@ -480,12 +489,43 @@ async def music_action(action: str, request: Request):
 @router.delete("/api/music/track")
 async def delete_track(request: Request, name: str = Query(...)):
     require(request)
-    p = (config.MUSIC_DIR / name).resolve()
-    if not p.is_file() or config.MUSIC_DIR.resolve() not in p.parents:
+    # music.find_track_path() を使う理由: カテゴリー分け (CLAUDE.md #55)
+    # 導入後、曲は MUSIC_DIR 直下とは限らずサブフォルダの中にあることが
+    # ある。`config.MUSIC_DIR / name` を直接組み立てるだけでは、カテゴリー
+    # 内の曲を「見つかりません」と誤って 404 にしてしまう。
+    p = music.find_track_path(name)
+    if p is None or not p.is_file() or config.MUSIC_DIR.resolve() not in p.resolve().parents:
         raise HTTPException(404, "見つかりません")
     p.unlink()
     await asyncio.to_thread(music.PLAYER.scan)
     return {"ok": True}
+
+
+@router.put("/api/music/track/category")
+async def move_track_category(request: Request):
+    """曲をカテゴリー (MUSIC_DIR 直下のサブフォルダ) へ移動する。
+    body: {"name": "曲名.mp3", "category": "勉強用"} — category は
+    空文字列で「未分類」(MUSIC_DIR 直下) へ戻す。"""
+    require(request)
+    body = await request.json()
+    name = str(body.get("name") or "")
+    category = str(body.get("category") or "")
+    if not name:
+        raise HTTPException(400, "曲名が指定されていません")
+    try:
+        dest = await asyncio.to_thread(music.move_track, name, category)
+    except FileNotFoundError:
+        raise HTTPException(404, "見つかりません")
+    except (ValueError, FileExistsError) as exc:
+        raise HTTPException(400, str(exc))
+    await asyncio.to_thread(music.PLAYER.scan)
+    return {"ok": True, "path": str(dest.relative_to(config.MUSIC_DIR))}
+
+
+@router.get("/api/music/categories")
+async def music_categories(request: Request):
+    require(request)
+    return {"categories": music.list_categories()}
 
 
 # ---------------------------------------------------------------- 通知

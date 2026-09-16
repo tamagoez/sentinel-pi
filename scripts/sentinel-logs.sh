@@ -59,13 +59,20 @@ for u in sentinel.service sentinel-guardian.timer syncthing.service \
   fi
   kv "$u" "$state"
   # hciuart.service sitting at "inactive" is its normal resting state once
-  # it has attached the UART - Guardian's unit_needs_start() (CLAUDE.md
-  # #47/#50) treats it as healthy only when Type=/Result= say so, and both
-  # were guessed wrong once already (assumed Type=oneshot when real
-  # hardware is Type=forking). Print the actual values so the next report
-  # confirms rather than guesses.
+  # it has attached the UART. Guardian no longer tries to model this from
+  # Type=/Result= (CLAUDE.md #51 guessed Type=oneshot, then Type=forking
+  # with Result=success, and real hardware kept restarting it every cycle
+  # regardless of both) - check_services() now only restarts it on a
+  # genuine ActiveState=failed and leaves "inactive" alone (CLAUDE.md #52).
+  # Still print the actual property values here, labelled (not the
+  # earlier `paste -sd/ -` line, whose field order depended on what
+  # systemd happened to return for `-p X -p Y -p Z` in one call rather
+  # than the order requested - it read "forking/no/success" on real
+  # hardware and could not be matched back to Type=/RemainAfterExit=/
+  # Result= with confidence). Kept for whatever the next unrelated
+  # hciuart report turns out to need.
   if [[ "$u" == "hciuart.service" && "$state" == inactive* ]]; then
-    kv "  $u Type/Result" "$(systemctl show "$u" -p Type -p Result -p RemainAfterExit --value 2>/dev/null | paste -sd/ -)"
+    kv "  $u" "Type=$(systemctl show "$u" -p Type --value 2>/dev/null) Result=$(systemctl show "$u" -p Result --value 2>/dev/null) RemainAfterExit=$(systemctl show "$u" -p RemainAfterExit --value 2>/dev/null)"
   fi
 done
 

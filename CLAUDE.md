@@ -2140,6 +2140,98 @@ voice()` が下げる前の値へそのまま戻します。
 を持ちます。両方を同時に呼ぶことは無いはずですが、もし呼び出し順序を
 書き換える場合はこの前提を崩さないよう注意してください。
 
+### 55. hciuart.service の「inactive は毎周期再起動」は Type=/Result= を見るのをやめて解決した
+
+#51 (`unit_needs_start()` を `Type=oneshot` から `Type=forking` +
+`Result=success` へ広げる) をデプロイしたあとも、実機の `sentinel-logs`
+は `FIXED: started hciuart.service` を 2 時間49分の稼働でほぼ毎周期
+(58 回) 報告し続けました。`sentinel-logs` 自身が出す診断行
+(`hciuart.service Type/Result forking/no/success`) は #51 の想定どおり
+`Type=forking`・`Result=success` に見えましたが、この行は 3 つのプロパティ
+を 1 回の `systemctl show -p X -p Y -p Z --value` 呼び出しでまとめて
+取っており、**複数プロパティを一度に要求したときの出力順が、要求した
+順序どおりとは限らない** (systemd 側の内部順で返る可能性がある) ため、
+実際には `Type=`/`RemainAfterExit=`/`Result=` のどれがどの値なのか
+確実には読み取れていませんでした (この行自体は CLAUDE.md #51 の時点で
+既に不確実な作りだったと判明)。
+
+`Type`/`RemainAfterExit`/`Result` の組み合わせを言い当てようとする
+アプローチ自体を 2 回続けて外したため、この方針をやめました。
+`check_services()` は hciuart.service を「`ActiveState=failed` のとき
+だけ再起動する、`inactive` では一切触らない」という、`unit_needs_start()`
+を経由しない別ルートへ切り替えました。理由は単純です — hciuart が
+本当に壊れているかどうかを知りたいなら、**それを実際に必要としている
+機能 (`check_bluetooth()`、CLAUDE.md #12) が既に判定しています**。
+`bluetoothctl show` が実際にコントローラなしを報告したときだけ
+hciuart/bluetoothd を再起動する、という症状ベースの判定は Type=/Result=
+のどんな組み合わせよりも直接的で、二重に (しかも的外れに) 判定する
+理由がそもそもありませんでした。`check_services()` 側は「起動直後に
+failed のまま止まっている」という別の既知の競合 (CLAUDE.md #12) を
+拾うためだけに残しています。
+
+**このユニットだけ `unit_needs_start()` の inactive 判定へ戻さないで
+ください** — Type=/Result= をどう組み合わせても、実機の systemd が
+実際に何を返すかはドキュメントの記述と一致するとは限らず (今回がまさに
+それでした)、机上の想定が外れるたびに同じ「毎周期再起動」に戻ります。
+`sentinel-logs` の診断行も、複数プロパティを 1 回でまとめて取る
+`paste -sd/ -` 方式をやめ、`Type=`/`Result=`/`RemainAfterExit=` を
+それぞれ独立した `systemctl show` 呼び出しでラベル付きに出すよう直し
+ました — 今回のような「どの値がどのプロパティか分からない」不確実性
+自体を無くすためです。bash のスタブ `systemctl` を使ったテストで、
+(1) hciuart 相当の `inactive` 状態は `ActiveState=failed`/`active`
+どちらでもない限り一切再起動されない、(2) `ActiveState=failed` のときは
+確実に再起動される、の 2 点を確認済みです。
+
+### 56. 音楽をカテゴリー (MUSIC_DIR 直下のサブフォルダ) で分け、その中だけを再生できるようにする
+
+「勉強用 BGM」「休憩用 BGM」のようにカテゴリー分けし、そのカテゴリー
+だけを再生したいという要望がありました。**カテゴリー = `music.MUSIC_DIR`
+直下のサブフォルダ**という、追加のデータ構造やメタデータファイルを
+持たないシンプルな実装にしています — `Player.scan()` は元々 `rglob("*")`
+でサブフォルダも横断して曲を拾っていたため (フラットな一覧として)、
+「サブフォルダをカテゴリーとして扱う」という解釈を足すだけで済み、
+既存のライブラリ構造を壊しません。深さは 1 段だけを見ます
+(`music._category_of()`) — ネストした分類までは想定していません。
+
+- **`music.list_categories()`** が `MUSIC_DIR` 直下のディレクトリ名を
+  列挙します。ドットで始まるフォルダ (隠しフォルダ) は除外します。
+- **`config.music_category_filter`** (既定 "" = フィルタなし) に
+  カテゴリー名を入れると、`Player.scan()` がそのフォルダの曲だけへ
+  `self.tracks` を絞り込みます。**存在しない/1 曲も無いカテゴリーを
+  指定した場合は全曲へ静かにフォールバックします** — 空の再生対象で
+  立ち往生させるより、まず鳴らし続けることを優先しました。設定タブの
+  一般設定 (GROUPS/LABELS) には出していません — 音楽タブに専用の
+  `<select>` (`#m-cat-filter`) を置き、`music.py` の他の再生制御
+  (シャッフル/リピートなど) と同じ「音楽タブ内で完結する」設計に揃えて
+  います。
+- **`music.move_track(name, category)`** が曲を実際に別のサブフォルダへ
+  移動します (`category=""` で「未分類」= MUSIC_DIR 直下へ戻す)。
+  カテゴリー名はファイルシステム上のフォルダ名としてそのまま使うため、
+  `music._valid_category()` でパス区切り文字・先頭のドット・長すぎる
+  名前を弾きます (yt-dlp の URL のような自由入力ではなく実体を作る
+  検証が要る、という点は #24 の hciuart とは別文脈ですが同じ考え方)。
+  移動先に同名の曲が既にあれば `FileExistsError` で止め、無言で
+  上書き/データ消失させることはしません。
+- **`music.find_track_path(name)`** を新設しました。カテゴリー分け導入
+  前は「曲名 = MUSIC_DIR 直下のファイル名」で済んでいたため、
+  `/api/music/track` (削除) は `config.MUSIC_DIR / name` を直接組み
+  立てていましたが、これはサブフォルダ内の曲を「見つかりません」と
+  誤って 404 にしてしまいます。`find_track_path()` は既にスキャン済みの
+  `PLAYER.tracks` (全カテゴリーを横断済み) から曲名で探すため、
+  どのカテゴリーにあっても正しく見つかります。**削除ルートを
+  `config.MUSIC_DIR / name` の直接組み立てに戻さないでください** —
+  同じ「カテゴリー内の曲が消せない」不具合に戻ります。曲名を一意な
+  キーとして扱う前提そのものは、既存のイコライザー曲別設定
+  (`music_eq_track_overrides`、CLAUDE.md #32) と同じものを踏襲して
+  います — 同名ファイルが複数カテゴリーに存在する場合は最初に見つかった
+  ものを返す、という仕様も含めて EQ 上書きの前提と揃えています。
+- **yt-dlp のダウンロード自体もカテゴリーを直接指定できます**
+  (`music.enqueue_download(url, category)` → `_run_ytdlp()` の `-o`
+  テンプレートの保存先ディレクトリを切り替えるだけ)。あとから
+  `move_track()` で仕分けるのではなく、取得時点で仕分け先を選べる
+  ようにするためです。フォルダがまだ無ければ `mkdir(parents=True)` で
+  作ります。
+
 ## モジュール構成
 
 各モジュールは疎結合で、`core/state.py` の `MODE` を購読するだけです。
@@ -2300,7 +2392,12 @@ modules/music.py        mpg123 制御、位置復帰、yt-dlp キュー。alsa_d
                          duck_volume_for_voice()/resume_volume_after_voice()
                          は曲を止めずに音量だけ voice_duck_percent の割合
                          まで一時的に下げる — 曲を完全停止する
-                         duck_for_voice() とは別物 (CLAUDE.md #54)
+                         duck_for_voice() とは別物 (CLAUDE.md #54)。
+                         カテゴリー (「勉強用」「休憩用」) は MUSIC_DIR
+                         直下のサブフォルダそのもの。music_category_filter
+                         で再生対象を絞り込み、move_track()/
+                         find_track_path() で曲名からカテゴリーをまたいで
+                         実ファイルを扱う (CLAUDE.md #56)
 modules/thermal.py      温度と CPU -> MODE.report_temperature()
 modules/bluetooth.py    A2DP 接続検知 -> 音楽の退避と復帰。この Pi 自身の
                          表示名 (set_local_name、bluetoothctl system-alias)

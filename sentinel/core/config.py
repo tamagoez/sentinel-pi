@@ -130,6 +130,13 @@ DEFAULTS: dict[str, Any] = {
     "music_volume": 60,                   # 0-100
     "music_shuffle": True,
     "music_repeat": "all",                # all | one | off
+    "music_category_filter": "",          # 空なら全曲。music.MUSIC_DIR 直下の
+                                           # サブフォルダ名 (「勉強用」「休憩用」
+                                           # のようなカテゴリー分け、
+                                           # music.list_categories() 参照) を
+                                           # 指定すると、そのフォルダの曲だけを
+                                           # 再生対象にする (Player.scan() が
+                                           # 都度これを見て絞り込む)
     "music_shuffle_seed": 0,              # 0 なら起動時に生成
     "music_autoplay_on_presence": True,
     "mpg123_buffer_kb": 1024,             # アンダーラン対策のバッファ
