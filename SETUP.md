@@ -173,22 +173,24 @@ which re-checks the whole configuration every 2 minutes and repairs drift.
 - **H8 — Lockstep Sync (optional), for Obsidian sync.** Requires the
   [Lockstep Sync](https://community.obsidian.md/plugins/lockstep-sync)
   community plugin in Obsidian on each device — this step only sets up and
-  pairs the *server* side on the Pi. It requires H7 (Tailscale) to already
-  be connected: the server is reachable only over your tailnet, never the
-  open LAN or internet, enforced by Guardian re-applying an iptables rule
-  every 2 minutes (the same pattern already used for AdGuard's :8083, see
-  CLAUDE.md #61). Pairing has no web GUI — `setup.sh` prints the exact
-  commands to run, which generate a one-time pairing link (valid 60
-  minutes) plus its QR code for the first device, and a fresh token for
-  each device after that. Lockstep Sync is end-to-end encrypted and keeps
-  no plaintext copy of your vault on the Pi itself, unlike Syncthing.
+  pairs the *server* side on the Pi. The server is reachable on the plain
+  LAN, same as this project's own Web UI (`:8080`) — no Tailscale needed
+  for devices that stay at home. Pairing has no web GUI — `setup.sh`
+  prints the exact commands to run, which generate a one-time pairing
+  link (valid 60 minutes) plus its QR code for the first device, and a
+  fresh link/token for each device after that; each pairing bakes in the
+  address that device will use, so pick the LAN address for one that
+  never leaves home, or the Tailscale address (if H7 is connected) for
+  one that also needs "away from home" access. Lockstep Sync is
+  end-to-end encrypted and keeps no plaintext copy of your vault on the
+  Pi itself, unlike Syncthing.
   **Requires a 64-bit (ARM64) DietPi image** — Lockstep Sync's server has
   no 32-bit ARM build, the same constraint that ruled out Self-hosted
   LiveSync + CouchDB when Syncthing was first chosen (CLAUDE.md #40); if
   your image is 32-bit, this step is skipped automatically and Obsidian
-  sync is left unconfigured. See CLAUDE.md #61 for the full reasoning,
-  including why the server runs as the `sentinel` user rather than a
-  separate one.
+  sync is left unconfigured. See CLAUDE.md #61/#62 for the full
+  reasoning, including why the server runs as the `sentinel` user rather
+  than a separate one.
 
 ## Running the phases by hand
 
@@ -234,7 +236,7 @@ and repairs it:
 | Hotspot DNS target | hotspot reconfigured | point back at AdGuard |
 | Disk space | accumulation | warn at 92%, keep one diagnostics bundle |
 | yt-dlp version | site changes | try an update weekly |
-| Lockstep Sync port 8384 reachable outside Tailscale | reboot, hostapd | re-insert iptables rules (allows only `lo`/`tailscale0`) |
+| Lockstep Sync port 8384 blocked by a leftover firewall rule | a Pi upgraded from an earlier version that restricted it to Tailscale-only | remove the old iptables DROP rules (now reachable on the LAN by default, like the Web UI) |
 
 ## Updating
 
@@ -278,7 +280,9 @@ by hand on the box. `journalctl -t sentinel-autoupdate` shows its history.
 | Network log empty | AdGuard password wrong in the settings tab, or query logging off in AdGuard; also check `tailscale status` if it started right after connecting Tailscale — DNS must have been accepted with `--accept-dns=false` |
 | `setup.sh` starts from the wrong phase | `sudo ./setup.sh --reset` |
 | Lockstep Sync server not running or devices won't pair | `systemctl status sentinel-lockstep-sync`; `journalctl -u sentinel-lockstep-sync -n 60 --no-pager` |
-| Lockstep Sync unreachable from another device | Make sure that device is on the same tailnet (`tailscale status`) — it is deliberately unreachable from the plain LAN or internet, only `tailscale0` (CLAUDE.md #61) |
+| Lockstep Sync `http://<Pi-IP>:8384` gives 404 in a browser | Normal — there is no web GUI, only the API the plugin/CLI talk to (CLAUDE.md #62). Pair with the `link`/`token add` commands from H8 instead |
+| Lockstep Sync unreachable from another device on the LAN | Confirm the device used the Pi's actual LAN IP, and check `sudo ss -ltn 'sport = :8384'` shows it listening on `0.0.0.0` (CLAUDE.md #62) |
+| Lockstep Sync unreachable from a device away from home | That device needs Tailscale connected to the same tailnet, and must have been paired with the Tailscale address, not the LAN one (`tailscale status`, CLAUDE.md #62) |
 | Music says "playing" but is silent | Read the audio block of `sudo sentinel-logs 2 full`. If `open sentinel_music` FAILS, Guardian rewrites asound.conf within 2 minutes; to do it now, run `sudo /opt/sentinel/scripts/sentinel-fix-audio-output.sh`. To rule mixing out entirely, turn off "play music and voice at the same time" in Settings |
 | Setting up Tailscale later | `sudo sentinel-tailscale up` — open the printed login URL in any browser. Check with `sentinel-tailscale status` |
 | Pasting the current state somewhere | `sudo sentinel-logs` — a short digest of just what is currently wrong (`sentinel-logs 6 full` widens it and adds real audio open tests) |
