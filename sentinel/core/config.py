@@ -119,8 +119,16 @@ DEFAULTS: dict[str, Any] = {
                                            # 低くすると小さな破損も拾いやすくなる
                                            # 代わりに誤検知が増える (CLAUDE.md #19)
     "corrupt_reboot_threshold": 4,        # 強制再接続してもこの回数だけ破損が
-                                           # 解消しなければ Pi 本体を再起動する
-                                           # (CLAUDE.md #22)
+                                           # 解消しなければ、まずカメラを完全に
+                                           # 切断する中間段階へ進み、それでも
+                                           # この回数だけ解消しなければ Pi 本体を
+                                           # 再起動する (CLAUDE.md #22/#57)
+    "corrupt_disconnect_seconds": 180,    # 上の中間段階で、カメラを完全に
+                                           # 切断しておく秒数。プロセス内の素早い
+                                           # 再接続 (数百ミリ秒) だけでは解消
+                                           # しない USB 帯域の逼迫などを想定し、
+                                           # Pi 本体の再起動より先に試す
+                                           # (CLAUDE.md #57)
     "camera_overrides": {},               # カメラID -> {設定キー: 値, ...}
                                            # 個別カメラだけ上の共有値を上書きする。
                                            # キーが無い/空ならそのカメラは共有値を使う。
@@ -240,7 +248,16 @@ DEFAULTS: dict[str, Any] = {
                                            # 参照)、60 の約数でなければ :00 と
                                            # 揃わない半端な時刻に鳴る。既定の 30
                                            # なら毎時 :00 と :30 に鳴る
-    "voice_time_text": "{hour}時{minute}分です",           # {hour} {minute}
+    "voice_time_text": "{hour}時{minute_part}です",         # {hour} {minute} {minute_part}
+                                           # {minute_part} は 0 分のとき空文字になる
+                                           # ({minute} は常に数値のまま渡る) -
+                                           # 既定文で「12時0分です」ではなく
+                                           # 「12時です」と言うための専用
+                                           # プレースホルダ (voice.py 参照)
+    "voice_chime_enabled": False,         # 時報と同時に短い効果音を重ねて鳴らす。
+                                           # dmix でミキシングできる場合のみ有効
+                                           # (曲を完全停止する経路では鳴らさない -
+                                           # そちらは「同時に」を満たせないため)
     "voice_error_enabled": True,          # エラー通知 (定時処理の例外など) を喋る
     "voice_error_text": "{message}",                        # {message}
     "voice_camera_reboot_enabled": True,  # カメラ破損によるPi緊急再起動を喋る
@@ -331,6 +348,7 @@ _RANGES: dict[str, tuple[float, float]] = {
     "save_cooldown": (1.0, 300.0),
     "corrupt_min_area_ratio": (0.02, 0.9),
     "corrupt_reboot_threshold": (1, 20),
+    "corrupt_disconnect_seconds": (30, 1800),
     "retention_days": (1, 3650),
     "music_volume": (0, 100),
     "mpg123_buffer_kb": (64, 8192),

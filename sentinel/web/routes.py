@@ -29,6 +29,29 @@ router = APIRouter()
 COOKIE = "sentinel_session"
 _SESSIONS: dict[str, float] = {}
 
+# asyncio.create_task() が返す Task はイベントループから弱参照でしか保持
+# されない (main.py の _background_tasks と同じ理由、CLAUDE.md #29)。この
+# ルーターにも「HTTP ハンドラがレスポンスを返してすぐ戻る = 呼び出し元の
+# スタックフレームがすぐ消える」ため強参照が一切残らない fire-and-forget
+# な create_task() が複数あり、main.py 側の対策だけではここは救われない。
+# 定時処理の手動起動 (maintenance_run) がこの穴に落ちると、実行中に GC が
+# タスクを回収し、maintenance.run_now() の finally で STATE["running"] が
+# False に戻る前に消える — 以後 STATE["running"] が True のまま固定され、
+# 4時の定時ループ (maintenance.loop()) が呼ぶ run_now() も毎回「すでに
+# 実行中です」で即座に空振りし続け、動画生成も (run_now() 内でしか呼ばれ
+# ない) 再起動も二度と起こらなくなる。実機で報告された「定時処理の動画
+# 生成が止まり、再起動もされない」症状と一致する。
+# **この参照保持を外して create_task() の戻り値を再び捨てる実装に戻さ
+# ないでください** — 同じ「定時処理が永久に固まる」不具合に戻ります。
+_background_tasks: set[asyncio.Task] = set()
+
+
+def _spawn(coro) -> asyncio.Task:
+    task = asyncio.create_task(coro)
+    _background_tasks.add(task)
+    task.add_done_callback(_background_tasks.discard)
+    return task
+
 
 # ---------------------------------------------------------------- 認証
 
@@ -889,7 +912,7 @@ async def maintenance_run(request: Request):
     except Exception:
         body = {}
     reboot = bool(body.get("reboot", False))
-    asyncio.create_task(maintenance.run_now(reboot=reboot))
+    _spawn(maintenance.run_now(reboot=reboot))
     return {"ok": True, "message": "定時処理を開始しました"}
 
 
@@ -903,7 +926,7 @@ async def system_reboot(request: Request):
         await asyncio.sleep(2)
         await asyncio.to_thread(maintenance._reboot)
 
-    asyncio.create_task(go())
+    _spawn(go())
     return {"ok": True}
 
 

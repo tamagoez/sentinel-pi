@@ -85,7 +85,7 @@ log = logging.getLogger("sentinel.voice")
 # 同じ dmix エラーでログを埋めないための直近メッセージ。
 _mix_warned: str = ""
 
-_QUEUE: "asyncio.Queue[str]" = asyncio.Queue(maxsize=20)
+_QUEUE: "asyncio.Queue[tuple[str, str]]" = asyncio.Queue(maxsize=20)
 _LOOP: asyncio.AbstractEventLoop | None = None
 
 STATE = {"spoken": 0, "skipped": 0, "last_error": "", "last_spoken_at": 0.0,
@@ -93,7 +93,7 @@ STATE = {"spoken": 0, "skipped": 0, "last_error": "", "last_spoken_at": 0.0,
 
 # カテゴリ -> (有効フラグの設定キー, 読み上げ文テンプレートの設定キー, 既定テンプレート)
 _CATEGORY_KEYS = {
-    "time": ("voice_time_enabled", "voice_time_text", "{hour}時{minute}分です"),
+    "time": ("voice_time_enabled", "voice_time_text", "{hour}時{minute_part}です"),
     "error": ("voice_error_enabled", "voice_error_text", "{message}"),
     "camera_reboot": ("voice_camera_reboot_enabled", "voice_camera_reboot_text", "{message}"),
     "other": ("voice_other_enabled", "voice_other_text", "{message}"),
@@ -127,12 +127,12 @@ def announce(message: str = "", category: str = "other", **extra) -> None:
     if _LOOP is None:
         return
     text = _fmt(text_key, default_tpl, {"message": message, **extra})
-    _LOOP.call_soon_threadsafe(_enqueue, text)
+    _LOOP.call_soon_threadsafe(_enqueue, text, category)
 
 
-def _enqueue(text: str) -> None:
+def _enqueue(text: str, category: str) -> None:
     try:
-        _QUEUE.put_nowait(text)
+        _QUEUE.put_nowait((text, category))
     except asyncio.QueueFull:
         STATE["skipped"] += 1
         log.warning("音声キューが満杯のため破棄しました: %s", text)
@@ -225,6 +225,73 @@ def _sound_card() -> int | None:
     return audio.find_output_card()
 
 
+_CHIME_PATH = config.RUNTIME / "voice-chime.wav"
+
+
+def _chime_path() -> "Path":
+    """時報と重ねて鳴らす短い効果音の実ファイル。初回だけ標準ライブラリの
+    wave/math で合成してキャッシュする — バイナリ音源を同梱しない
+    (CLAUDE.md「依存を増やさない」と同じ判断)。生成先は config.RUNTIME
+    (tmpfs) — 高頻度書き込みではなく初回の 1 回きりだが、他の実行時生成物
+    (motion_debug.jsonl など) と同じ置き場所に揃えている (CLAUDE.md #3)。"""
+    from pathlib import Path
+    path: Path = _CHIME_PATH
+    if not path.exists() or path.stat().st_size <= 44:
+        _synthesize_chime(path)
+    return path
+
+
+def _synthesize_chime(path) -> None:
+    import math
+    import struct
+    import wave
+
+    rate = 22050
+    # A5 -> E6 の 2 音、ベル風の減衰チャイム。全体で 0.5 秒弱 - 時報の
+    # 発話時間 (少なくとも数秒) の頭に確実に収まり、聞こえた瞬間に
+    # 「時報が来た」と分かる程度の長さにしている。
+    notes = ((880.0, 0.16), (1318.51, 0.26))
+    samples: list[int] = []
+    for freq, dur in notes:
+        n = int(rate * dur)
+        fade = max(1, int(n * 0.12))
+        for i in range(n):
+            env = 1.0
+            if i < fade:
+                env = i / fade
+            elif i > n - fade:
+                env = (n - i) / fade
+            val = math.sin(2 * math.pi * freq * i / rate) * env * 0.5
+            samples.append(int(max(-1.0, min(1.0, val)) * 32767))
+        samples.extend([0] * int(rate * 0.02))
+    tmp = path.with_suffix(".tmp")
+    with wave.open(str(tmp), "wb") as wf:
+        wf.setnchannels(1)
+        wf.setsampwidth(2)
+        wf.setframerate(rate)
+        wf.writeframes(struct.pack("<%dh" % len(samples), *samples))
+    tmp.replace(path)
+
+
+def _play_chime(device: str | None) -> "subprocess.Popen | None":
+    """効果音を非同期に鳴らし始める。呼び出し側が、これと並行して TTS の
+    合成・再生を進めることで「重ねて鳴る」を実現する — チャイムの再生
+    終了を待たずに戻る。dmix (sentinel_voice) が使えないときは呼ばない
+    (曲を完全に止める旧経路と衝突させても意味がないため、_speak_sync 側
+    で mixing 中のみ呼ぶ)。"""
+    try:
+        path = _chime_path()
+    except Exception as exc:
+        log.warning("効果音の生成に失敗しました: %s", exc)
+        return None
+    cmd = ["aplay", "-q"] + (["-D", device] if device else []) + [str(path)]
+    try:
+        return subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except Exception as exc:
+        log.warning("効果音の再生に失敗しました: %s", exc)
+        return None
+
+
 def _apply_volume(percent: int) -> None:
     card = _sound_card()
     if card is None:
@@ -284,27 +351,38 @@ def _speak_espeak(text: str, rate: float, device: str | None) -> bool:
         return False
 
 
-def _speak_sync(text: str, device: str | None) -> None:
+def _speak_sync(text: str, device: str | None, chime: bool = False) -> None:
     _apply_volume(int(config.get("voice_volume")))
-    rate = float(config.get("voice_rate"))
-    ok = False
-    if _has_open_jtalk():
-        ok = _speak_open_jtalk(text, rate, device)
-        if ok:
-            STATE["engine"] = "open_jtalk"
-    if not ok:
-        ok = _speak_espeak(text, rate, device)
-        if ok:
-            STATE["engine"] = "espeak-ng"
-    if not ok:
-        STATE["last_error"] = "open_jtalk も espeak-ng も利用できません (bootstrap.sh を再実行してください)"
-        STATE["engine"] = ""
-        log.warning(STATE["last_error"])
-        return
-    STATE["spoken"] += 1
-    STATE["last_spoken_at"] = time.time()
-    STATE["last_text"] = text
-    STATE["last_error"] = ""
+    # チャイムは TTS の合成 (open_jtalk/espeak-ng) を待たずに鳴らし始める。
+    # 合成には短い時間がかかるが、鳴らし終わりは finally で必ず回収する
+    # (回収しないと aplay の短命プロセスがゾンビのまま残り続ける)。
+    chime_proc = _play_chime(device) if chime else None
+    try:
+        rate = float(config.get("voice_rate"))
+        ok = False
+        if _has_open_jtalk():
+            ok = _speak_open_jtalk(text, rate, device)
+            if ok:
+                STATE["engine"] = "open_jtalk"
+        if not ok:
+            ok = _speak_espeak(text, rate, device)
+            if ok:
+                STATE["engine"] = "espeak-ng"
+        if not ok:
+            STATE["last_error"] = "open_jtalk も espeak-ng も利用できません (bootstrap.sh を再実行してください)"
+            STATE["engine"] = ""
+            log.warning(STATE["last_error"])
+            return
+        STATE["spoken"] += 1
+        STATE["last_spoken_at"] = time.time()
+        STATE["last_text"] = text
+        STATE["last_error"] = ""
+    finally:
+        if chime_proc is not None:
+            try:
+                chime_proc.wait(timeout=5)
+            except Exception:
+                pass
 
 
 def speak_test(text: str) -> tuple[bool, str]:
@@ -331,7 +409,7 @@ async def loop() -> None:
     global _LOOP
     _LOOP = asyncio.get_running_loop()
     while True:
-        text = await _QUEUE.get()
+        text, category = await _QUEUE.get()
         # Bluetooth 接続中は bluealsa-aplay がこの dmix を経由せず ALSA
         # デバイスを直接掴んでいる。割り込むと相手の再生を壊すだけなので
         # 静かに諦める (モジュール読み込み順の都合で遅延 import する)。
@@ -347,9 +425,15 @@ async def loop() -> None:
         mixing = await asyncio.to_thread(_mixing_ready)
         stopped = await asyncio.to_thread(music.duck_for_voice) if not mixing else False
         ducked = await asyncio.to_thread(music.duck_volume_for_voice) if mixing else False
+        # 効果音は時報だけに付け、かつ dmix で重ねられるときだけ鳴らす —
+        # 重ねられない (曲を完全に止める) 経路では、効果音自体もう1つの
+        # 排他デバイス争いを増やすだけで「同時に」という要望を満たせない
+        # ため、鳴らさずに諦める (Bluetooth 接続中の読み上げスキップと
+        # 同じ「重ねられないなら無理に鳴らさない」方針)。
+        chime = mixing and category == "time" and bool(config.get("voice_chime_enabled"))
         try:
             await asyncio.to_thread(_speak_sync, text,
-                                    "sentinel_voice" if mixing else _fallback_device())
+                                    "sentinel_voice" if mixing else _fallback_device(), chime)
         finally:
             if stopped:
                 await asyncio.to_thread(music.resume_from_voice)
@@ -373,4 +457,9 @@ async def time_signal_loop() -> None:
         if bucket == last_bucket:
             continue
         last_bucket = bucket
-        announce("", "time", hour=now.tm_hour, minute=now.tm_min)
+        # ちょうど 0 分のときに「12時0分です」と言うと不自然なので、その
+        # 場合だけ {minute_part} を空文字にする ({minute} は生の数値のまま
+        # 残すので、自前のテンプレートで "{minute}分" を使い続けたい場合も
+        # 壊れない)。
+        minute_part = f"{now.tm_min}分" if now.tm_min else ""
+        announce("", "time", hour=now.tm_hour, minute=now.tm_min, minute_part=minute_part)

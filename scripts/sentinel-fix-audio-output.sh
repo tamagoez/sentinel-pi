@@ -174,15 +174,45 @@ pcm_opens() {
 # several real playback opens (the setup script tests what it wrote), and
 # repeatedly opening and closing bcm2835 is the very churn that wedges the
 # card (CLAUDE.md #45) - so a repair that did not take must not be retried
-# on every cycle. Anything gated by this happens at most once an hour.
+# on every cycle. This used to be a flat 1-hour cooldown, but that is too
+# conservative for the common case: a burst of USB contention (camera
+# resubmit errors, a Bluetooth churn storm) breaks the dmix config while
+# hw:$CARD,0 itself still opens fine, meaning the break is isolated to the
+# asound.conf layer and a retry a few minutes later is very likely to
+# succeed - yet the flat cooldown left mixing off for up to an hour after
+# a single bad moment. Back off exponentially instead, the same pattern
+# camera.py already uses for its own reconnect storms
+# (_CORRUPT_RECONNECT_MAX_BACKOFF, CLAUDE.md #19): start at 2 minutes so
+# the very next Guardian cycle can retry, double on each further failure,
+# and cap at 1 hour so a truly broken card does not get hammered forever.
+# **Do not collapse this back into a flat cooldown** - that is the exact
+# regression this section fixes (mixing staying off for up to an hour after
+# a transient, already-recovered failure).
+_AUDIO_RETRY_BASE_SEC=120
+_AUDIO_RETRY_MAX_SEC=3600
+
 may_retry() {
-  local stamp="/run/sentinel-audio-$1" now
+  local stamp="/run/sentinel-audio-$1" now last_try=0 count=0 wait
   now=$(date +%s)
-  if [[ -f "$stamp" ]] && (( now - $(stat -c %Y "$stamp" 2>/dev/null || echo 0) < 3600 )); then
+  if [[ -f "$stamp" ]]; then
+    read -r last_try count < "$stamp" 2>/dev/null || { last_try=0; count=0; }
+  fi
+  wait=$(( _AUDIO_RETRY_BASE_SEC * (1 << count) ))
+  (( wait > _AUDIO_RETRY_MAX_SEC )) && wait=$_AUDIO_RETRY_MAX_SEC
+  if (( now - last_try < wait )); then
     return 1
   fi
-  : > "$stamp"
+  (( count < 10 )) && count=$((count + 1))
+  printf '%s %s\n' "$now" "$count" > "$stamp"
   return 0
+}
+
+# Called once a repair actually took (pcm_opens sentinel_music succeeded
+# afterwards) so the *next* failure starts backing off from the short
+# interval again, instead of inheriting a long wait earned by a previous,
+# unrelated failure streak.
+reset_retry() {
+  rm -f "/run/sentinel-audio-$1"
 }
 
 unstick_card() {
@@ -226,6 +256,11 @@ unstick_card() {
 if aplay -L 2>/dev/null | grep -qx 'sentinel_music'; then
   if pcm_opens sentinel_music; then
     ok "sentinel_music opens and accepts audio"
+    # Healthy right now - if an earlier failure left a backoff stamp behind,
+    # drop it so the next real failure starts from the short retry interval
+    # again instead of inheriting a wait earned by an unrelated past streak.
+    reset_retry rewrite
+    reset_retry create
   else
     w "sentinel_music exists in asound.conf but will not open:"
     timeout 6 aplay -D sentinel_music -f S16_LE -r 44100 -c 2 -d 1 /dev/zero 2>&1 \
@@ -258,6 +293,7 @@ if aplay -L 2>/dev/null | grep -qx 'sentinel_music'; then
       if [[ -x "$SETUP_MIX" ]] && may_retry rewrite && "$SETUP_MIX" "$CARD" off >/dev/null 2>&1 \
            && pcm_opens sentinel_music; then
         fixed_msg "rewrote $ASOUND for card $CARD - sentinel_music opens again"
+        reset_retry rewrite
       elif [[ -f "$ASOUND" ]]; then
         # Last resort. asound.conf also redefines pcm.!default as this
         # same dmix, so leaving a dmix that cannot open in place silences
@@ -279,6 +315,7 @@ else
   if [[ -x "$SETUP_MIX" ]] && may_retry create && "$SETUP_MIX" "$CARD" off >/dev/null 2>&1 \
        && pcm_opens sentinel_music; then
     fixed_msg "created $ASOUND for card $CARD - music and voice can be mixed again"
+    reset_retry create
   fi
 fi
 

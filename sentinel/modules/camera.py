@@ -42,7 +42,7 @@ CAMERA_OVERRIDE_KEYS = (
     "motion_interval", "motion_warmup_seconds", "cam_autofocus",
     "motion_confirm_checks", "motion_release_checks",
     "save_cooldown", "reconnect_seconds",
-    "corrupt_min_area_ratio", "corrupt_reboot_threshold",
+    "corrupt_min_area_ratio", "corrupt_reboot_threshold", "corrupt_disconnect_seconds",
 )
 
 
@@ -274,12 +274,30 @@ _CORRUPT_RECONNECT_MAX_BACKOFF = 300.0
 # 毎回寸分違わず同じ位置になるとは考えにくいため、この一致を「破損では
 # ない」ことの強い手がかりとして使う。
 _CORRUPT_LEARN_STREAK = 8
-# 強制再接続をしても破損が解消しない (=直後にまた閾値レートへ達して
-# 再度 forced_reconnect が起きる) 回数がこれに達したら、ソフト側の
-# 打てる手をすべて尽くしたとみなし、Pi 本体の再起動を要求する
-# (CLAUDE.md #22)。USB コントローラ自体が詰まっている・ケーブル/
-# ハブの物理的な問題など、プロセス再接続では届かない原因を想定している。
+# 強制再接続 (プロセス内で release() → 開き直すだけ、数百ミリ秒) をしても
+# 破損が解消しない (=直後にまた閾値レートへ達して再度 forced_reconnect が
+# 起きる) 回数がこれに達したら、まず _CORRUPT_DISCONNECT_SECONDS 秒だけ
+# カメラを完全に切断する (=一切 open_cam() を呼ばない) 中間段階を挟む。
+# 実機で「カメラの破損が続くと数分おきに Pi 本体が再起動を繰り返す」と
+# 報告された原因はこの中間段階が無かったことだった — 強制再接続の背景の
+# バックオフは 20s -> 40s -> 80s -> 160s と伸びるだけで、4 回目に到達する
+# 頃には累計で 5 分程度しか経っておらず、真の原因が USB 帯域の逼迫のような
+# 「秒単位の間隔では解消しない」ものだった場合、この程度の待ち時間では
+# 解消する見込みが薄いまま Pi 本体の再起動というもっとも重い手段へ直行
+# していた。数分単位できっぱり接続そのものを切る方が、プロセスを繰り返し
+# 開き直すよりも実際の帯域・USB コントローラの詰まりが解ける可能性が高い
+# ため、これを Pi 再起動より先に一度だけ試す。
+#
+# この中間段階を経ても (= 切断・再接続の直後にまた forced_reconnect が
+# _CORRUPT_REBOOT_THRESHOLD 回続いたら) ソフト側の打てる手をすべて尽くした
+# とみなし、ここで初めて Pi 本体の再起動を要求する (CLAUDE.md #22)。USB
+# コントローラ自体が詰まっている・ケーブル/ハブの物理的な問題など、
+# プロセス再接続はおろか完全な切断でも届かない原因を想定している。
+# **この中間段階を外して forced_reconnect の閾値到達から直接 Pi 再起動を
+# 要求する実装に戻さないでください** — 同じ「数分おきに Pi が再起動を
+# 繰り返す」不具合に戻ります。
 _CORRUPT_REBOOT_THRESHOLD = 4
+_CORRUPT_DISCONNECT_SECONDS = 180.0
 
 
 def _frame_corruption_ratio(
@@ -399,6 +417,16 @@ def _worker(cid: str, device: str, stop: "Event", cfg: dict) -> None:
     # 0 に戻す (1 枚良いフレームが来ただけでは「解消した」と判断しない —
     # backoff のリセットより厳しい基準にしている)。
     corrupt_unresolved_reconnects = 0
+    # 中間段階 (完全切断) に入っている間、次に open_cam() を試してよい
+    # monotonic 時刻。0.0 なら中間段階ではない。
+    disconnect_until = 0.0
+    # 今の「破損が続いている」エスカレーションの中で、すでに一度中間段階
+    # (完全切断) を試したかどうか。一度試して forced_reconnect の閾値に
+    # また達したときだけ Pi 再起動へ進む — 試す前にいきなり再起動しない。
+    # 破損が実際に解消した (下の corrupt_unresolved_reconnects リセット)
+    # ときにこのフラグも戻すので、しばらく正常に動いたあとにまた破損が
+    # 始まった場合は、再起動ではなく中間段階からやり直す。
+    extended_disconnect_tried = False
     # 動体判定のヒステリシス。1 回の判定 (raw_hit) は照明のちらつき・虫・
     # 圧縮ノイズなど 1 サイクルだけの偶然でも簡単に閾値を跨ぐため、これを
     # そのまま「動体あり」として通知にまで流すと、実機で報告された
@@ -494,6 +522,18 @@ def _worker(cid: str, device: str, stop: "Event", cfg: dict) -> None:
             interval = 1.0 / max(0.05, fps)
 
             if cap is None:
+                if disconnect_until:
+                    remaining = disconnect_until - time.monotonic()
+                    if remaining > 0:
+                        # 中間段階 (完全切断) の間は open_cam() を一切呼ばない
+                        # - 呼んだ時点でもう「切断」ではなくなってしまう。
+                        emit_status(state="disconnected", clients=viewers, fps=0,
+                                    reconnect_at=time.time() + remaining)
+                        time.sleep(min(5.0, remaining))
+                        continue
+                    disconnect_until = 0.0
+                    log.info("カメラ %s: %.0f 秒の切断期間が終わったため再接続を試みます",
+                             cid, _CORRUPT_DISCONNECT_SECONDS)
                 if open_cam(mode):
                     failures = 0
                     reconnects += 1
@@ -602,31 +642,54 @@ def _worker(cid: str, device: str, stop: "Event", cfg: dict) -> None:
                     applied_res = None
                     corrupt_unresolved_reconnects += 1
                     reboot_threshold = int(cfg.get("corrupt_reboot_threshold", _CORRUPT_REBOOT_THRESHOLD))
+                    status_state = "reconnecting"
                     if corrupt_unresolved_reconnects >= reboot_threshold:
-                        # 再接続を繰り返しても直らない = ソフト側で打てる手を
-                        # 尽くした。原因究明に使える情報 (device・破損/許容
-                        # 件数・これまでの再接続回数) を添えて、親プロセスへ
-                        # Pi 再起動を要求する (実際の再起動処理は camera.py
-                        # からは行わない — 上の ON_CORRUPT_REBOOT のコメント
-                        # 参照)。
-                        log.error(
-                            "カメラ %s: 強制再接続を %d 回行っても破損が解消しないため、"
-                            "Pi の再起動を要求します (device=%s, corrupt_frames=%d, "
-                            "corrupt_tolerated=%d, reconnects=%d)。",
-                            cid, corrupt_unresolved_reconnects, device,
-                            corrupt_frames, corrupt_tolerated, reconnects)
-                        try:
-                            (d / "corrupt_reboot_request").write_text(json.dumps({
-                                "t": time.time(),
-                                "device": device,
-                                "unresolved_reconnects": corrupt_unresolved_reconnects,
-                                "corrupt_frames": corrupt_frames,
-                                "corrupt_tolerated": corrupt_tolerated,
-                                "reconnects": reconnects,
-                            }, ensure_ascii=False), encoding="utf-8")
-                        except Exception:
-                            log.exception("再起動要求ファイルの書き込みに失敗しました")
-                emit_status(state="reconnecting" if forced_reconnect else "corrupt",
+                        if not extended_disconnect_tried:
+                            # 素早い強制再接続をここまで繰り返しても直らない。
+                            # いきなり Pi 本体を再起動する前に、まず数分単位で
+                            # カメラを完全に切断してから再接続を試す (上の
+                            # _CORRUPT_DISCONNECT_SECONDS のコメント参照)。
+                            disconnect_seconds = float(
+                                cfg.get("corrupt_disconnect_seconds", _CORRUPT_DISCONNECT_SECONDS))
+                            log.warning(
+                                "カメラ %s: 強制再接続を %d 回行っても破損が解消しないため、"
+                                "%.0f 秒間カメラを完全に切断してから再試行します "
+                                "(device=%s, corrupt_frames=%d, corrupt_tolerated=%d)。",
+                                cid, corrupt_unresolved_reconnects, disconnect_seconds,
+                                device, corrupt_frames, corrupt_tolerated)
+                            disconnect_until = time.monotonic() + disconnect_seconds
+                            extended_disconnect_tried = True
+                            corrupt_unresolved_reconnects = 0
+                            status_state = "disconnected"
+                        else:
+                            # 完全切断を挟んでもなお直らない = ソフト側で打てる
+                            # 手を尽くした。原因究明に使える情報 (device・
+                            # 破損/許容件数・これまでの再接続回数) を添えて、
+                            # 親プロセスへ Pi 再起動を要求する (実際の再起動
+                            # 処理は camera.py からは行わない — 上の
+                            # ON_CORRUPT_REBOOT のコメント参照)。
+                            log.error(
+                                "カメラ %s: 完全切断を挟んで再試行しても破損が解消しないため、"
+                                "Pi の再起動を要求します (device=%s, corrupt_frames=%d, "
+                                "corrupt_tolerated=%d, reconnects=%d)。",
+                                cid, device, corrupt_frames, corrupt_tolerated, reconnects)
+                            try:
+                                (d / "corrupt_reboot_request").write_text(json.dumps({
+                                    "t": time.time(),
+                                    "device": device,
+                                    "unresolved_reconnects": corrupt_unresolved_reconnects,
+                                    "corrupt_frames": corrupt_frames,
+                                    "corrupt_tolerated": corrupt_tolerated,
+                                    "reconnects": reconnects,
+                                }, ensure_ascii=False), encoding="utf-8")
+                            except Exception:
+                                log.exception("再起動要求ファイルの書き込みに失敗しました")
+                            # 次のエスカレーションサイクル (再起動が実際には
+                            # 行われなかった場合や、再起動後にまた破損が
+                            # 始まった場合) では、また完全切断から順にやり直す。
+                            extended_disconnect_tried = False
+                            corrupt_unresolved_reconnects = 0
+                emit_status(state=status_state if forced_reconnect else "corrupt",
                             corrupt_frames=corrupt_frames, corrupt_tolerated=corrupt_tolerated,
                             last_corrupt=time.time())
                 # 破損フレームは latest.jpg に書かない・動体判定にも使わない・
@@ -644,6 +707,7 @@ def _worker(cid: str, device: str, stop: "Event", cfg: dict) -> None:
             # が入り混じるカメラでいつまで経っても閾値に届かなくなる。
             if len(corrupt_hist) >= _CORRUPT_HIST_LEN and sum(corrupt_hist) == 0:
                 corrupt_unresolved_reconnects = 0
+                extended_disconnect_tried = False
 
             q = int(cfg["jpeg_quality"]) if mode == NORMAL else max(35, int(cfg["jpeg_quality"]) - 20)
             ok, jpg = cv2.imencode(".jpg", frame, [int(cv2.IMWRITE_JPEG_QUALITY), q])
