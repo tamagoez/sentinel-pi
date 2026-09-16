@@ -283,10 +283,21 @@ c "STEP 9/9  Switch Obsidian sync: uninstall Syncthing, install Lockstep Sync"
 # this, so nothing should be left trying to hold that mount open.
 if [[ -x /opt/syncthing/syncthing ]] || command -v syncthing >/dev/null 2>&1; then
   systemctl disable --now syncthing >/dev/null 2>&1 || true
-  if "$DS" uninstall 50 >/dev/null 2>&1; then
+  # `</dev/null` + `timeout`: dietpi-software's non-interactive `uninstall`
+  # is documented (`dietpi-software uninstall <id>...`), but whether some
+  # version of it still shows a confirmation prompt before actually
+  # removing software is not something this repo can verify offline. A
+  # real run got stuck at this exact line with nothing printed - the
+  # signature of a prompt whose text went to the `>/dev/null` above while
+  # it waited on stdin. Closing stdin makes any such prompt fail closed
+  # instead of hanging, and the timeout is the second line of defense
+  # in case something else stalls (e.g. a network call). **Do not remove
+  # either of these** - bootstrap.sh must never block indefinitely on an
+  # external command's own interactive habits.
+  if timeout 120 "$DS" uninstall 50 </dev/null >/dev/null 2>&1; then
     ok "Syncthing uninstalled (superseded by Lockstep Sync)"
   else
-    w "Syncthing uninstall via dietpi-software failed; remove it manually if it lingers:"
+    w "Syncthing uninstall via dietpi-software failed or timed out; remove it manually if it lingers:"
     w "  sudo dietpi-software uninstall 50"
   fi
 else
@@ -313,7 +324,11 @@ elif [[ -x "$LS_BIN" ]]; then
   ok "Lockstep Sync server already installed; skipped"
 else
   LS_URL="https://github.com/stephansergeev/obsidian-lockstep-sync/releases/latest/download/sync-server-linux-$LS_ARCH"
-  if curl -fsSL "$LS_URL" -o "$LS_BIN.tmp" && chmod +x "$LS_BIN.tmp" && mv "$LS_BIN.tmp" "$LS_BIN"; then
+  # --connect-timeout/--max-time: same "never hang bootstrap.sh forever"
+  # reasoning as the timeout on the Syncthing uninstall above - a stalled
+  # connection here should not be able to block the rest of the script.
+  if curl -fsSL --connect-timeout 10 --max-time 120 "$LS_URL" -o "$LS_BIN.tmp" \
+       && chmod +x "$LS_BIN.tmp" && mv "$LS_BIN.tmp" "$LS_BIN"; then
     ok "Lockstep Sync server installed to $LS_BIN"
   else
     rm -f "$LS_BIN.tmp"
