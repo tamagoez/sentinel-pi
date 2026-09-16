@@ -2232,6 +2232,153 @@ failed のまま止まっている」という別の既知の競合 (CLAUDE.md #
   ようにするためです。フォルダがまだ無ければ `mkdir(parents=True)` で
   作ります。
 
+### 57. `sentinel-fix-audio-output.sh` の asound.conf 再試行は固定 1 時間ではなく指数バックオフにする
+
+実機の `sentinel-logs` で、カメラの USB 転送エラー (`uvcvideo ... Failed to
+resubmit video URB`) と同じ時間帯に `sentinel-fix-audio-output.sh` が
+`/etc/asound.conf` を `.broken` へ退避したログが見つかりました。これ自体は
+#46 の設計どおり正しい安全策 (開けない dmix を放置すると bluealsa-aplay
+まで巻き込んで機体全体の音が死ぬため) ですが、`may_retry()` がこの種の
+書き直しを**固定 1 時間**のクールダウンでしか許していませんでした。この
+とき `hw:$CARD,0` 自体は問題なく開けており (`sentinel-logs` の `open
+hw:0,0 ok`)、壊れていたのは asound.conf の側だけ — つまり USB の瞬間的な
+輻輳で一度こけただけの、次のサイクルで直る見込みが高い故障でした。それを
+固定 1 時間放置するのは過剰に保守的で、「ミキシングが直らない」という
+報告に直結していました。
+
+`may_retry()` を camera.py の `_CORRUPT_RECONNECT_MAX_BACKOFF` (CLAUDE.md
+#19) と同じ考え方の指数バックオフに変えました。`/run/sentinel-audio-<key>`
+に「最終試行時刻 失敗回数」を書き、待ち時間を 2 分 (`_AUDIO_RETRY_BASE_SEC`)
+から失敗のたびに倍々に伸ばし、1 時間 (`_AUDIO_RETRY_MAX_SEC`) を上限に
+します。これにより、次の Guardian 周期 (2 分後) にはもう再試行でき、
+本当に壊れているカードだけが従来どおり長い間隔まで後退します。修理が
+実際に効いた (`pcm_opens sentinel_music` が成功した) ときは `reset_retry()`
+でスタンプを消し、次の障害は再び短い間隔から始まるようにしています —
+無関係な過去の失敗streakを引き継いで長く待たされることを防ぐためです。
+**この指数バックオフを外して固定クールダウンに戻さないでください** —
+`hw:$CARD,0` は正常なのに asound.conf の再構成だけ最大 1 時間放置される、
+同じ「ミキシングが直らない」不具合に戻ります。
+
+### 58. 時報は 0 分のとき「〜時0分」と言わない。同時に鳴らせる効果音オプションを追加
+
+**0 分の言い方**: `voice.py` の時報テンプレート既定文 `{hour}時{minute}分
+です` は、ちょうど正時に「12時0分です」という不自然な言い方になっていま
+した。`time_signal_loop()` が新たに `{minute_part}` (0 分のときだけ空
+文字、それ以外は `"{分}分"`) を組み立てて渡すようにし、既定テンプレート
+を `{hour}時{minute_part}です` に変更しました。`{minute}` (生の数値) は
+そのまま渡り続けるので、自前のテンプレートで `{minute}分` を使い続けたい
+場合も壊れません。
+
+**同時に鳴らす効果音**: `voice_chime_enabled` (既定 False) を追加しました。
+有効かつ dmix でミキシングできる場合 (`_mixing_ready()`)、時報カテゴリの
+読み上げだけ、短いチャイム (A5→E6 の 2 音、Pillow のフォント描画と同じ
+「バイナリ音源を同梱しない」考え方で、標準ライブラリの `wave`/`math` だけ
+で毎回同じ波形を合成し `config.RUNTIME` (tmpfs) にキャッシュする) を
+`_speak_sync()` の TTS 合成・再生と**並行**に鳴らします。`subprocess.Popen`
+で非同期に開始し、TTS の合成・再生が終わったあと `finally` で `wait()`
+して回収するだけなので、チャイムの再生終了を待ってから喋り始めることは
+ありません。**ミキシングできない (曲を完全に止める) 経路では鳴らしません**
+— そちらは排他デバイスの奪い合いを増やすだけで「同時に」を満たせない
+ため、Bluetooth 接続中の読み上げスキップ (#27) と同じ「重ねられないなら
+無理に鳴らさない」方針を踏襲しています。チャイムは時報カテゴリ限定です
+— キューの要素を `text` だけから `(text, category)` のタプルに広げ、
+`loop()` 側で `category == "time"` のときだけ有効にしています。
+
+### 59. 定時処理 (動画生成・再起動) が永久に止まる不具合 — `web/routes.py` の `create_task()` 参照未保持
+
+実機で「定時処理の動画生成が止まり、それに伴って再起動もされない」と
+報告がありました。`maintenance.py` の `run_now()` 自体は正しく書かれてお
+り (`try/finally` で `STATE["running"]` を必ず戻し、再起動はその外側)、
+`loop()` も壁時計に沿って毎日 `run_now()` を呼ぶだけの単純な作りです。
+原因は別の場所、`web/routes.py` の `/api/maintenance/run` (Web UI の手動
+実行ボタン) にありました:
+
+```python
+asyncio.create_task(maintenance.run_now(reboot=reboot))
+return {"ok": True, "message": "定時処理を開始しました"}
+```
+
+まさに CLAUDE.md #29 で一度踏んだ「`asyncio.create_task()` の戻り値を
+どこにも保持せず捨てる」バグそのものです。#29 の修正は `main.py` に
+`_background_tasks` という強参照の集合を追加しましたが、これは
+`main.py` 内で `create_task()` する箇所しか救っておらず、`web/routes.py`
+のこの箇所 (と `/api/system/reboot` の手動再起動 `go()`) は別ファイルで
+独立に同じ間違いを踏んでいたため素通りしていました。HTTP ハンドラは
+レスポンスを返した時点で呼び出し元のスタックフレームが消えるため、
+`create_task()` が返す `Task` を握っている強参照がどこにも残らず、
+`run_now()` の実行中 (ffmpeg のタイムラプス生成など、複数の `await` を
+挟む長い処理) に GC がタスクを回収してしまうことがあります。回収される
+と `try/finally` の `finally: STATE["running"] = False` まで到達せず、
+`STATE["running"]` が `True` のまま永久に固定されます。以後、4 時の定時
+ループが呼ぶ `run_now()` も、次に誰かが手動実行ボタンを押しても、すべて
+「すでに実行中です」で即座に空振りするだけになり、その空振りの中には
+動画生成もその後の再起動判定 (`run_now()` の中でしか行われない) も含ま
+れないため、両方が同時に永久停止します。報告どおりの症状と一致します。
+
+`web/routes.py` にも `main.py` と同じパターンの `_background_tasks` 集合
+と `_spawn()` ヘルパーを追加し、`/api/maintenance/run` と
+`/api/system/reboot` の両方の `create_task()` をこれ経由に変えました。
+**この参照保持を外して `create_task()` の戻り値を再び捨てる実装に戻さ
+ないでください** — 同じ「定時処理が永久に固まる」不具合に戻ります。
+`main.py` の `_background_tasks` とは意図的に別の集合にしています —
+モジュールをまたいでグローバルな可変集合を共有させる理由がなく、
+「`create_task()` する側のモジュールが自分の分の参照を持つ」という
+CLAUDE.md #29 の原則をファイル単位でも素直に守るためです。**新しい
+fire-and-forget な `create_task()` を `web/routes.py` に書くときも、
+必ずこの `_spawn()` を経由してください** — 経由しない呼び出しはこの
+節と同じ「レスポンスを返した瞬間に参照が消える」穴に落ちます。
+
+### 60. カメラ破損エスカレーションに「完全切断」の中間段階を追加し、Pi 再起動の頻発を防ぐ
+
+#22 で追加したカメラ破損の緊急再起動エスカレーションについて、「破損が
+続くと数分おきに Pi 本体の再起動が繰り返される」という報告がありました。
+原因は算数で説明がつきます。強制再接続 (プロセス内で `release()` して
+すぐ開き直すだけ、数百ミリ秒) の再試行間隔は `_CORRUPT_RECONNECT_COOLDOWN`
+(20 秒) から失敗のたびに倍々に伸び `_CORRUPT_RECONNECT_MAX_BACKOFF`
+(300 秒) で頭打ちになりますが (#19)、`_CORRUPT_REBOOT_THRESHOLD` (既定 4)
+に到達するまでの累計時間は 20+40+80+160 = 300 秒、たった 5 分です。真の
+原因が USB 帯域の逼迫のような「秒単位の間隔では解消しない」ものだった
+場合、この程度の待ち時間で解消する見込みは薄く、それでも 5 分おきに
+Pi 本体の再起動という最も重い手段へ直行していました。
+
+強制再接続 (プロセスの開き直し) と Pi 本体の再起動 (最終手段) の間に、
+「カメラを数分間まるごと切断する」中間段階を挟みました。`_worker()` に
+`disconnect_until` (この時刻までは `open_cam()` を一切呼ばない) と
+`extended_disconnect_tried` (今のエスカレーションサイクルで中間段階を
+試したかどうか) を追加し、forced_reconnect が `corrupt_reboot_threshold`
+回に達したとき:
+
+- まだ中間段階を試していなければ、`corrupt_disconnect_seconds` (既定 180
+  秒、カメラごとに上書き可能) だけカメラを完全に切断し (`cap = None` の
+  ままループを回し続けるだけで、`open_cam()` を呼ばない)、
+  `corrupt_unresolved_reconnects` を 0 に戻してから通常の強制再接続の
+  カウントをやり直す。ステータスは `state="disconnected"` として公開
+  する (Web UI は既知の状態でなくてもそのまま文字列表示するので、
+  追加の翻訳テーブルは不要 - `renderCams()` 参照)。
+- すでに中間段階を試していて、それでもまた閾値に達した場合だけ、従来
+  どおり `corrupt_reboot_request` を書いて Pi 本体の再起動を要求する。
+
+破損が実際に解消した (直近 `_CORRUPT_HIST_LEN` 枚が丸ごと正常、#22 の
+「本当に解消した」判定と同じ基準) ときは `extended_disconnect_tried` も
+リセットします。これにより、しばらく正常に動いたあとにまた破損が始まった
+場合は、いきなり再起動要求ではなく中間段階からやり直します。逆に Pi 再起
+動を要求した直後もこのフラグと `corrupt_unresolved_reconnects` をリセット
+しています — 万一 sudoers の設定漏れなどで実際には再起動されなかった
+場合 (#22 の「クールダウンを外さない」理由と同じ懸念)、次のエスカレー
+ションでもまた中間段階から入り、そこでも直らなければ再度再起動を要求する
+形で、諦めたままにはなりません。
+
+`corrupt_disconnect_seconds` (既定 180) を `CAMERA_OVERRIDE_KEYS`・
+`core/config.py` の `DEFAULTS`/`_RANGES`・`web/static/index.html` の
+`GROUPS`/`LABELS`/`CAM_SETTING_LABELS` すべてに追加しています (CLAUDE.md
+#30 の監査観点)。**この中間段階を外して forced_reconnect の閾値到達から
+直接 Pi 再起動を要求する実装に戻さないでください** — 同じ「数分おきに
+Pi が再起動を繰り返す」不具合に戻ります。cv2 をスタブに差し替えて
+`_worker()` を別スレッドで走らせるテストで、(1) 閾値到達時にまず
+`disconnected` 状態へ入り即座には再起動要求を書かないこと、(2) 切断期間
+中は一切カメラを開こうとしないこと、(3) 切断・再接続後もなお破損が続く
+場合にのみ `corrupt_reboot_request` を書くこと、の 3 点を確認済みです。
+
 ## モジュール構成
 
 各モジュールは疎結合で、`core/state.py` の `MODE` を購読するだけです。
@@ -2363,10 +2510,13 @@ modules/camera.py       カメラ (別プロセス)。動体検知 -> MODE.repor
                          「終了」とする (1 回の判定をそのまま公開しない、
                          CLAUDE.md #21)。破損が強制再接続 (#19) を
                          _CORRUPT_REBOOT_THRESHOLD 回繰り返しても解消しない
-                         場合は corrupt_reboot_request を書き、
+                         場合は、まず corrupt_disconnect_seconds 秒だけ
+                         カメラを完全に切断する中間段階へ進み (disconnect_until
+                         が明けるまで open_cam() を呼ばない)、それでも解消
+                         しなければ corrupt_reboot_request を書き、
                          ON_CORRUPT_REBOOT フック経由で Pi 再起動を要求する
                          (実際の再起動は maintenance.emergency_reboot() に
-                         委譲、CLAUDE.md #22)
+                         委譲、CLAUDE.md #22/#60)
 modules/music.py        mpg123 制御、位置復帰、yt-dlp キュー。alsa_device が
                          空なら sentinel_music (dmix 経由、CLAUDE.md #31) を
                          使う。イコライザー (music_eq_enabled/music_eq_bands/
@@ -2440,13 +2590,27 @@ modules/voice.py        Open JTalk 優先/espeak-ng フォールバックの音�
                          duck_for_voice()/resume_from_voice() (曲を完全
                          停止) へフォールバックする (CLAUDE.md #27/#31)。
                          時報は voice_time_interval_minutes (既定 30 分、
-                         60 の約数を推奨) の壁時計境界で鳴る (CLAUDE.md #53)
+                         60 の約数を推奨) の壁時計境界で鳴る (CLAUDE.md #53)。
+                         時報の文面は既定で {minute_part} を使い、0 分の
+                         ときは「〜時です」(「〜時0分です」にならない、
+                         CLAUDE.md #58)。voice_chime_enabled が有効かつ
+                         dmix でミキシングできる場合、時報カテゴリだけ
+                         _play_chime() が TTS と並行して短い効果音を鳴らす
+                         (Popen で開始し、finally で回収 - 待ってから
+                         喋り始めない、CLAUDE.md #58)
 
 web/routes.py           全 HTTP / WebSocket エンドポイント。latest.jpg の
                          ように他プロセスが継続的に上書きするファイルは
                          FileResponse (stat とオープンが別ステップ) では
                          配信せず、read_bytes() で 1 回読んで Response に
-                         渡す (CLAUDE.md #23)
+                         渡す (CLAUDE.md #23)。fire-and-forget な
+                         asyncio.create_task() (定時処理の手動実行・
+                         Web UI からの再起動) は必ず _spawn() (main.py の
+                         _background_tasks と同じ強参照パターン) を経由
+                         する — レスポンスを返した直後にスタックフレームが
+                         消える HTTP ハンドラでは、参照を保持しないと GC に
+                         タスクを回収され、定時処理が「実行中」のまま永久に
+                         固まる (CLAUDE.md #59)
 web/static/index.html   単一ファイル SPA。イベントページのタイムライン表示
                          (renderEventsRecall() 以下) が既定表示。URL アクセス
                          トラックは buildNetSpans()/packNetRows() で「点」
