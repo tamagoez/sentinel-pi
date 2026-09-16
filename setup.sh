@@ -375,23 +375,41 @@ else
      that never leaves home, the Tailscale address (if shown) for one
      that needs to sync from away too.
 
-       1. First device - normally your desktop, with your existing vault:
+     IMPORTANT - install the Lockstep Sync plugin in Obsidian on the
+     device FIRST, before opening the link below. The link opens a page
+     on this Pi that hands off to Obsidian through an "obsidian://"
+     link; if the plugin is not installed and enabled yet on that device,
+     there is nothing to receive the handoff, the page cannot fill in
+     that device's Server URL / Device token for you, and the link gets
+     shown as "expired or already used" the next time you try it (each
+     link is single-use once the handoff is attempted, and old links do
+     not come back if you generate a new one). There is no field in the
+     plugin to paste this link into - the browser page IS the pairing
+     step, you do not type anything into the plugin yourself.
+
+       1. First device - normally your desktop, with your existing vault.
+          Install + enable the Lockstep Sync plugin in Obsidian there,
+          then run:
 
             sudo -u sentinel $LS_BIN link --data $LS_DATA \\
               --vault main --name desktop --url http://${IP:-<this-Pi-IP>}:8384 --minutes 60
 
           The last line printed is a one-time pairing link, valid for 60
-          minutes. Paste it into the Lockstep Sync plugin's settings in
-          Obsidian on that device, or scan it as a QR code instead:
+          minutes. Open it in a web browser on that same device (not in
+          this terminal, not on a different device) - the page it loads
+          hands off to the Obsidian plugin automatically and fills in
+          Server URL / Device token for you. If you would rather scan a
+          QR code with a phone/tablet that already has the plugin ready,
+          use this variant instead:
 
             sudo -u sentinel $LS_BIN link --data $LS_DATA \\
               --vault main --name desktop --url http://${IP:-<this-Pi-IP>}:8384 --minutes 60 \\
               | tail -1 | xargs qrencode -t ANSIUTF8 -m 2
 
-       2. Each additional device (phone, tablet, another PC) - repeat
-          with a new --name, and swap in the Tailscale address below
-          instead of the LAN one for a device that needs away-from-home
-          access:
+       2. Each additional device (phone, tablet, another PC) - install +
+          enable the plugin there first too, then repeat with a new
+          --name, and swap in the Tailscale address below instead of the
+          LAN one for a device that needs away-from-home access:
 
             sudo -u sentinel $LS_BIN link --data $LS_DATA \\
               --vault main --name phone --url http://${IP:-<this-Pi-IP>}:8384 --minutes 60
