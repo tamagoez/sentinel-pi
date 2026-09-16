@@ -2067,6 +2067,79 @@ output anymore!` を出してプロセスごと終了する (mpg123 はこのエ
 は再起動する、(4) 既存の `Type=oneshot` の挙動は変わらない、の 4 パターン
 を確認済みです。
 
+### 52. yt-dlp はプレイリストを取得でき、進捗 ( %/ETA/曲順 ) を表示する
+
+「プレイリスト対応と、ダウンロード中の進捗 (残り時間) を見たい」という
+要望がありました。
+
+- **`--no-playlist` を外しただけです。** yt-dlp は渡された URL が単曲か
+  プレイリストかを自分で判断するため、こちら側で URL の形を見分ける
+  必要はありません。単曲の URL を渡せば従来どおり 1 曲だけ取得されます。
+- **`--no-progress` をやめ、`--progress-template` で機械可読な進捗行を
+  自前の接頭辞 (`SENTINEL_PROGRESS|`) 付きで出させています。** yt-dlp
+  本体の人間向け進捗表示はバージョンによって書式が変わりうるため
+  パースの対象にしません。`info.*` (現在ダウンロード中の項目のメタ
+  データ、プレイリスト内の位置を含む) と `progress.*` (その項目の
+  ダウンロード進捗) は、公式ドキュメントの `--progress-template` 節が
+  明記する使い分けどおりです — `info.playlist_index`/`playlist_count`
+  は `-o` の出力テンプレートと同じ情報辞書から取っており、プレイリスト
+  でなければ `"NA"` になります。
+- **`_run_ytdlp()` を `subprocess.run()` (完了を待ってからまとめて処理)
+  から `subprocess.Popen()` (1 行ずつ読みながら随時反映) に変更しました。**
+  進捗行のたびに `entry["percent"]`/`entry["eta"]`/`entry["item_index"]`/
+  `entry["item_count"]`/`entry["message"]` を更新するため、待つだけの
+  実装では反映のしようがありません。`entry` は `DOWNLOADS` (Web UI が
+  5 秒ごとにポーリングする既存の仕組み、`web/static/index.html` の
+  `loadMusic()`) からそのまま参照されるオブジェクトなので、**UI 側の
+  変更は不要です** — 既存の「進捗」列がそのまま更新後の `message`
+  (例: `3/12曲目 45.2% 残り00:07`) を表示します。
+- **進捗行そのものは失敗時のエラー表示から除外しています** (`tail` は
+  進捗行以外だけを保持)。進捗行は 1 秒間に何度も流れるため、そのまま
+  混ぜるとエラー発生時に本当のエラー行が埋もれます。
+- **タイムアウトを 30 分から 3 時間に延ばしました。** プレイリストは
+  1 曲よりずっと時間がかかりうるため、単曲向けの 30 分では長いプレイ
+  リストの途中で打ち切られてしまいます。
+
+### 53. 時報の既定間隔は 60 分ではなく 30 分にする
+
+時報 (`voice.time_signal_loop()`、CLAUDE.md #27) の壁時計境界判定
+(`(hour*60+minute)//interval` が変わった瞬間だけ喋る) 自体は元から正しく
+実装されていましたが、既定の `voice_time_interval_minutes` が 60 だった
+ため、鳴るのは毎時 `:00` だけで `:30` には鳴っていませんでした。「実際の
+時刻の 30 分刻み (`:30`・`:00`) で鳴らしてほしい」という要望を受けて既定値
+を 30 に変更しました。60 の約数でなければ壁時計の `:00` と揃わない半端な
+時刻に鳴ることになるため、変更する場合は 60 の約数 (1/2/3/4/5/6/10/12/
+15/20/30/60) を選んでください — この制約はコードでは強制していないので、
+設定 UI のラベルにも明記しています。
+
+### 54. 音声アナウンスは音楽を止めずに重ね、重ねている間だけ音楽の音量を下げる
+
+CLAUDE.md #31 で dmix によるアナウンスと音楽の同時再生を実現しましたが、
+「重ねられるなら、重ねている間だけ音楽の音量を自動で下げてほしい」という
+要望がありました。それまでは重ねられる場合は音楽が全音量のまま流れ
+続けており、アナウンスの声が聞き取りにくいことがありました。
+
+`music.py` に `duck_volume_for_voice()`/`resume_volume_after_voice()` を
+追加しました。**`duck_for_voice()` (曲を完全に停止する、dmix が使えない
+機体向けの旧経路) とは別物**です — mpg123 を止めも開き直しもせず、
+再生中でも即座に効く `V <percent>` リモートコマンドで音量だけを一時的に
+動かすため、sudo も asound.conf の書き換えも一切経由しない軽い処理で
+完結します。下げる割合は新設した `voice_duck_percent` (既定 35、100 で
+下げない) で設定でき、`config.music_volume` (利用者が設定した本来の
+音量) 自体は変更しません — アナウンスが終われば `resume_volume_after_
+voice()` が下げる前の値へそのまま戻します。
+
+`voice.py` の `loop()`/`speak_test()` は、`_mixing_ready()` が True
+(dmix で重ねられる) なら `duck_volume_for_voice()` を、False (重ねられ
+ない、曲を完全に止めるしかない) なら従来どおり `duck_for_voice()` を
+呼ぶよう分岐しています。**この 2 つの経路を混同して同じ関数にまとめ
+たり、`duck_volume_for_voice()` を曲の完全停止と同じタイミングで両方
+呼んだりしないでください** — `duck_for_voice()` は `suspended_by` を
+使って曲の停止・復帰そのものを制御しており、`duck_volume_for_voice()`
+は生きたまま流れている曲の音量だけを動かす別の状態 (`_pre_duck_volume`)
+を持ちます。両方を同時に呼ぶことは無いはずですが、もし呼び出し順序を
+書き換える場合はこの前提を崩さないよう注意してください。
+
 ## モジュール構成
 
 各モジュールは疎結合で、`core/state.py` の `MODE` を購読するだけです。
@@ -2219,7 +2292,15 @@ modules/music.py        mpg123 制御、位置復帰、yt-dlp キュー。alsa_d
                          処理する前に現在の _gen と一致するか確認してから
                          でないと _advance_and_play() を呼ばない — 世代が
                          古ければ suspended_by の値に関わらず無視する
-                         (CLAUDE.md #50)
+                         (CLAUDE.md #50)。yt-dlp はプレイリスト URL を
+                         そのまま取得でき (--no-playlist を付けない)、
+                         --progress-template の機械可読な進捗行を都度
+                         DOWNLOADS の該当 entry (percent/eta/item_index/
+                         item_count/message) へ反映する (CLAUDE.md #52)。
+                         duck_volume_for_voice()/resume_volume_after_voice()
+                         は曲を止めずに音量だけ voice_duck_percent の割合
+                         まで一時的に下げる — 曲を完全停止する
+                         duck_for_voice() とは別物 (CLAUDE.md #54)
 modules/thermal.py      温度と CPU -> MODE.report_temperature()
 modules/bluetooth.py    A2DP 接続検知 -> 音楽の退避と復帰。この Pi 自身の
                          表示名 (set_local_name、bluetoothctl system-alias)
@@ -2255,9 +2336,14 @@ modules/voice.py        Open JTalk 優先/espeak-ng フォールバックの音�
                          システムイベント)。mpg123 の音楽ライブラリとは
                          別経路、sentinel_voice (dmix 経由、ALSA softvol
                          "SentinelVoice" で音量) を使い曲を止めずに重ねて
-                         鳴らす。named PCM が用意できていないときだけ
-                         music.py の duck_for_voice()/resume_from_voice()
-                         へフォールバックする (CLAUDE.md #27/#31)
+                         鳴らす。重ねる間は voice_duck_percent の設定に
+                         従って music.duck_volume_for_voice() が音楽の
+                         音量だけ一時的に下げる (CLAUDE.md #54)。named PCM
+                         が用意できていないときだけ music.py の
+                         duck_for_voice()/resume_from_voice() (曲を完全
+                         停止) へフォールバックする (CLAUDE.md #27/#31)。
+                         時報は voice_time_interval_minutes (既定 30 分、
+                         60 の約数を推奨) の壁時計境界で鳴る (CLAUDE.md #53)
 
 web/routes.py           全 HTTP / WebSocket エンドポイント。latest.jpg の
                          ように他プロセスが継続的に上書きするファイルは
