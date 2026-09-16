@@ -177,13 +177,6 @@ ok "Python environment ready"
 
 # ---------------------------------------------------------------- 4. Data
 c "STEP 4/10  Prepare data directory"
-# Repair a stale/duplicate $STORAGE mount before trusting `mountpoint -q`
-# below - a mount can appear present while still carrying wrong options
-# (mount -a does not fix an already-mounted filesystem) or while the same
-# device is also mounted a second time elsewhere (CLAUDE.md #40). Always
-# safe to run: a clean machine exits immediately without touching anything.
-"$SRC/scripts/sentinel-fix-syncthing-mount.sh" "$SVC_USER" || true
-
 if [[ -d "$STORAGE" ]] && mountpoint -q "$STORAGE"; then
   DATA="$STORAGE/sentinel"
   ok "Using external storage"
@@ -225,203 +218,76 @@ else
   w "$SVC_USER cannot write to $DATA; the service will fail to start until this is fixed."
 fi
 
-# ---------------------------------------------------------------- 5. Syncthing
-c "STEP 5/10  Prepare Syncthing storage (Obsidian sync)"
-# Syncthing (bootstrap.sh STEP 9) keeps its home/config/index database, by
-# default, under /mnt/dietpi_userdata/syncthing - normally on the SD card,
-# same as everything else DietPi installs there unless dietpi_userdata
-# itself was redirected during DietPi's own first-run setup. A synced
-# Obsidian vault writes far more often than anything else this project
-# touches (every edit, from every device), so that directory is bind-
-# mounted onto $STORAGE here instead, matching CLAUDE.md #3's reasoning
-# for keeping high-frequency writes off the SD card.
-#
-# A bind mount, not a symlink or an edited systemd unit: DietPi generates
-# (and can regenerate) syncthing.service's ExecStart line, so hard-coding
-# its exact -home flag syntax here would be guessing at something this
-# project does not own. A bind mount needs none of that - it works at the
-# filesystem level, transparently to Syncthing, and (unlike a symlink
-# pointing outside dietpi_userdata) survives any systemd path sandboxing
-# DietPi's unit applies to the literal /mnt/dietpi_userdata/syncthing path.
-#
-# Ownership: Syncthing runs as its own user (see ST_USER below), a
-# *different* user than $SVC_USER,
-# on the *same* $STORAGE mount that STEP 4 above just fixed for $SVC_USER.
-# sentinel-fix-storage-owner.sh must never be called a second time here
-# with 'dietpi' as the target user: on exFAT/NTFS its exFAT/NTFS branch
-# rewrites uid=/gid= *mount options*, which apply to the whole mount, not
-# a single directory (CLAUDE.md #8) - calling it again for a different
-# user overwrites the uid=/gid= that was just set for $SVC_USER, and a
-# real incident on real hardware showed what that does: Guardian's
-# check_storage_owner() (for $SVC_USER) and this step (for dietpi) fought
-# over the same mount every cycle, each one's fix_fat_mount() re-running
-# umount/mount (falling back to umount -l) on a mount every other service
-# still had files open on - which took the whole box's services down and
-# left the drive mounted somewhere other than $STORAGE. Adding 'dietpi' to
-# $SVC_USER's group instead lets it use the *same* already-fixed mount
-# options (umask=002 already grants group write) without ever touching
-# fstab or the mount a second time - safe on exFAT/NTFS *and* ext4, so no
-# filesystem-specific branching is needed here at all.
-if [[ -x /opt/syncthing/syncthing ]]; then
-  ST_HOME="$STORAGE/syncthing"
-  ST_DEFAULT=/mnt/dietpi_userdata/syncthing
-  ST_VAULTS="$STORAGE/obsidian"
-  mkdir -p "$ST_HOME" "$ST_VAULTS"
+# ---------------------------------------------------------------- 5. Obsidian sync
+c "STEP 5/10  Tear down Syncthing storage, set up Lockstep Sync"
+# Syncthing (CLAUDE.md #40/#41/#45) is superseded by Lockstep Sync
+# (CLAUDE.md #61). bootstrap.sh's STEP 9 already uninstalled the Syncthing
+# package; this step only needs to undo the storage side of it - the bind
+# mount that redirected its database off the SD card onto $STORAGE - and
+# then set up storage and a systemd unit for the new server.
+ST_HOME="$STORAGE/syncthing"
+ST_DEFAULT=/mnt/dietpi_userdata/syncthing
+if mountpoint -q "$ST_DEFAULT" 2>/dev/null; then
+  for i in 1 2 3 4 5; do umount "$ST_DEFAULT" 2>/dev/null && break; sleep 1; done
+  umount -l "$ST_DEFAULT" 2>/dev/null || true
+  ok "Unmounted the old Syncthing bind mount at $ST_DEFAULT"
+fi
+sed -i "\\|^$ST_HOME $ST_DEFAULT |d" /etc/fstab 2>/dev/null || true
+systemctl daemon-reload
+if [[ -d "$ST_HOME" ]] && [[ -n "$(ls -A "$ST_HOME" 2>/dev/null)" ]]; then
+  w "Syncthing's old database is still at $ST_HOME - safe to remove manually"
+  w "  (it is only Syncthing's internal index, not your notes):  rm -rf $ST_HOME"
+fi
+if [[ -d "$STORAGE/obsidian" ]]; then
+  ok "Your old synced vault is still at $STORAGE/obsidian - Lockstep Sync keeps no"
+  echo "     plaintext copy on this Pi, so it does not use this path. Back it up or"
+  echo "     remove it once every device has been re-paired through Lockstep Sync."
+fi
 
-  # NEVER hardcode the user Syncthing runs as. This block assumed 'dietpi'
-  # and was wrong on real hardware: DietPi's unit has User=syncthing. Every
-  # part of the old fix - the group membership, the chown, and the write
-  # test that then cheerfully reported "dietpi can write: yes" - targeted a
-  # user the service never runs as, while Syncthing itself failed on
-  # "open .../syncthing.lock: permission denied" for hours. Ask systemd.
-  ST_USER=$(systemctl show syncthing -p User --value 2>/dev/null)
-  [[ -n "$ST_USER" ]] || ST_USER=dietpi
-  ok "Syncthing runs as: $ST_USER"
+# Unlike Syncthing, this project owns the systemd unit outright (DietPi
+# does not template one for a package it never packaged), so there is no
+# vendor-controlled ExecStart to route around with a bind mount - the data
+# directory just needs to be a plain path on $STORAGE, handed to the
+# server on its own command line below. And running it as $SVC_USER
+# (rather than a second dedicated user) sidesteps the entire
+# group-sharing dance CLAUDE.md #40 needed for Syncthing in the first
+# place: $STORAGE was already made writable for $SVC_USER by STEP 4 above,
+# so there is no second user's access to reconcile against it and no way
+# to repeat that incident.
+LS_BIN=/usr/local/bin/lockstep-sync-server
+LS_DATA="$STORAGE/lockstep-sync"
+if [[ -x "$LS_BIN" ]]; then
+  mkdir -p "$LS_DATA"
+  chown -R "$SVC_USER":"$SVC_USER" "$LS_DATA" 2>/dev/null || true
 
-  # A supplementary group only applies to processes started *after* the
-  # change - an already-running syncthing.service keeps its old groups
-  # until restarted. Only force that restart when the membership is
-  # actually new (checked before usermod, which is itself always a
-  # successful no-op when already a member and so cannot tell new from
-  # existing on its own) - no need to bounce Syncthing on every run once
-  # this has already applied once.
-  ST_NEED_RESTART=0
-  if ! id -nG "$ST_USER" 2>/dev/null | grep -qw "$SVC_USER"; then
-    usermod -aG "$SVC_USER" "$ST_USER" 2>/dev/null && {
-      ok "$ST_USER added to the $SVC_USER group (shares its already-fixed $STORAGE access)"
-      ST_NEED_RESTART=1
-    }
-  fi
-  # Belt-and-braces group ownership on the directories themselves. A no-op
-  # on exFAT/NTFS (chgrp/chmod cannot do anything there - group access
-  # already comes from the mount's own gid=/umask= options above) but
-  # matters on a real Unix filesystem (ext4, ...), where each directory
-  # has its own ownership independent of the mount. Never touches $STORAGE
-  # itself or any mount option - purely a directory-level chgrp/chmod.
-  chgrp -R "$SVC_USER" "$ST_HOME" "$ST_VAULTS" 2>/dev/null || true
-  chmod -R g+rwX "$ST_HOME" "$ST_VAULTS" 2>/dev/null || true
-  chmod g+s "$ST_HOME" "$ST_VAULTS" 2>/dev/null || true
-
-  # The authoritative write test is against $ST_DEFAULT, below, after the
-  # bind mount - that is the path Syncthing itself opens
-  # ($ST_DEFAULT/syncthing.lock). Testing only $ST_HOME checks the wrong
-  # directory whenever the bind mount is not actually in place, which is
-  # exactly when this matters.
-
-  # Defensive: something other than our own bind mount can occasionally
-  # grab this directory first - DietPi's own drive-detection auto-mounting
-  # a newly-visible partition directly onto an existing empty mountpoint is
-  # a boot-time race in the same family as CLAUDE.md #12, and a real
-  # incident showed the same partition ending up mounted here directly
-  # (not via bind - `mount`/`findmnt` show the raw device as SOURCE, not
-  # "$ST_HOME[/...]") instead of at $STORAGE. If left alone, the
-  # `mount --bind` below would stack a *second* independent mount of the
-  # same filesystem on top of it rather than replacing it - two live
-  # mounts of one exFAT/NTFS filesystem can be written out of sync with
-  # each other and risk real data corruption. Clear anything that isn't
-  # our bind mount before proceeding.
-  if mountpoint -q "$ST_DEFAULT" 2>/dev/null; then
-    CUR_SRC=$(findmnt -no SOURCE "$ST_DEFAULT" 2>/dev/null | tail -n1)
-    if [[ "$CUR_SRC" != "$ST_HOME"* ]]; then
-      w "$ST_DEFAULT is already mounted from $CUR_SRC (not our bind mount) - clearing it first"
-      for i in 1 2 3 4 5; do umount "$ST_DEFAULT" 2>/dev/null && break; sleep 1; done
-      umount -l "$ST_DEFAULT" 2>/dev/null || true
-    fi
-  fi
-
-  # Already bind-mounted from a previous run? A bind mount makes the target
-  # report the *source* directory's device+inode, so comparing those is a
-  # reliable, filesystem-agnostic way to tell "already redirected" apart
-  # from "still the plain directory DietPi created" without depending on
-  # mount option text (which findmnt can report in a confusing, stacked
-  # way for autofs-backed drives - see sentinel-fix-storage-owner.sh).
-  SAME_MOUNT=0
-  if [[ -d "$ST_DEFAULT" ]]; then
-    A=$(stat -c '%d:%i' "$ST_HOME" 2>/dev/null || echo a)
-    B=$(stat -c '%d:%i' "$ST_DEFAULT" 2>/dev/null || echo b)
-    [[ -n "$A" && "$A" == "$B" ]] && SAME_MOUNT=1
-  fi
-
-  if (( SAME_MOUNT )); then
-    ok "Syncthing home already redirected to $ST_HOME"
+  sed -e "s|^ExecStart=.*|ExecStart=$LS_BIN serve --data $LS_DATA --addr 0.0.0.0:8384|" \
+      -e "s|^User=.*|User=$SVC_USER|" \
+      -e "s|^Group=.*|Group=$SVC_USER|" \
+      "$SRC/systemd/sentinel-lockstep-sync.service" > /etc/systemd/system/sentinel-lockstep-sync.service
+  systemctl daemon-reload
+  systemctl reset-failed sentinel-lockstep-sync 2>/dev/null || true
+  systemctl enable sentinel-lockstep-sync >/dev/null 2>&1
+  # restart, not enable --now: the unit file above is rewritten on every
+  # run (in case $STORAGE or $SVC_USER changed), and enable --now would
+  # leave an already-running instance on its old ExecStart.
+  if systemctl restart sentinel-lockstep-sync 2>/dev/null; then
+    ok "Lockstep Sync server running (data: $LS_DATA; reachable over Tailscale only - see setup.sh H8)"
   else
-    ST_WAS_RUNNING=0
-    if systemctl is-active --quiet syncthing 2>/dev/null; then
-      ST_WAS_RUNNING=1
-      systemctl stop syncthing 2>/dev/null || true
-    fi
-
-    # One-time migration, and only one-time: only when the default location
-    # actually has data and the target is still empty, so re-running this
-    # step (every install.sh / update.sh) never overwrites either side.
-    if [[ -d "$ST_DEFAULT" ]] && [[ -n "$(ls -A "$ST_DEFAULT" 2>/dev/null)" ]] \
-       && [[ -z "$(ls -A "$ST_HOME" 2>/dev/null)" ]]; then
-      if cp -a "$ST_DEFAULT"/. "$ST_HOME"/; then
-        ok "Migrated existing Syncthing data to $ST_HOME"
-      else
-        w "Failed to migrate existing Syncthing data from $ST_DEFAULT"
-      fi
-    fi
-
-    mkdir -p "$ST_DEFAULT"
-    # mkdir runs as root here, so a freshly created $ST_DEFAULT is
-    # root:root 0755 - and Syncthing runs as $ST_USER. Whenever the bind
-    # mount below does not take (or is cleared later), Syncthing then
-    # fails on exactly this directory with "chmod ...: operation not
-    # permitted" followed by "open .../syncthing.lock: permission
-    # denied", which is what real hardware reported. Hand the directory
-    # to $ST_USER up front; once the bind mount covers it these calls are
-    # harmless no-ops (exFAT has no per-directory ownership at all).
-    chown "$ST_USER":"$SVC_USER" "$ST_DEFAULT" 2>/dev/null || true
-    chmod 0775 "$ST_DEFAULT" 2>/dev/null || true
-    grep -qF " $ST_DEFAULT " /etc/fstab || \
-      echo "$ST_HOME $ST_DEFAULT none bind 0 0" >> /etc/fstab
-    systemctl daemon-reload
-
-    if MNT_OUT=$(mount --bind "$ST_HOME" "$ST_DEFAULT" 2>&1); then
-      ok "Bind-mounted $ST_HOME onto $ST_DEFAULT"
-    else
-      w "Bind mount failed: $MNT_OUT"
-      w "Syncthing will keep using $ST_DEFAULT on the SD card until this is fixed."
-    fi
-
-    (( ST_WAS_RUNNING )) && { systemctl reset-failed syncthing 2>/dev/null; systemctl start syncthing 2>/dev/null || true; }
+    w "Failed to start sentinel-lockstep-sync.service; check 'journalctl -u sentinel-lockstep-sync'."
   fi
-
-  # Now that the bind mount (or its absence) is settled, test the path
-  # Syncthing actually opens. This is the check that would have caught the
-  # real-hardware failure directly instead of leaving it to journalctl.
-  if runuser -u "$ST_USER" -- sh -c ': > "$1/.st-write-test.$$" && rm -f "$1/.st-write-test.$$"' _ "$ST_DEFAULT" 2>/dev/null; then
-    ok "$ST_USER can write to $ST_DEFAULT"
-  else
-    w "$ST_USER cannot write to $ST_DEFAULT - Syncthing will fail to start there."
-    w "  $(ls -ld "$ST_DEFAULT" 2>/dev/null)"
-    w "  $ST_USER groups: $(id -nG "$ST_USER" 2>/dev/null)"
-    w "A reboot may be needed for a newly added group to reach syncthing.service."
-  fi
-
-  # Syncthing fails fast on a permission problem, so it can burn through
-  # systemd's default 5-starts-in-10s limit and stick at
-  # failed (start-limit-hit), where every later `systemctl start` is
-  # ignored with "Start request repeated too quickly" - real hardware hit
-  # exactly this. reset-failed clears that counter; it is a harmless no-op
-  # on a healthy unit (CLAUDE.md #9).
-  systemctl reset-failed syncthing 2>/dev/null || true
-  if (( ST_NEED_RESTART )) && systemctl is-active --quiet syncthing 2>/dev/null; then
-    systemctl restart syncthing 2>/dev/null && ok "Restarted Syncthing to pick up its new group membership"
-  fi
-  systemctl enable --now syncthing >/dev/null 2>&1 || true
-
-  # Syncthing binds its GUI to loopback only by default, which makes the
-  # http://<Pi-IP>:8384 step this script's own summary (and setup.sh H8)
-  # asks for impossible. Editing config.xml correctly turns out to need
-  # more care than it looks - the address is an XML element, and Syncthing
-  # overwrites config.xml from memory when it stops - so the whole thing
-  # lives in its own script, which also verifies the socket afterwards
-  # instead of assuming (CLAUDE.md #40).
-  "$SRC/scripts/sentinel-fix-syncthing-gui.sh" || true
+  # Binds 0.0.0.0:8384 (above) rather than a specific address because the
+  # Tailscale interface's own IP is only assigned once 'tailscale up' has
+  # actually run (setup.sh H7, a manual step) and can change if the node is
+  # re-authed - baking a specific address into the unit would leave it
+  # broken until the next install.sh/update.sh re-run. Reachability is
+  # instead restricted to loopback + the tailscale0 interface by iptables,
+  # the same DROP-based pattern already used for AdGuard's :8083
+  # (CLAUDE.md #5), applied and kept in place by Guardian
+  # (check_lockstep_firewall(), CLAUDE.md #61) rather than here, matching
+  # how :8083's firewalling is Guardian's job too - install.sh runs it once
+  # at the very end (STEP 10) so the rule is in place before this finishes.
 else
-  w "Syncthing not installed; skipping storage redirect (see bootstrap.sh STEP 9)."
+  w "Lockstep Sync server not installed; skipping (see bootstrap.sh STEP 9)."
 fi
 
 # ---------------------------------------------------------------- 6. Old services
@@ -566,10 +432,10 @@ fi
 sleep 3
 if systemctl is-active --quiet sentinel; then
   IP=$(hostname -I 2>/dev/null | awk '{print $1}')
-  ST_LINE=""
-  if [[ -x /opt/syncthing/syncthing ]]; then
-    ST_LINE="  Syncthing   http://${IP:-<this-Pi-IP>}:8384 (Obsidian sync) - set a GUI
-              password and pair devices during H8 of setup.sh if you have not yet
+  LS_LINE=""
+  if systemctl is-active --quiet sentinel-lockstep-sync 2>/dev/null; then
+    LS_LINE="  Lockstep    reachable only over Tailscale, at :8384 - pair devices
+              during H8 of setup.sh if you have not yet
 "
   fi
   cat <<EOS
@@ -580,7 +446,7 @@ if systemctl is-active --quiet sentinel; then
   AdGuard     locked to localhost now; blocked externally by default - run
               'sudo sentinel-adguard-8083 enable [MINUTES]' to open :8083
               (log in with the admin password set during H5 of setup.sh)
-${ST_LINE}  Data        $DATA
+${LS_LINE}  Data        $DATA
   Logs        journalctl -u sentinel -f
   Guardian    journalctl -t sentinel-guardian -f
   Diagnostics sentinel-diagnose

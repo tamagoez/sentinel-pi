@@ -242,7 +242,7 @@ check_services() {
   # instead of the hotspot or Bluetooth staying down until a fresh reboot.
   systemctl list-unit-files hciuart.service &>/dev/null && units+=(hciuart.service)
   systemctl list-unit-files hostapd.service &>/dev/null && units+=(hostapd.service)
-  systemctl list-unit-files syncthing.service &>/dev/null && units+=(syncthing.service)
+  systemctl list-unit-files sentinel-lockstep-sync.service &>/dev/null && units+=(sentinel-lockstep-sync.service)
 
   # hciuart.service is the one unit here whose "inactive" resting state
   # unit_needs_start() cannot reliably tell apart from broken. CLAUDE.md
@@ -421,118 +421,38 @@ check_storage_owner() {
   fi
 }
 
-# ------------------------------------------------------------------ 8b. Syncthing storage
-# install.sh bind-mounts $STORAGE/syncthing onto Syncthing's default home
-# directory (/mnt/dietpi_userdata/syncthing) so a synced Obsidian vault's
-# very frequent writes land on the external drive, not the SD card
-# (CLAUDE.md #40). That bind mount does not naturally survive a
-# dietpi-software reinstall of Syncthing (a fresh update.sh run re-creates
-# a plain directory there) and can also race at boot if $STORAGE itself
-# mounts late. Comparing device+inode (same technique install.sh uses) is
-# how "still redirected" is told apart from "quietly back on the SD card"
-# without depending on mount option text.
-check_syncthing_storage() {
-  command -v syncthing >/dev/null 2>&1 || [[ -x /opt/syncthing/syncthing ]] || return 0
-  local storage="${SENTINEL_STORAGE:-/mnt/VIDEOSD}"
-  local st_home="$storage/syncthing"
-  local st_default=/mnt/dietpi_userdata/syncthing
-  local svc_user=sentinel
-  # Never assume the user Syncthing runs as - DietPi's unit uses
-  # User=syncthing, and an earlier version of this check hardcoded
-  # 'dietpi', so every repair it made targeted a user the service never
-  # runs as while Syncthing kept failing on its lock file.
-  local st_user
-  st_user=$(systemctl show syncthing -p User --value 2>/dev/null)
-  [[ -n "$st_user" ]] || st_user=dietpi
+# ------------------------------------------------------------------ 8b. Lockstep Sync firewall
+# sentinel-lockstep-sync.service (CLAUDE.md #61) binds 0.0.0.0:8384 rather
+# than a specific address (the Tailscale interface's own IP is only
+# assigned after 'tailscale up' has run and can change if the node is
+# re-authed), so reachability is restricted here instead, the same
+# DROP-based pattern check_firewall() above already uses for AdGuard's
+# :8083 - except this one allows the tailscale0 interface through as well
+# as loopback, rather than blocking every non-loopback source outright.
+# Re-checked every cycle for the same reason as :8083's rule: iptables
+# rules live only in kernel memory and do not survive a reboot on their
+# own.
+LOCKSTEP_PORT=8384
+check_lockstep_firewall() {
+  command -v iptables >/dev/null || return 0
+  systemctl list-unit-files sentinel-lockstep-sync.service &>/dev/null || return 0
 
-  # NEVER call sentinel-fix-storage-owner.sh here for 'dietpi' - its
-  # exFAT/NTFS branch rewrites the whole *mount's* uid=/gid= options
-  # (CLAUDE.md #8), not a single directory, and this mount was already
-  # fixed for $svc_user by install.sh/check_storage_owner(). Doing that a
-  # second time for a different user is exactly what caused a real
-  # incident: this check and check_storage_owner() fighting over the same
-  # mount's uid=/gid= every 2-minute cycle, each fix_fat_mount() call
-  # remounting (up to a lazy umount -l) a mount every other service still
-  # had files open on - which took every service down and left the drive
-  # mounted somewhere other than $storage (CLAUDE.md #40). Group
-  # membership shares the *already-fixed* access instead, without ever
-  # touching fstab or the mount again.
-  if ! id -nG "$st_user" 2>/dev/null | grep -qw "$svc_user"; then
-    if usermod -aG "$svc_user" "$st_user" 2>/dev/null; then
-      fixed "added $st_user to the $svc_user group (was missing - Syncthing could not write to $storage)"
-      systemctl is-active --quiet syncthing 2>/dev/null && systemctl restart syncthing 2>/dev/null
+  local applied=0
+  for cmd in iptables ip6tables; do
+    command -v "$cmd" >/dev/null || continue
+    if ! "$cmd" -C INPUT -p tcp --dport "$LOCKSTEP_PORT" ! -i lo ! -i tailscale0 -j DROP 2>/dev/null; then
+      "$cmd" -I INPUT 1 -p tcp --dport "$LOCKSTEP_PORT" ! -i lo ! -i tailscale0 -j DROP 2>/dev/null && applied=1
     fi
-  fi
-  chgrp -R "$svc_user" "$st_home" "$storage/obsidian" 2>/dev/null || true
-  chmod -R g+rwX "$st_home" "$storage/obsidian" 2>/dev/null || true
-
-  # When $st_default is a plain directory rather than our bind mount, it
-  # was created by root (install.sh's mkdir) and Syncthing - running as
-  # dietpi - cannot write its lock file there. Hand it over. Once the bind
-  # mount covers it this is a no-op (exFAT has no per-directory
-  # ownership), so it is safe to run unconditionally every cycle.
-  if [[ -d "$st_default" ]] && ! mountpoint -q "$st_default" 2>/dev/null; then
-    chown "$st_user":"$svc_user" "$st_default" 2>/dev/null || true
-    chmod 0775 "$st_default" 2>/dev/null || true
-  fi
-
-  [[ -d "$st_home" && -d "$st_default" ]] || return 0
-  local a b
-  a=$(stat -c '%d:%i' "$st_home" 2>/dev/null) || return 0
-  b=$(stat -c '%d:%i' "$st_default" 2>/dev/null) || return 0
-  [[ "$a" == "$b" ]] && return 0
-
-  local was_active=0
-  systemctl is-active --quiet syncthing 2>/dev/null && { was_active=1; systemctl stop syncthing; }
-
-  # A real incident showed $st_default sometimes ending up mounted directly
-  # from the raw device (not via our bind mount) - DietPi's own drive
-  # detection can grab a newly-visible partition onto an existing empty
-  # mountpoint in a boot-time race (same family as check_bluetooth()'s
-  # race). mount --bind on top of that would stack a second independent
-  # mount of the same filesystem instead of replacing it, and two live
-  # mounts of one exFAT/NTFS filesystem written out of sync risk real data
-  # corruption. Clear anything that isn't our bind mount first.
-  if mountpoint -q "$st_default" 2>/dev/null; then
-    local cur_src
-    cur_src=$(findmnt -no SOURCE "$st_default" 2>/dev/null | tail -n1)
-    if [[ "$cur_src" != "$st_home"* ]]; then
-      local j
-      for j in 1 2 3 4 5; do umount "$st_default" 2>/dev/null && break; sleep 1; done
-      umount -l "$st_default" 2>/dev/null || true
+    # Forwarded traffic (hotspot clients -> Pi) never needs to reach this
+    # port - Tailscale traffic terminates locally at the tailscale0
+    # interface and is handled by the INPUT rule above, not FORWARD - so
+    # this blocks it unconditionally, same as AdGuard's :8083 FORWARD rule.
+    if ! "$cmd" -C FORWARD -p tcp --dport "$LOCKSTEP_PORT" -j DROP 2>/dev/null; then
+      "$cmd" -I FORWARD 1 -p tcp --dport "$LOCKSTEP_PORT" -j DROP 2>/dev/null && applied=1
     fi
-  fi
-
-  if mount --bind "$st_home" "$st_default" 2>/dev/null; then
-    fixed "re-bind-mounted Syncthing home onto $st_home (had reset to $st_default on the SD card)"
-  else
-    warn "could not re-bind-mount Syncthing home onto $st_home"
-  fi
-  # reset-failed first: Syncthing exits fast on a permission problem and
-  # can be sitting at failed (start-limit-hit), where start is ignored
-  # (CLAUDE.md #9).
-  (( was_active )) && { systemctl reset-failed syncthing 2>/dev/null; systemctl start syncthing; }
-}
-
-# ------------------------------------------------------------------ 8c. Syncthing GUI reachability
-# Syncthing binds its GUI to loopback only by default, which makes the
-# http://<Pi-IP>:8384 that setup.sh H8 and SETUP.md tell the user to open
-# refuse the connection. sentinel-fix-syncthing-gui.sh owns the repair -
-# it has to find the config Syncthing actually reads, stop Syncthing
-# before editing (Syncthing overwrites config.xml from memory on
-# shutdown), and verify the resulting socket. Two earlier in-line versions
-# of this check got that wrong and silently changed nothing, so this one
-# delegates rather than keeping its own copy (CLAUDE.md #40).
-check_syncthing_gui() {
-  local script=/opt/sentinel/scripts/sentinel-fix-syncthing-gui.sh
-  [[ -x "$script" ]] || return 0
-  local out rc
-  out=$("$script" --quiet 2>&1); rc=$?
-  if (( rc == 10 )); then
-    fixed "Syncthing GUI was loopback-only - now reachable at :8384"
-  elif (( rc != 0 )) && [[ -n "$out" ]]; then
-    warn "Syncthing GUI check: $(printf '%s' "$out" | tr '\n' ' ')"
-  fi
+  done
+  (( applied )) && fixed "reapplied the port $LOCKSTEP_PORT firewall rules (Tailscale-only)"
+  return 0
 }
 
 # ------------------------------------------------------------------ 8d. BlueALSA D-Bus name
@@ -594,6 +514,7 @@ check_ytdlp() {
 check_adguard_bind
 check_adguard_listen
 check_firewall
+check_lockstep_firewall
 check_audio
 check_bluetooth
 # Before check_services, not after: if the distro's own bluealsa.service is
@@ -610,8 +531,6 @@ check_services
 check_bluealsa_freshness
 check_hotspot_dns
 check_storage_owner
-check_syncthing_storage
-check_syncthing_gui
 check_storage
 check_ytdlp
 

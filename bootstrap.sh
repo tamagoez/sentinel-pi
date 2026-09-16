@@ -17,10 +17,11 @@
 #   8. Install Tailscale (package only - joining a tailnet needs a human to
 #      open a login URL in a browser, so that is a manual step in
 #      setup.sh, not here).
-#   9. Install Syncthing (package only - redirecting its storage off the SD
-#      card needs the external drive already mounted, so that is done by
-#      install.sh, after setup.sh's drive-mount step; pairing devices is a
-#      manual step in setup.sh, same reasoning as Tailscale above).
+#   9. Uninstall Syncthing if present (superseded - see CLAUDE.md #61) and
+#      install the Lockstep Sync server binary (package only - its storage
+#      dir needs the external drive already mounted, so that is done by
+#      install.sh; pairing devices is a manual step in setup.sh, same
+#      reasoning as Tailscale above).
 #
 # A reboot is only needed the first time, when Bluetooth/audio/SWAP
 # actually change - this script tracks that and says so at the end, so
@@ -177,13 +178,16 @@ apt-get update -qq
 # scripts/sentinel-setup-audio-mixing.sh searches for it at runtime and
 # falls back to no EQ if it's somehow missing, so this package failing to
 # install does not break basic playback.
+# qrencode: prints the Lockstep Sync device-pairing link as a scannable QR
+# code in setup.sh H8 (CLAUDE.md #61) - the same tool upstream's own
+# install.sh uses for this, so no protocol/library work is needed here.
 apt-get install -y --no-install-recommends \
   bluez bluez-alsa-utils \
   mpg123 v4l-utils python3-opencv python3-pil python3-venv \
   fonts-dejavu-core fonts-noto-cjk iptables \
   exfatprogs ntfs-3g espeak-ng \
   open-jtalk open-jtalk-mecab-naist-jdic hts-voice-nitech-jp-atr503-m001 \
-  swh-plugins >/dev/null 2>&1 \
+  swh-plugins qrencode >/dev/null 2>&1 \
   && ok "Bluetooth-audio, camera, exFAT/NTFS, voice and EQ packages installed" \
   || w "Some packages failed to install."
 
@@ -270,23 +274,52 @@ else
   fi
 fi
 
-# ---------------------------------------------------------------- 9. Syncthing
-c "STEP 9/9  Install Syncthing (for Obsidian sync)"
-# 50=Syncthing. DietPi installs it as a tarball (not apt) to
-# /opt/syncthing/syncthing, running as the 'dietpi' user, with its home/
-# config/database under /mnt/dietpi_userdata/syncthing by default - on the
-# SD card unless dietpi_userdata itself was redirected during DietPi's own
-# first-run setup. A synced Obsidian vault writes far more often than any
-# other config this project touches (every edit, from every device), so
-# install.sh redirects that directory onto the external drive with a bind
-# mount once it's actually mounted (too early to do that here - see the
-# header comment above). Only the package goes in here; pairing devices to
-# it is a manual step in setup.sh (H8), same reasoning as Tailscale (H7).
-if [[ -x /opt/syncthing/syncthing ]]; then
-  ok "Syncthing already installed; skipped"
+# ---------------------------------------------------------------- 9. Obsidian sync
+c "STEP 9/9  Switch Obsidian sync: uninstall Syncthing, install Lockstep Sync"
+# Syncthing (CLAUDE.md #40/#41/#45) is replaced by Lockstep Sync, a small
+# self-hosted sync server for the Obsidian community plugin of the same
+# name (CLAUDE.md #61). Uninstall Syncthing first - install.sh's storage
+# step for it (the external-drive bind mount) is removed together with
+# this, so nothing should be left trying to hold that mount open.
+if [[ -x /opt/syncthing/syncthing ]] || command -v syncthing >/dev/null 2>&1; then
+  systemctl disable --now syncthing >/dev/null 2>&1 || true
+  if "$DS" uninstall 50 >/dev/null 2>&1; then
+    ok "Syncthing uninstalled (superseded by Lockstep Sync)"
+  else
+    w "Syncthing uninstall via dietpi-software failed; remove it manually if it lingers:"
+    w "  sudo dietpi-software uninstall 50"
+  fi
 else
-  "$DS" install 50 && ok "Syncthing installed (storage redirect + device pairing: see setup.sh H8)" \
-    || w "Syncthing install failed."
+  ok "Syncthing not installed; nothing to remove"
+fi
+
+# There is no dietpi-software ID for Lockstep Sync, so its server binary is
+# fetched straight from its GitHub releases - the same "official
+# script/binary, guarded by an architecture check" approach as Tailscale
+# above. Upstream ships amd64 and arm64 builds only (no armv7/armhf) -
+# CLAUDE.md #61 has the reasoning for why that is fine on this project's
+# target hardware, and what to check if a given Pi turns out not to
+# qualify (32-bit DietPi).
+case "$(uname -m)" in
+  aarch64|arm64) LS_ARCH=arm64 ;;
+  x86_64|amd64)  LS_ARCH=amd64 ;;
+  *)             LS_ARCH="" ;;
+esac
+LS_BIN=/usr/local/bin/lockstep-sync-server
+if [[ -z "$LS_ARCH" ]]; then
+  w "Lockstep Sync has no server build for $(uname -m) (only amd64/arm64 exist) - skipped."
+  w "This Pi needs a 64-bit (ARM64) DietPi image for Obsidian sync; see CLAUDE.md #61."
+elif [[ -x "$LS_BIN" ]]; then
+  ok "Lockstep Sync server already installed; skipped"
+else
+  LS_URL="https://github.com/stephansergeev/obsidian-lockstep-sync/releases/latest/download/sync-server-linux-$LS_ARCH"
+  if curl -fsSL "$LS_URL" -o "$LS_BIN.tmp" && chmod +x "$LS_BIN.tmp" && mv "$LS_BIN.tmp" "$LS_BIN"; then
+    ok "Lockstep Sync server installed to $LS_BIN"
+  else
+    rm -f "$LS_BIN.tmp"
+    w "Lockstep Sync server download failed; retry later with:"
+    w "  curl -fsSL $LS_URL -o $LS_BIN && chmod +x $LS_BIN"
+  fi
 fi
 
 if (( NEEDS_REBOOT )); then
