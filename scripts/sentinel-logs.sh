@@ -58,6 +58,15 @@ for u in sentinel.service sentinel-guardian.timer syncthing.service \
     state="$state (start-limit-hit: needs systemctl reset-failed $u)"
   fi
   kv "$u" "$state"
+  # hciuart.service sitting at "inactive" is its normal resting state once
+  # it has attached the UART - Guardian's unit_needs_start() (CLAUDE.md
+  # #47/#50) treats it as healthy only when Type=/Result= say so, and both
+  # were guessed wrong once already (assumed Type=oneshot when real
+  # hardware is Type=forking). Print the actual values so the next report
+  # confirms rather than guesses.
+  if [[ "$u" == "hciuart.service" && "$state" == inactive* ]]; then
+    kv "  $u Type/Result" "$(systemctl show "$u" -p Type -p Result -p RemainAfterExit --value 2>/dev/null | paste -sd/ -)"
+  fi
 done
 
 hdr "storage"

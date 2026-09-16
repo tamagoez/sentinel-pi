@@ -2015,6 +2015,58 @@ voice の退避) は `suspended_by` にその理由の文字列 (`"eco"` など)
 `@P 0` は退避理由が無ければ正しく次の曲へ進める、(3) 現在の世代でも
 退避中なら進めない、の 3 パターンを確認済みです。
 
+### 51. `hciuart.service` は `Type=oneshot` ではなく `Type=forking`。Type= だけで「完了扱いか」を判定しない
+
+#47 で `unit_needs_start()` を追加し、「`Type=oneshot` で `RemainAfterExit`
+が無ければ、`inactive` は失敗ではなく正常な終わり方」と判定するように
+しました。しかし `hciuart.service` (raspberrypi-sys-mods 提供、UART の
+Bluetooth アタッチを一度だけ行う) は **`Type=oneshot` ではなく
+`Type=forking`** でした。この Type だけを見ていた判定は hciuart には
+一切効かず、実機では稼働 2 時間14分の間に `FIXED: started
+hciuart.service` が **57 回** — ほぼ Guardian の周期 (2 分) のたびに
+1 回、休みなく再起動し続けていました。
+
+これは無害な繰り返しでは済みませんでした。再起動のたびに UART を
+付け直すため `bluetoothd` がコントローラを見失いやすくなり (CLAUDE.md
+#12 の既知の競合)、`check_bluetooth()` がそれを「修復」しようと
+`bluetooth.service` を再起動し、`Requires=` で繋がった BlueALSA 系
+ユニットが道連れになり、そのたびに bcm2835 の ALSA デバイスが開閉を
+繰り返します。この開閉の連発は CLAUDE.md #45 が特定した「bcm2835 が
+壊れて dmix が開けなくなる」不具合の直接の引き金で、実機の
+`sentinel-logs` では同じ 2 時間の中で `sentinel_music`/`sentinel_voice`
+の open 失敗が連発し、最終的に mpg123 自身が
+`[src/mpg123.c:play_frame():857] error: Deep trouble! Cannot flush to my
+output anymore!` を出してプロセスごと終了する (mpg123 はこのエラーの
+あと終了コード 133 で自発的に落ちる、既知の挙動) のが 18 回記録されて
+いました。「hciuart が毎周期再起動している」のと「mpg123 が繰り返し
+落ちる」は、別々の不具合ではなく同じ連鎖の両端でした。
+
+`unit_needs_start()` を、Type= だけでなく `systemctl show` の `Result=`
+も見るように直しました — `Type` を `oneshot` または `forking` のどちらか
+に広げつつ、**`Result` が `success` (前回の起動が実際に正常終了した)
+のときだけ**「inactive は正常な終わり方」と判定します。`Type=forking`
+だけを見て `Result` を確認しないと、たとえば `hostapd.service` のように
+本来ずっと動き続けるべき `Type=forking` の常駐デーモンが実際にクラッシュ
+した場合まで「もう仕事は終わったから inactive のままでいい」と誤判定して
+しまいます (`Result` はクラッシュなら `exit-code`/`signal`/`timeout` など
+`success` 以外になるため、この誤判定を防げます)。**`Type` だけの判定に
+戻したり `Result` のチェックを外したりしないでください** — 同じ
+「hciuart が毎周期再起動し続ける」不具合、あるいは「本当に落ちている
+常駐デーモンを見逃す」不具合のどちらかに戻ります。
+
+`sentinel-logs` にも `hciuart.service` が `inactive` のときだけ実際の
+`Type`/`Result`/`RemainAfterExit` を出すようにしました。今回
+「`Type=oneshot` のはず」という推測が一度外れているので、次に同じ種類の
+報告が来たら CLAUDE.md #45 の教訓どおり、まずこの出力で事実を確認して
+から直してください。
+
+`unit_needs_start()` を bash のスタブ `systemctl` に差し込むテストで、
+(1) hciuart 相当 (`Type=forking`/`Result=success`/実行済み) は再起動
+しない、(2) 一度も実行していない同条件は 1 回だけ起動する、(3)
+`Type=forking`/`Result=exit-code` (本当にクラッシュした forking デーモン)
+は再起動する、(4) 既存の `Type=oneshot` の挙動は変わらない、の 4 パターン
+を確認済みです。
+
 ## モジュール構成
 
 各モジュールは疎結合で、`core/state.py` の `MODE` を購読するだけです。
