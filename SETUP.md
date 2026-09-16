@@ -275,4 +275,7 @@ by hand on the box. `journalctl -t sentinel-autoupdate` shows its history.
 | `setup.sh` starts from the wrong phase | `sudo ./setup.sh --reset` |
 | Syncthing GUI unreachable or devices won't pair | `systemctl status syncthing`; `journalctl -u syncthing -n 60 --no-pager` |
 | Syncthing writing to the SD card instead of the external drive | `stat -c '%d:%i' /mnt/VIDEOSD/syncthing /mnt/dietpi_userdata/syncthing` — the two should match (same bind mount); if not, wait up to 2 minutes for Guardian, or re-run `sudo ./install.sh` |
+| Music says "playing" but is silent | Read the audio block of `sudo sentinel-logs 2 full`. If `open sentinel_music` FAILS, Guardian rewrites asound.conf within 2 minutes; to do it now, run `sudo /opt/sentinel/scripts/sentinel-fix-audio-output.sh`. To rule mixing out entirely, turn off "play music and voice at the same time" in Settings |
+| Setting up Tailscale later | `sudo sentinel-tailscale up` — open the printed login URL in any browser. Check with `sentinel-tailscale status` |
+| Pasting the current state somewhere | `sudo sentinel-logs` — a short digest of just what is currently wrong (`sentinel-logs 6 full` widens it and adds real audio open tests) |
 | Anything else | `sentinel-diagnose` — bundles system + app state into one archive |

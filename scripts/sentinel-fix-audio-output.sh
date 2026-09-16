@@ -148,11 +148,7 @@ if [[ -f "$ASOUND" ]]; then
   if [[ -n "$CONF_CARD" && "$CONF_CARD" != "$CARD" ]]; then
     w "$ASOUND mixes into card $CONF_CARD but the analog output is card $CARD"
     w "music would be playing into the wrong card (usually HDMI = silence)"
-    (( QUIET )) || {
-      echo
-      echo "  Restart Sentinel so it regenerates $ASOUND for card $CARD:"
-      echo "    systemctl restart sentinel"
-    }
+    say "the open test below rewrites it for card $CARD if it really will not play"
   else
     ok "$ASOUND mixes into card ${CONF_CARD:-?} (matches the analog output)"
   fi
@@ -162,31 +158,116 @@ fi
 # Same "actually try it" discipline as sentinel-fix-storage-owner.sh's
 # can_write() (CLAUDE.md #8) - a config that looks right but will not open
 # is exactly the failure this is meant to catch.
+#
+# This section REPAIRS rather than only reports, because the failure mode
+# it catches takes the whole machine's audio down, not just mixing:
+# sentinel-setup-audio-mixing.sh points pcm.!default at the same dmix, so
+# a dmix that cannot open its slave silences bluealsa-aplay and every
+# bare `aplay` too, not only Sentinel's music.
+SETUP_MIX="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/sentinel-setup-audio-mixing.sh"
+
+pcm_opens() {
+  timeout 6 aplay -D "$1" -f S16_LE -r 44100 -c 2 -d 1 -q /dev/zero >/dev/null 2>&1
+}
+
+# Guardian runs this every 2 minutes. Rewriting /etc/asound.conf costs
+# several real playback opens (the setup script tests what it wrote), and
+# repeatedly opening and closing bcm2835 is the very churn that wedges the
+# card (CLAUDE.md #45) - so a repair that did not take must not be retried
+# on every cycle. Anything gated by this happens at most once an hour.
+may_retry() {
+  local stamp="/run/sentinel-audio-$1" now
+  now=$(date +%s)
+  if [[ -f "$stamp" ]] && (( now - $(stat -c %Y "$stamp" 2>/dev/null || echo 0) < 3600 )); then
+    return 1
+  fi
+  : > "$stamp"
+  return 0
+}
+
+unstick_card() {
+  # A bcm2835 left wedged by a client that crashed mid-stream refuses
+  # every open until the driver is reloaded - the state CLAUDE.md #45
+  # describes ("failed to close VCHI service connection"), which until now
+  # needed a reboot to clear. Reloading the ALSA driver is the documented
+  # remedy for this class of "card listed but will not open"
+  # (https://bbs.archlinux.org/viewtopic.php?id=173709). Only ever do this
+  # when nothing holds /dev/snd - yanking the driver out from under a live
+  # player would be the more damaging bug - and at most once every 10
+  # minutes so a card that is broken for some other reason is not reloaded
+  # on every Guardian cycle.
+  local stamp=/run/sentinel-alsa-reload
+  if fuser /dev/snd/* >/dev/null 2>&1; then
+    w "not reloading the ALSA driver: something still has /dev/snd open"
+    return 1
+  fi
+  if [[ -f "$stamp" ]] && (( $(date +%s) - $(stat -c %Y "$stamp" 2>/dev/null || echo 0) < 600 )); then
+    w "not reloading the ALSA driver again yet (tried within the last 10 minutes)"
+    return 1
+  fi
+  : > "$stamp"
+  # Reload only the analog driver first. `alsa force-reload` unloads every
+  # sound module, which on this machine includes snd_usb_audio for the USB
+  # camera's microphone - and any module reload can renumber the cards, so
+  # the narrower action is the safer one. CARD is re-resolved by the caller
+  # afterwards for exactly that reason.
+  if lsmod 2>/dev/null | grep -q '^snd_bcm2835 ' \
+     && modprobe -r snd_bcm2835 >/dev/null 2>&1 \
+     && modprobe snd_bcm2835 >/dev/null 2>&1; then
+    sleep 2; return 0
+  fi
+  if command -v alsa >/dev/null 2>&1 && alsa force-reload >/dev/null 2>&1; then
+    sleep 2; return 0
+  fi
+  w "could not reload the ALSA driver (it may be built into the kernel)"
+  return 1
+}
+
 if aplay -L 2>/dev/null | grep -qx 'sentinel_music'; then
-  if timeout 5 aplay -D sentinel_music -f S16_LE -r 44100 -c 2 -d 1 -q /dev/zero >/dev/null 2>&1; then
+  if pcm_opens sentinel_music; then
     ok "sentinel_music opens and accepts audio"
   else
     w "sentinel_music exists in asound.conf but will not open:"
-    timeout 5 aplay -D sentinel_music -f S16_LE -r 44100 -c 2 -d 1 /dev/zero 2>&1 \
+    timeout 6 aplay -D sentinel_music -f S16_LE -r 44100 -c 2 -d 1 /dev/zero 2>&1 \
       | sed 's/^/       /' >&2
     # Distinguish "the dmix definition is wrong" from "the card itself
     # cannot be opened right now". dmix opens its slave with a fixed
     # format, so a card that is busy, or a bcm2835 left in a stuck state
     # by a crashed client, fails here with a bare "Invalid argument" and
     # no hint as to which of the two it is.
-    if timeout 5 aplay -D "hw:$CARD,0" -f S16_LE -r 44100 -c 2 -d 1 -q /dev/zero >/dev/null 2>&1; then
-      w "but hw:$CARD,0 itself opens fine - the dmix definition is the problem"
-    else
+    if ! pcm_opens "hw:$CARD,0"; then
       w "hw:$CARD,0 will not open either - the card is busy or stuck, not a config problem"
       holders=$(fuser -v /dev/snd/* 2>&1 | tail -n +2 | tr -s ' ' | paste -sd' ' -)
       [[ -n "$holders" ]] && w "  /dev/snd holders: $holders"
-      (( QUIET )) || {
-        echo
-        echo "  Find what is holding the sound card, then stop it:"
-        echo "    fuser -v /dev/snd/*"
-        echo "    systemctl status sentinel-bluealsa-aplay sentinel-bluealsa"
-        echo "  A card left stuck by a crashed client usually needs a reboot."
-      }
+      if unstick_card; then
+        # A module reload can change card numbering, so ask again rather
+        # than trusting the index we resolved before the reload.
+        NEWCARD=$(find_output_card) && [[ -n "$NEWCARD" ]] && CARD="$NEWCARD"
+        if pcm_opens "hw:$CARD,0"; then
+          fixed_msg "the sound card was stuck; reloading the ALSA driver cleared it (card is now $CARD)"
+        fi
+      fi
+    fi
+    if ! pcm_opens sentinel_music && pcm_opens "hw:$CARD,0"; then
+      # The hardware is fine, so the dmix definition is what is wrong -
+      # a stale card index, or a file left behind by an older release.
+      # Rewrite it for the card we actually found. EQ is written off:
+      # modules/music.py re-applies the user's bands on the next track
+      # (its staleness check compares the file, not just its own memo),
+      # and audible music without EQ beats silent music with it.
+      if [[ -x "$SETUP_MIX" ]] && may_retry rewrite && "$SETUP_MIX" "$CARD" off >/dev/null 2>&1 \
+           && pcm_opens sentinel_music; then
+        fixed_msg "rewrote $ASOUND for card $CARD - sentinel_music opens again"
+      elif [[ -f "$ASOUND" ]]; then
+        # Last resort. asound.conf also redefines pcm.!default as this
+        # same dmix, so leaving a dmix that cannot open in place silences
+        # bluealsa-aplay and every other ALSA client on the machine, not
+        # just Sentinel. Moving it aside restores the plain hardware
+        # default: mixing and EQ stop, but sound comes back.
+        mv -f "$ASOUND" "$ASOUND.broken" 2>/dev/null
+        fixed_msg "moved an unopenable $ASOUND to $ASOUND.broken - audio falls back to the card directly (no mixing/EQ)"
+        w "  re-enable mixing later with: $SETUP_MIX $CARD off"
+      fi
     fi
   fi
 else
@@ -195,6 +276,10 @@ else
   # usually HDMI). Mixing music with voice announcements stays off until
   # the dmix setup succeeds, but music itself is audible.
   say "sentinel_music is not defined - music plays straight to card $CARD (no mixing)"
+  if [[ -x "$SETUP_MIX" ]] && may_retry create && "$SETUP_MIX" "$CARD" off >/dev/null 2>&1 \
+       && pcm_opens sentinel_music; then
+    fixed_msg "created $ASOUND for card $CARD - music and voice can be mixed again"
+  fi
 fi
 
 (( FIXED )) && exit 10

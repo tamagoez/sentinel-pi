@@ -199,6 +199,9 @@ async def put_config(request: Request):
         music.PLAYER.scan()
     if any(k in changed for k in ("music_eq_enabled", "music_eq_bands", "music_eq_track_overrides")):
         await asyncio.to_thread(music.refresh_eq)
+    if "audio_mixing_enabled" in changed:
+        # mpg123 の出力先は起動引数で決まるので、プロセスごと作り直す。
+        await asyncio.to_thread(music.restart_playback)
     if any(k in changed for k in ("eco_idle_minutes", "temp_eco_c",
                                   "temp_critical_c", "temp_recover_c",
                                   "mode_override")):

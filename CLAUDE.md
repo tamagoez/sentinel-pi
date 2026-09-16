@@ -69,15 +69,7 @@ Basic 認証ヘッダを組み立て、`/control/querylog` へ送ります。AdG
 到達性は別の話です。`http.address` を `127.0.0.1:8083` に固定し、iptables
 でも二重に塞いでいます。8080 経由の `/adguard/` プロキシは撤去したままです
 (フィルタ設定などを直接いじりたいまれなケースには
-`scripts/sentinel-fix-bluealsa.sh
-                    bluealsa が org.bluealsa の D-Bus 名を取れずに落ち
-                    続ける状態を直す。dbus-send で実際の所有者 PID と
-                    ユニットを特定し、別ユニット (ディストリ側の
-                    bluealsa.service など) ならそれを停止・無効化する。
-                    この再起動ループは bluealsa-aplay を道連れにし、
-                    bcm2835 を壊して「音楽が鳴らない」まで波及するため、
-                    音声障害の調査でも最初に見る (CLAUDE.md #45)
-scripts/sentinel-adguard-8083.sh enable [MINUTES]` で :8083 を一時的に
+`scripts/sentinel-adguard-8083.sh enable [MINUTES]` で :8083 を一時的に
 (既定 15 分、Guardian の次の周期までに自動で再遮断) 開けます。`disable`
 で即座に再遮断、`status` で現在の状態を確認できます)。
 
@@ -1814,6 +1806,112 @@ mpg123 は指定が無いと alsa/jack/pulse を順に試すため、ALSA が開
 読めば確定できました。**次に似た症状が出たら、まず `sentinel-logs` を
 取り、事実が出揃うまでコードを書かないでください。**
 
+### 46. named PCM は「一覧に載っているか」ではなく「実際に開けるか」で判定する
+
+「音楽が鳴らない」が #45 の修正後も残りました。`sentinel-logs` は
+`sentinel_music PCM present` と報告しており、サービスも全て active、
+mpg123 のエラーも 1 行もありません。それでも無音でした。
+
+原因は判定の仕方です。`music.py`/`voice.py` の `_mixing_ready()` は
+`aplay -L` の一覧に名前があるかどうかだけを見ていました。**あの一覧は
+`/etc/asound.conf` にその定義が書いてあることしか意味しません。** dmix は
+スレーブ (`hw:N,0`) を開いて初めて失敗するため、カード番号がズレている・
+他のプロセスがカードを直接掴んでいる・bcm2835 が開閉の連発で固まって
+いる (#45) のいずれでも、**名前は一覧に出続けるのに一切開けません**
+([alsa-lib #426](https://github.com/alsa-project/alsa-lib/issues/426)、
+[Arch Forums](https://bbs.archlinux.org/viewtopic.php?id=173709) など、
+`unable to open slave` として広く報告されている挙動)。その状態で
+mpg123 へ `-a sentinel_music`、aplay へ `-D sentinel_voice` を渡すと、
+どちらも「開けないデバイスへ書き込もうとして何も鳴らない」だけで、
+ducking へのフォールバックも起きません — 音楽も読み上げも同時に沈黙
+します。利用者が報告した「アナウンスが流れた瞬間に音楽もアナウンスも
+使えなくなった」という挙動とも一致します。
+
+CLAUDE.md #8 の `can_write()`、#31 の「書いたあと実際に鳴らしてみる」と
+同じ原則がここだけ抜けていました。`core/audio.pcm_opens()` を新設し、
+`/dev/zero` (デジタル無音) を 1 秒だけ流して実際に開けるか試します
+(結果は 30 秒キャッシュ、asound.conf を書き換えたら
+`invalidate_pcm_cache()` で捨てる)。**`aplay -L` の一覧を見るだけの
+判定に戻さないでください** — 同じ「エラーも音も出ない無音」に戻ります。
+
+あわせて 3 つ直しています。
+
+1. **`voice.py` のフォールバック再生が `-D` 無しだった。** ALSA の既定
+   デバイスへ流れるため、複数カードある Pi では HDMI へ出て無音になり
+   ます — `music.py` が `plughw:<card>,0` を明示しているのと同じ理由
+   (#37)。`_fallback_device()` で揃えました。
+2. **`sentinel-fix-audio-output.sh` が報告するだけだった。**
+   `sentinel_music` が開けず `hw:N,0` は開ける (= 設定側の問題) なら
+   asound.conf を正しいカードで書き直し、それでも駄目なら
+   `asound.conf.broken` へ退避します。退避が要るのは、この設定が
+   `pcm.!default` も同じ dmix に向けているためです — 開けない dmix を
+   置いたままにすると、Sentinel だけでなく bluealsa-aplay も素の
+   `aplay` も含めた**機体全体の音**が死にます。逆に `hw:N,0` すら
+   開けず `/dev/snd` を誰も掴んでいない場合は ALSA ドライバを再読み込み
+   して #45 の「固まった bcm2835」を解きます (10 分のクールダウン付き。
+   再生中に引き抜く方が有害なので `fuser` で無人を確認してからのみ)。
+3. **`audio_mixing_enabled` (既定 True) を追加。** オフにすると dmix を
+   一切使わず、音楽はアナログ出力へ直接、読み上げは曲を止めてから鳴る
+   #31 以前の挙動に戻ります。「音声アナウンス・同時再生・EQ のどれが
+   原因か」を利用者自身が切り分けられるようにするための元栓です
+   (CLAUDE.md #30 のとおり `GROUPS`/`LABELS` にも追加済み)。
+
+`_apply_audio_mixing()` は戻り値を `(適用できたか, 実際に有効になった EQ)`
+に変えました。`sentinel-setup-audio-mixing.sh` は LADSPA が無い/EQ 付きの
+構成が再生テストに落ちた場合に黙って EQ 無しへ降格します (#32) が、
+`Player` 側が「要求した値」を覚えていると、ファイルの実態とずれたまま
+毎曲ごとに再構成が走り、曲間にギャップが出続けます。**`EQ_ACTIVE=` の
+実測値を覚える形から、要求値を覚える形に戻さないでください。**
+
+### 47. `systemctl is-active` が inactive でも、完了した oneshot は異常ではない
+
+`sentinel-logs` が `FIXED: started hciuart.service x5` を報告しました。
+稼働 9 分・Guardian の周期は 2 分なので、**毎周期 1 回ずつ**再起動して
+いた計算です。`hciuart.service` は `Type=oneshot` で `RemainAfterExit` を
+持たないため、仕事を終えた後の `inactive` が正常な姿です。それを異常と
+みなしていました。
+
+無害なノイズでは済みません。再起動のたびに Bluetooth の UART を付け直す
+ので `bluetoothd` がコントローラを見失い、`check_bluetooth()` がそれを
+「修復」して `bluetooth.service` を再起動し、BlueALSA 系ユニットが道連れ
+になり、bcm2835 の ALSA デバイスが開閉を繰り返します。この開閉の連発が
+#45 で特定した「音楽が鳴らない」の直接の原因です。**つまり 2 分ごとに
+音声を壊しにいくタイマーが仕込まれていました。**
+
+`unit_needs_start()` を追加し、`ActiveState=failed` なら常に、`inactive`
+でも oneshot かつ `RemainAfterExit != yes` で一度も起動していない
+(`InactiveEnterTimestamp` が空) 場合だけ起動します。**素の
+`systemctl is-active` チェックに戻さないでください** — Bluetooth/音声の
+再起動カスケードが 2 分周期で復活します。
+
+あわせて、Guardian の実行順で `check_bluealsa_dbus` を `check_services`
+の**前**へ移しました。実機のログがこの順序の誤りをそのまま示しています
+— 14:20:23 に `started sentinel-bluealsa.service`、その 10 秒後に
+`disabled bluealsa.service - it was holding org.bluealsa`。D-Bus 名を
+別ユニットが握ったままでは起動は最初から失敗する運命だったので、先に
+衝突を解いてから起動すべきです (無駄な BlueALSA 再起動 = ALSA の開閉
+churn も 1 往復減ります)。
+
+### 48. Tailscale は `sentinel-tailscale` から操作する
+
+`setup.sh` の H7 は初回導入時に一度しか聞かないため、そこで見送ると
+あとから設定する入口がどこにも無く、実際に「Tailscale の設定方法が
+わからない」という報告になりました。`scripts/sentinel-tailscale.sh`
+(`/usr/local/bin/sentinel-tailscale`) にまとめています —
+`status` (既定、何も変更しない) / `up` / `down` / `reset`。
+
+- `up` は必ず `--accept-dns=false` を付けます (CLAUDE.md #39)。
+  Tailscale はフラグを記憶しないため、呼ぶ側が毎回明示する必要が
+  あります ([Tailscale Docs](https://tailscale.com/docs/install/linux))。
+- `status` は tailnet の IP と MagicDNS 名に加えて、そこから開ける
+  URL (`:8080`/`:8384`) を出します。さらに `/etc/resolv.conf` が
+  `100.100.100.100` を向いていれば警告します — その状態ではこの Pi 自身
+  の名前解決が AdGuard を通らなくなり、ネットワークログが静かに欠落
+  するためです (#39)。
+- `up` の成功後に「管理コンソールで key expiry を無効にする」案内を
+  出します。無人運用の機体は鍵の期限切れで tailnet から落ちても誰も
+  ログインし直せないためです ([Tailscale Docs](https://tailscale.com/kb/1076/dogcam))。
+
 ## モジュール構成
 
 各モジュールは疎結合で、`core/state.py` の `MODE` を購読するだけです。
@@ -1869,6 +1967,22 @@ scripts/sentinel-logs.sh
 scripts/sentinel-adguard-8083.sh
                     AdGuard Home の :8083 への直接アクセスを一時的に
                     有効化 / 恒久的に無効化する (人が手動で実行する)
+scripts/sentinel-fix-bluealsa.sh
+                    bluealsa が org.bluealsa の D-Bus 名を取れずに落ち
+                    続ける状態を直す。dbus-send で実際の所有者 PID と
+                    ユニットを特定し、別ユニット (ディストリ側の
+                    bluealsa.service など) ならそれを停止・無効化する。
+                    この再起動ループは bluealsa-aplay を道連れにし、
+                    bcm2835 を壊して「音楽が鳴らない」まで波及するため、
+                    音声障害の調査でも最初に見る (CLAUDE.md #45)
+scripts/sentinel-tailscale.sh
+                    `sentinel-tailscale [status|up|down|reset]`
+                    (/usr/local/bin/sentinel-tailscale)。Tailscale への
+                    参加・離脱・状態確認をまとめた入口。`up` は必ず
+                    `--accept-dns=false` を付ける (CLAUDE.md #39)。
+                    setup.sh の H7 は初回導入時にしか聞かないため、
+                    あとから設定したい人のための恒久的な入口として
+                    用意している (CLAUDE.md #46)
 scripts/sentinel-set-governor.sh
                     CPU ガバナを切り替える。root しか書き込めないため
                     sudoers で個別に許可し、core/state.py が sudo 経由で
@@ -1906,7 +2020,11 @@ core/audio.py       ALSA のアナログ出力カード (3.5mm) を特定する
                     で使うと機体によって HDMI を掴むため、"Headphones"
                     優先 → "bcm2835" → 最初のカードの順で探す。
                     music.py/bluetooth.py/voice.py が共通で使う
-                    (CLAUDE.md #37)
+                    (CLAUDE.md #37)。pcm_opens() は
+                    named PCM (sentinel_music など) が実際に開けるかを
+                    /dev/zero の 1 秒再生で試す — aplay -L の一覧に
+                    あるかどうかでは「定義が書いてある」ことしか
+                    分からない (CLAUDE.md #46)
 
 modules/camera.py       カメラ (別プロセス)。動体検知 -> MODE.report_motion()
                          個別カメラの上書き設定は config の camera_overrides

@@ -88,11 +88,54 @@ CARD=$(aplay -l 2>/dev/null | grep -im1 'headphones' | grep -oE '^card [0-9]+' |
 [[ -n "$CARD" ]] || CARD=$(aplay -l 2>/dev/null | grep -m1 -oE '^card [0-9]+' | awk '{print $2}')
 kv "analog card" "${CARD:-NONE FOUND}"
 if [[ -n "$CARD" ]]; then
-  kv "numid=1 (volume)" "$(amixer -c "$CARD" cget numid=1 2>/dev/null | grep -m1 -oE ': values=-?[0-9]+' | cut -d= -f2) $(amixer -c "$CARD" cget numid=1 2>/dev/null | grep -m1 -oE 'min=-?[0-9]+,max=-?[0-9]+')"
-  kv "numid=3 (route)" "$(amixer -c "$CARD" cget numid=3 2>/dev/null | grep -m1 -oE ': values=[0-9]+' | cut -d= -f2) (1=AUX)"
+  # Print each numid WITH the control's own name. A numid is only an
+  # index, so the same number means different things on different cards -
+  # labelling numid=3 "(route)" unconditionally is how real hardware came
+  # to report "numid=3 (route) 230", a value no route enum can hold
+  # (CLAUDE.md #44). The name is the fact; the number is just where it sat.
+  for n in 1 2 3; do
+    info=$(amixer -c "$CARD" cget "numid=$n" 2>/dev/null) || continue
+    [[ -n "$info" ]] || continue
+    nm=$(grep -m1 -oE "name='[^']*'" <<<"$info" | cut -d"'" -f2)
+    [[ -n "$nm" ]] || continue
+    kv "numid=$n $nm" "$(grep -m1 -oE ': values=[^ ]+' <<<"$info" | cut -d= -f2) $(grep -m1 -oE 'min=-?[0-9]+,max=-?[0-9]+' <<<"$info")"
+  done
 fi
 kv "asound.conf card" "$(grep -oE 'pcm "hw:[0-9]+,0"' /etc/asound.conf 2>/dev/null | head -n1 | grep -oE '[0-9]+' | head -n1 || echo 'no /etc/asound.conf')"
-kv "sentinel_music PCM" "$(aplay -L 2>/dev/null | grep -qx sentinel_music && echo present || echo MISSING)"
+kv "asound.conf EQ" "$(grep -q 'type ladspa' /etc/asound.conf 2>/dev/null && echo 'on (ladspa/mbeq)' || echo off)"
+
+# "Listed in aplay -L" only means asound.conf parses. dmix opens its slave
+# (hw:N,0) lazily, so a PCM can be listed and still refuse every open -
+# and in that state music and voice announcements are both silent with no
+# error anywhere. Test the real thing (CLAUDE.md #8); /dev/zero is digital
+# silence, so nothing is audible. Skipped in the default run because each
+# test costs a second - `sentinel-logs <hours> full` includes it.
+if [[ "$FULL" == "full" ]]; then
+  for dev in sentinel_music sentinel_voice "hw:${CARD:-0},0"; do
+    if timeout 6 aplay -D "$dev" -f S16_LE -r 44100 -c 2 -d 1 -q /dev/zero >/dev/null 2>&1; then
+      kv "open $dev" "ok"
+    else
+      kv "open $dev" "FAILS: $(timeout 6 aplay -D "$dev" -f S16_LE -r 44100 -c 2 -d 1 /dev/zero 2>&1 | tail -n1)"
+    fi
+  done
+  holders=$(fuser -v /dev/snd/* 2>&1 | tail -n +2 | tr -s ' ' | paste -sd' ' -)
+  [[ -n "$holders" ]] && kv "/dev/snd holders" "$holders"
+else
+  kv "sentinel_music PCM" "$(aplay -L 2>/dev/null | grep -qx sentinel_music && echo 'defined (run: sentinel-logs 2 full  to test it opens)' || echo MISSING)"
+fi
+kv "mpg123" "$(pgrep -a mpg123 2>/dev/null | head -n1 | cut -c1-120 || echo 'not running')"
+
+hdr "tailscale"
+if command -v tailscale >/dev/null 2>&1; then
+  tsip=$(tailscale ip -4 2>/dev/null | head -n1)
+  if [[ -n "$tsip" ]]; then
+    kv "tailnet IP" "$tsip"
+  else
+    kv "tailnet" "not connected (run: sudo sentinel-tailscale up)"
+  fi
+else
+  kv "tailscale" "not installed"
+fi
 
 hdr "listening ports"
 if command -v ss >/dev/null 2>&1; then
@@ -156,6 +199,10 @@ digest() {
       if (length(t) > 18) t = substr(t, 6, 5) " " substr(t, 12, 8)
       m = $3
       if (length(m) > maxlen) m = substr(m, 1, maxlen) "..."
+      # A few lines are loud but expected on this hardware. Say so inline
+      # rather than hiding them: a reader who does not know that exFAT has
+      # no Unix permissions will otherwise chase this one every time.
+      if (m ~ /Failed to correct directory permissions/) m = m "   [expected: exFAT has no Unix permissions - harmless]"
       printf "  %s  x%-3d %s\n", t, $2, m
     }'
   if (( total > MAXMSG )); then

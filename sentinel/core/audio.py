@@ -56,3 +56,55 @@ def find_output_card() -> int | None:
         if "bcm2835" in line.lower():
             return idx
     return cards[0][0]
+
+
+# ---------------------------------------------------------------- 開けるか
+
+# pcm_opens() の結果キャッシュ。 名前 -> (判定時刻, 開けたか, エラー文)
+_OPEN_CACHE: dict[str, tuple[float, bool, str]] = {}
+_OPEN_CACHE_TTL = 30.0
+
+
+def pcm_opens(name: str, *, ttl: float = _OPEN_CACHE_TTL) -> tuple[bool, str]:
+    """named PCM (`sentinel_music` など) が **実際に開けるか** を試す。
+
+    `aplay -L` にその名前が出てくることは「/etc/asound.conf にその定義が
+    書いてある」以上の意味を持たない。dmix はスレーブ (`hw:N,0`) を開いて
+    初めて失敗するため、定義が正しくてもカード番号がズレていたり、他の
+    プロセスがカードを直接掴んでいたりすると `unable to open slave` /
+    `Invalid argument` で開けない。それでも `aplay -L` には出続ける。
+
+    以前の `_mixing_ready()` はこの一覧にあるかどうかだけを見ていたため、
+    **開けないデバイスへ mpg123 と aplay を流し込み、エラーも音も出ない**
+    という状態になっていた (CLAUDE.md #8 の can_write()、#31 の再生テスト
+    と同じ「実物を試す」原則をここだけ守れていなかった)。
+
+    /dev/zero を 0.4 秒だけ流すのでデジタル無音、実際には何も聞こえない。
+    毎回の play() で走ると重いので ttl 秒だけ結果をキャッシュする。
+    戻り値は (開けたか, 開けなかったときの理由)。
+    """
+    import time
+
+    now = time.time()
+    hit = _OPEN_CACHE.get(name)
+    if hit and now - hit[0] < ttl:
+        return hit[1], hit[2]
+    ok, err = False, ""
+    try:
+        p = subprocess.run(
+            ["aplay", "-D", name, "-f", "S16_LE", "-r", "44100", "-c", "2",
+             "-d", "1", "-q", "/dev/zero"],
+            capture_output=True, text=True, timeout=8)
+        ok = p.returncode == 0
+        if not ok:
+            lines = (p.stderr or p.stdout or "").strip().splitlines()
+            err = lines[-1].strip() if lines else f"aplay が終了コード {p.returncode} で失敗しました"
+    except Exception as exc:
+        err = str(exc)
+    _OPEN_CACHE[name] = (now, ok, err)
+    return ok, err
+
+
+def invalidate_pcm_cache() -> None:
+    """asound.conf を書き換えた直後に呼ぶ (次の pcm_opens() で必ず再試行)。"""
+    _OPEN_CACHE.clear()
