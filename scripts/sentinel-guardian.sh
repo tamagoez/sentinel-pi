@@ -273,13 +273,44 @@ check_services() {
 # **Do not go back to a bare `systemctl is-active` check here** - it puts
 # the whole Bluetooth/audio restart cascade back on a 2-minute timer.
 unit_needs_start() {
-  local u="$1" state type rae since
+  local u="$1" state type rae result since
   state=$(systemctl show "$u" -p ActiveState --value 2>/dev/null)
   [[ "$state" == "failed" ]] && return 0
   case "$state" in active|activating|reloading|deactivating) return 1 ;; esac
+  # state is "inactive" here. Whether that is healthy or broken depends on
+  # what the unit is *for*, not just its Type=. This project's first cut
+  # at this check only recognised Type=oneshot, on the assumption that
+  # hciuart.service (the unit this was written for, CLAUDE.md #47) is one.
+  # It is not - Raspberry Pi OS/DietPi ship it as Type=forking (it runs
+  # btuart/hciattach once to attach the UART, then settles to "inactive"
+  # with nothing left for systemd to track, exactly like a oneshot in
+  # every way that matters here, just reported under a different Type=).
+  # Checking Type=oneshot alone missed it completely, and real hardware
+  # showed the exact consequence: hciuart.service getting restarted on
+  # essentially every single 2-minute cycle for the unit's entire uptime
+  # (`FIXED: started hciuart.service` logged dozens of times over two
+  # hours) - each restart re-attaches the UART, which can cost bluetoothd
+  # its controller (CLAUDE.md #12), which check_bluetooth() then "fixes"
+  # by restarting bluetooth.service, which drags the BlueALSA units along,
+  # churning the bcm2835 ALSA device open/close on every one of those
+  # cycles - the exact mechanism CLAUDE.md #45 traces to mpg123 dying with
+  # "Deep trouble! Cannot flush to my output anymore!".
+  #
+  # Type= alone was never trustworthy for this and still is not - so this
+  # also checks Result=. A oneshot/forking unit that genuinely crashed
+  # reports something other than "success" (exit-code, signal, timeout,
+  # watchdog, ...) even though it is just as "inactive" as a healthy one
+  # that finished its one job and stopped on purpose. Without this check,
+  # widening Type= to include forking would risk treating a real crash of
+  # some other forking daemon (hostapd.service ships as Type=forking on
+  # some DietPi/distro combinations too) as "fine, leave it".
+  # **Do not narrow this back to Type=oneshot only, and do not drop the
+  # Result= check** - either one reopens this exact restart storm.
   type=$(systemctl show "$u" -p Type --value 2>/dev/null)
   rae=$(systemctl show "$u" -p RemainAfterExit --value 2>/dev/null)
-  if [[ "$type" == "oneshot" && "$rae" != "yes" ]]; then
+  result=$(systemctl show "$u" -p Result --value 2>/dev/null)
+  if [[ "$rae" != "yes" && ( "$type" == "oneshot" || "$type" == "forking" ) \
+        && "$result" == "success" ]]; then
     # Has it ever run? An empty InactiveEnterTimestamp means it never did,
     # so one start is a real repair; anything else means it already did
     # its job and going inactive was the expected ending.

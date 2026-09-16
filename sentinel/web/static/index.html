@@ -248,7 +248,7 @@ try{
   </header>
 
   <!-- ================= dashboard ================= -->
-  <section class="page on" id="p-dash">
+  <section class="page" id="p-dash">
     <div class="grid g3" style="margin-bottom:12px">
       <div class="card stat"><div class="k">cpu 温度</div><div class="v" id="s-temp">-</div><div class="s" id="s-temp-s">-</div></div>
       <div class="card stat"><div class="k">cpu 使用率</div><div class="v" id="s-cpu">-</div><div class="s" id="s-freq">-</div></div>
@@ -524,6 +524,28 @@ try{
 </main>
 </div>
 
+<script>
+// URL のハッシュから即座に表示ページを決める。この時点ではまだ下の
+// メインスクリプト (xterm の2本の外部 <script> の読み込みを待った後に
+// 実行される) が動いておらず、go() もまだ呼ばれていない。以前は
+// #p-dash に class="on" を直書きしていたため、ハッシュが他のページを
+// 指していても最初の描画は必ずダッシュボードになり、メインスクリプトが
+// 動いてから go() が正しいページへ切り替えるまでの間だけダッシュボードが
+// 見えていた。LAN (往復 1ms 未満) では気付かない程度の一瞬だが、
+// Tailscale 経由 (WireGuard トンネル、時には DERP リレー越しで数十〜
+// 数百ms) ではこの一瞬が「メニューを押すたびに一旦ダッシュボードが出て
+// から遷移先が出る」と体感されるほど伸びる。ここで先に正しいページだけ
+// を可視化しておけば、あとに続くメインスクリプトの読み込みがどれだけ
+// 遅れても「違うページが一瞬見える」こと自体が起こらない。
+// **この即時解決を外して #p-dash の on を直書きに戻さないでください**
+// — 同じ「メニュー移動のたびにダッシュボードが一瞬映る」症状に戻ります。
+(function(){
+  var h = (location.hash || "").slice(1);
+  var el = h && document.getElementById("p-" + h);
+  (el || document.getElementById("p-dash")).className = "page on";
+})();
+</script>
+
 <div id="overlay" onclick="this.classList.remove('on');document.getElementById('ov-img').src=''">
   <img id="ov-img"></div>
 <div id="cam-set-overlay" class="overlay-panel" onclick="closeCamSettings()">
@@ -537,8 +559,11 @@ try{
 </div>
 <div id="toast"></div>
 
-<script src="https://cdn.jsdelivr.net/npm/xterm@5.3.0/lib/xterm.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/xterm-addon-fit@0.8.0/lib/xterm-addon-fit.js"></script>
+<!-- defer: Terminal は端末タブを開いたとき (2235行目付近) にしか
+     newされないので、起動直後の描画をこの2本のCDN取得で足止めする
+     必要がない。Tailscale越しは往復が伸びる分、足止めの影響も伸びる。 -->
+<script src="https://cdn.jsdelivr.net/npm/xterm@5.3.0/lib/xterm.js" defer></script>
+<script src="https://cdn.jsdelivr.net/npm/xterm-addon-fit@0.8.0/lib/xterm-addon-fit.js" defer></script>
 <script>
 "use strict";
 const $ = s => document.querySelector(s);

@@ -195,6 +195,18 @@ class Player:
         self._lock = threading.RLock()
         self.proc: subprocess.Popen | None = None
         self._reader: threading.Thread | None = None
+        # mpg123 プロセスを spawn するたびに +1 する世代カウンタ。
+        # _read_loop() が読む「@P 0 (停止)」は、EQ 再構成 (_sync_eq()) や
+        # eco/Bluetooth/voice の退避のように、こちらが意図してプロセスを
+        # 殺したときにも届く。そのプロセスの stdout パイプに既に溜まって
+        # いた行は、次の spawn で新しい read_loop スレッドに置き換わった
+        # 「あと」でも古いスレッドがまだ処理し続けるため、殺した直後に
+        # (suspended_by を見る前に) play() 側が suspended_by を "" へ
+        # 戻してしまうと、古いスレッドはそれを「本当に曲が終わった」と
+        # 誤認して次の曲へ進めてしまう — 実機で「曲が2秒ほどで次々に
+        # 変わっていく」として報告された不具合の原因。世代が変われば
+        # そのメッセージは無条件で無視する (suspended_by の有無に関わらず)。
+        self._gen = 0
 
         self.tracks: list[Path] = []
         self.order: list[int] = []
@@ -289,8 +301,9 @@ class Player:
             self.last_error = f"mpg123 の起動に失敗: {exc}"
             log.exception(self.last_error)
             return False
-        self._reader = threading.Thread(target=self._read_loop, daemon=True,
-                                        name="mpg123-reader")
+        self._gen += 1
+        self._reader = threading.Thread(target=self._read_loop, args=(self._gen, self.proc),
+                                        daemon=True, name="mpg123-reader")
         self._reader.start()
         # stderr を捨てない。ALSA の「デバイスを開けない/使用中」系の
         # エラーは全部こちらに出るため、DEVNULL にしていたときは
@@ -328,9 +341,20 @@ class Player:
         except (BrokenPipeError, ValueError):
             pass
 
-    def _read_loop(self) -> None:
-        p = self.proc
-        if p is None or p.stdout is None:
+    def _read_loop(self, gen: int, p: subprocess.Popen) -> None:
+        """`gen` は _spawn() がこのプロセスに割り振った世代番号、`p` はその
+        プロセス自身 (spawn 時点の self.proc のスナップショット)。
+
+        どちらも `self.proc`/`self._gen` を後から読み直すのではなく、
+        呼び出し時に固定で受け取る。理由: このスレッドは EQ 再構成
+        (_sync_eq()) や eco/Bluetooth/voice の退避で "S"+"Q" を送られて
+        `p` が終了した**あと**も、新しい世代の mpg123 が spawn され
+        `self.proc`/`self._gen` が入れ替わった状態でまだ走り続けている
+        ことがある (daemon スレッドを明示的に join/停止していないため)。
+        そのタイミングで「@P 0 (停止)」を読むと、次の曲へ進めてよい
+        自然な曲終わりなのか、こちらが意図して止めた再構成なのかを
+        判断する必要がある。"""
+        if p.stdout is None:
             return
         for line in p.stdout:
             line = line.strip()
@@ -341,6 +365,8 @@ class Player:
                         cur = float(parts[3])
                         rem = float(parts[4])
                         with self._lock:
+                            if gen != self._gen:
+                                continue
                             self.position = cur
                             self.duration = cur + rem
                             self.playing = True
@@ -350,17 +376,33 @@ class Player:
             elif line.startswith("@P "):
                 st = line.split()[-1]
                 with self._lock:
+                    # この世代が既に入れ替わっているなら、この "@P 0" は
+                    # 必ずこちらが意図して殺したプロセスからの最後の出力
+                    # であり、自然な曲終わりではない。suspended_by の値に
+                    # 関わらず無視する — _sync_eq() は EQ 再構成のために
+                    # suspended_by を一切変更せずにプロセスを殺すため、
+                    # suspended_by だけを見ていると「殺した直後、次の
+                    # play() が suspended_by を "" に戻した後」に届いた
+                    # この行を「本当に曲が終わった」と誤認して次の曲へ
+                    # 進めてしまう (実機で「曲が2秒ほどで次々に変わって
+                    # いく」として報告された不具合の直接の原因)。
+                    # **この gen チェックを外して suspended_by だけの判定に
+                    # 戻さないでください** — 同じ誤検知に戻ります。
+                    if gen != self._gen:
+                        continue
                     if st == "0":
                         self.playing = False
-                        finished = True
+                        finished = not self.suspended_by
                     else:
                         self.playing = (st == "2")
                         finished = False
-                if finished and not self.suspended_by:
+                if finished:
                     # 曲が終わった -> 次へ
                     self._advance_and_play()
             elif line.startswith("@E"):
                 with self._lock:
+                    if gen != self._gen:
+                        continue
                     self.last_error = line[3:].strip()
                 log.warning("mpg123 エラー: %s", line)
 
@@ -415,6 +457,14 @@ class Player:
         _last_effective_eq = effective
         if self.proc is not None:
             log.info("イコライザー設定が変わったため mpg123 を再起動します (enabled=%s)", enabled)
+            # プロセスを殺すと決めた瞬間に世代を進める。これから送る "S"
+            # への応答 ("@P 0") はまだこの古い世代のプロセスから届くが、
+            # _read_loop() 側はここで既に新しい世代を見ることになるので
+            # 「本当の曲終わり」と区別できる。呼び出し元 (play()) がこの
+            # あと suspended_by を "" に戻すタイミングとは無関係に安全 —
+            # suspended_by だけに頼っていた旧実装が実機で「曲が2秒ほどで
+            # 次々に変わっていく」不具合の原因だった。
+            self._gen += 1
             self._send("S")
             self._send("Q")
             try:
@@ -460,6 +510,12 @@ class Player:
         with self._lock:
             self.suspended_by = reason
             self.playing = False
+            if terminate:
+                # suspended_by が空文字 (restart_playback() など、意図した
+                # 停止だが「退避理由」ではない呼び出し) だと、上の
+                # suspended_by だけでは古い読み取りスレッドの誤検知を
+                # 防げない。_sync_eq() と同じ理由で世代も進めておく。
+                self._gen += 1
         self._send("S")
         if terminate and self.proc is not None:
             self._send("Q")
