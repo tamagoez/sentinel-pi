@@ -2379,6 +2379,98 @@ Pi が再起動を繰り返す」不具合に戻ります。cv2 をスタブに�
 中は一切カメラを開こうとしないこと、(3) 切断・再接続後もなお破損が続く
 場合にのみ `corrupt_reboot_request` を書くこと、の 3 点を確認済みです。
 
+### 61. Obsidian の同期は Syncthing ではなく Lockstep Sync で行う
+
+#40/#41/#45 で Syncthing を選んだ理由 (CouchDB が 32bit ARM に対応しない、
+64bit でも公式ガイドの前提 RAM がこの Pi には多すぎる) は変わっていませ
+んが、[Lockstep Sync](https://community.obsidian.md/plugins/lockstep-sync)
+という Obsidian コミュニティプラグインへの切り替えを依頼されました。
+Syncthing はファイル単位の同期 (Vault の実体をそのまま複製する) だった
+のに対し、Lockstep Sync は Obsidian プラグインが Vault をエンドツーエンド
+暗号化してから小さな自前サーバーへ中継する方式で、Pi 自身は暗号化された
+まま (=読めない) データしか持ちません — 「Pi が盗まれても Vault の中身は
+守られる」「Pi 側にプラグインを入れる必要がない (サーバーは単なる中継)」
+という性質の違いがあります。
+
+**このリポジトリからは切り替えられません。** Lockstep Sync 自体は
+Obsidian 側の話で、各端末にプラグインを入れてもらう必要があります。この
+節が扱うのは、Pi 側で動く *サーバー* のセットアップと、それに伴う
+Syncthing の撤去だけです。
+
+**32bit ARM (armhf) には導入できません。** Lockstep Sync のサーバー
+バイナリは `amd64`/`arm64` しか配布されておらず (`ops/install.sh` の
+アーキテクチャ判定に `armv7`/`armhf` は一切登場しません)、CouchDB を
+却下したのとまったく同じ制約に、今度はこちら側で引っかかります。
+`SETUP.md` の Phase 0 は「ARMv7 または ARM64」と両対応で書かれており、
+どちらを導入したかは個々の機体次第です。`bootstrap.sh` は `uname -m` で
+判定し、対応しないアーキテクチャでは黙ってスキップして理由を表示します
+(32bit の機体では Obsidian 同期が未設定のまま残るだけで、他の機能には
+一切影響しません)。**この判定を外して 32bit でもダウンロードを試みる
+実装にしないでください** — 存在しない `sync-server-linux-arm` を
+延々とダウンロードし続けるだけの無意味な失敗ループになります。
+
+**Syncthing の完全撤去。** `bootstrap.sh` が STEP 9 でパッケージ
+(`dietpi-software uninstall 50`) を、`install.sh` が STEP 5 で
+外部ドライブへのバインドマウント (`$STORAGE/syncthing` ↔
+`/mnt/dietpi_userdata/syncthing`、CLAUDE.md #40) を、それぞれ撤去
+します。`scripts/sentinel-fix-syncthing-mount.sh`/
+`sentinel-fix-syncthing-gui.sh` と、Guardian の `check_syncthing_storage()`/
+`check_syncthing_gui()` は削除しました。Syncthing 自身の内部データベース
+(`$STORAGE/syncthing`) と、それまで同期されていた実ファイル
+(`$STORAGE/obsidian`) はどちらも自動削除していません — 前者は単なる
+インデックスで消して構いませんが、後者はユーザーの Vault そのものなので、
+勝手に消さず「まだ残っています、バックアップや削除は手動で」と案内する
+だけに留めています。
+
+**サーバーは `sentinel` ユーザーとして動かします (専用ユーザーは作らない)。**
+Syncthing のときは DietPi がテンプレートする `syncthing.service` の
+`ExecStart` を書き換えられなかったため、Syncthing 自身のユーザー
+(`dietpi` あるいは `syncthing`、機体によって違う) を `sentinel` グループへ
+加えて `$STORAGE` への既存アクセスを共有する、というかなり込み入った
+迂回策が必要でした。しかもその過程で「2 人のユーザーが同じ exFAT/NTFS
+マウントの `uid=`/`gid=` を取り合い、全サービスが停止する」という実機
+障害を実際に起こしています (CLAUDE.md #40)。Lockstep Sync の systemd
+ユニットはこのプロジェクト自身が書く (`systemd/sentinel-lockstep-sync.service`
+を `install.sh` が `$STORAGE`/`$SVC_USER` で埋めてから配置する) ので、
+DietPi が生成する何かを迂回する理由がそもそもありません。データ
+ディレクトリ (`$STORAGE/lockstep-sync`) はコマンドラインで直接指定する
+だけの、ただのパスです。ここで新しいユーザーを増やして同じ問題を
+再現する理由はないと判断し、`$STORAGE` への書き込みが既に
+`sentinel-fix-storage-owner.sh` (STEP 4) で保証されている `sentinel`
+ユーザーとして動かすことにしました。**この判断を、Syncthing のときと
+同じ「専用ユーザー + グループ共有」パターンへ戻さないでください** —
+今回はそもそも迂回する対象(DietPi 製 ExecStart)が無いので、専用ユーザー
+を増やすことは複雑さを増やすだけで、CLAUDE.md #40 と同じ「2 ユーザーが
+同じマウントを取り合う」不具合を作り込むリスクだけが残ります。
+
+**到達性は Tailscale 経由のみ、iptables で強制します。** サーバーは
+`0.0.0.0:8384` で待ち受けます (Tailscale インタフェース自身の IP は
+`tailscale up` 実行後にしか決まらず、ノードの再認証で変わることもある
+ため、ユニットファイルへ焼き込むのに向きません)。その代わり、
+`sentinel-guardian.sh` の `check_lockstep_firewall()` が AdGuard の
+`:8083` (CLAUDE.md #5) と同じ「ループバック以外を DROP」パターンを、
+`lo` に加えて `tailscale0` も許可する形で適用し、2 分ごとに再適用します
+(iptables ルールは再起動で消え、hostapd の再設定でも上書かれうるため、
+Guardian による継続的な強制が必要な点も #5 と同じです)。Syncthing の
+ときのようにアプリ自身のバインドアドレスを設定ファイル経由で制御する
+手段が無い (この手のサーバーはよくある「設定ファイルを書き換えて
+アプリを再起動」ではなく、コマンドラインの `--addr` だけを見る) ため、
+ファイアウォール側で完結させています。**この iptables ルールを外して
+`0.0.0.0:8384` を無防備に公開しないでください** — Tailscale を導入した
+本来の目的 (CLAUDE.md #39「WAN に何も晒さない」) を、この 1 ポートだけ
+迂回してしまいます。
+
+**ペアリングは Web GUI ではなくコマンドライン。** Syncthing の GUI
+(`:8384` のブラウザ画面) に相当するものが Lockstep Sync には無く、
+`sync-server link`/`token add` サブコマンドが端末ごとのペアリングリンク・
+トークンを都度発行する方式です。`setup.sh` H8 は Tailscale の実際の IP
+(`tailscale ip -4`、H7 で接続済みであることが前提) を埋め込んだこれらの
+コマンドをその場で組み立てて表示し、初回端末用には `qrencode` (新規
+apt 依存、CLAUDE.md「依存を増やさない」の範囲内の小さなツール) で
+QR コードも表示します。**この一連のコマンドを、存在しない Web GUI へ
+誘導する案内に書き換えないでください** — Syncthing と違い、この
+プラグインには覗きに行けるポート/画面がそもそもありません。
+
 ## モジュール構成
 
 各モジュールは疎結合で、`core/state.py` の `MODE` を購読するだけです。
@@ -2392,28 +2484,6 @@ scripts/sentinel-fix-storage-owner.sh
                     外部ストレージへの書き込み権限を確認し、必要なら
                     fstab のマウントオプションか chown で直す (install.sh
                     と Guardian の両方から呼ばれる)
-scripts/sentinel-fix-syncthing-mount.sh
-                    $STORAGE 自体が古いマウントオプションのまま (mount -a
-                    は既にマウント済みのファイルシステムを直さない)・同じ
-                    デバイスが二重にマウントされている・Syncthing の
-                    バインド先が生のデバイスに直接奪われている、の 3 つを
-                    条件分岐で自動修復する。install.sh の STEP 4 冒頭
-                    (sentinel-fix-storage-owner.sh より前) で毎回呼ばれる
-                    ため、update.sh の再実行だけで反映される。修復中は
-                    sentinel-guardian.timer 自体も止める (oneshot の
-                    .service を止めるだけでは 2 分後にタイマーがまた
-                    syncthing を起動し直してしまい、その開いたファイルが
-                    umount を無言で失敗させた実例があった)。自動で直せな
-                    かった項目はコピペ用の手動コマンド (可能なら fuser の
-                    出力込み) としてまとめて表示する (CLAUDE.md #40)
-scripts/sentinel-fix-syncthing-gui.sh
-                    Syncthing の GUI (:8384) をループバック専用から
-                    0.0.0.0 へ開き直す。config.xml の場所は
-                    `syncthing --paths` で特定し (決め打ちしない)、
-                    Syncthing は終了時に config.xml をメモリから書き戻す
-                    ため必ず停止 → 編集 → 起動の順で行い、最後に ss で
-                    本当に listen しているか検証する。install.sh と
-                    Guardian の両方から呼ばれる (CLAUDE.md #41)
 scripts/sentinel-fix-audio-output.sh
                     「再生中と表示されるのに無音」を直す。共有ハード
                     ウェア音量 (numid=1) が最下端 = 消音なら戻し、出力

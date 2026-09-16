@@ -74,7 +74,7 @@ show_status() {
     say ""
     say "From any device signed in to the same tailnet:"
     say "  Sentinel web UI  http://$ip:8080"
-    say "  Syncthing GUI    http://$ip:8384"
+    command -v lockstep-sync-server >/dev/null && say "  Lockstep Sync    http://$ip:8384 (no GUI - see setup.sh H8)"
     [[ -n "$name" ]] && say "  (the name also works, e.g. http://$name:8080)"
   fi
   # A tailnet that resolves DNS through Tailscale silently breaks the

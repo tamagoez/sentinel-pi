@@ -15,7 +15,7 @@
 #   H5  log in to AdGuard Home once, while it is still reachable directly
 #   H6  set the Web UI password / Discord webhook / AdGuard password
 #   H7  connect to Tailscale for secure remote access (optional)
-#   H8  set up Syncthing for Obsidian sync (optional)
+#   H8  pair devices with Lockstep Sync for Obsidian sync (optional)
 #
 # Progress is kept in /var/lib/sentinel/setup-stage, so after the reboot in
 # H3 you run the same command again and it continues where it left off.
@@ -352,50 +352,53 @@ EOS
   fi
 fi
 
-# ---- H8: Syncthing (optional) ---------------------------------------
-human "H8  Set up Syncthing for Obsidian sync (optional)"
-IP=$(my_ip)
-if [[ ! -x /opt/syncthing/syncthing ]]; then
-  w "Syncthing is not installed (bootstrap.sh should have installed it)."
-  w "Install it with: sudo dietpi-software install 50"
+# ---- H8: Lockstep Sync (optional) ------------------------------------
+human "H8  Pair devices with Lockstep Sync for Obsidian sync (optional)"
+LS_BIN=/usr/local/bin/lockstep-sync-server
+LS_DATA="$STORAGE/lockstep-sync"
+if [[ ! -x "$LS_BIN" ]]; then
+  w "Lockstep Sync server is not installed. bootstrap.sh only ships a server"
+  w "build for amd64/arm64 - check with: uname -m (see CLAUDE.md #61)"
+elif ! systemctl is-active --quiet sentinel-lockstep-sync 2>/dev/null; then
+  w "sentinel-lockstep-sync.service is not running; install.sh should have"
+  w "started it. Check: systemctl status sentinel-lockstep-sync"
+elif ! command -v tailscale >/dev/null || ! tailscale ip -4 >/dev/null 2>&1; then
+  w "Lockstep Sync is reachable only over Tailscale (CLAUDE.md #61) - connect"
+  w "to Tailscale first (H7 above), then re-run this step:  sudo ./setup.sh"
 else
+  TS_IP=$(tailscale ip -4 2>/dev/null | head -1)
   cat <<EOS
-     Open  http://${IP:-<this-Pi-IP>}:8384  and, in Actions -> Settings -> GUI:
+     Lockstep Sync keeps no plaintext copy of your notes on this Pi - it
+     only relays end-to-end encrypted data between your devices, over your
+     private tailnet (never the open internet). Pairing works from the
+     command line, one device at a time, using a short-lived link/QR code:
 
-       1. Set a GUI Authentication User and Password right away - there is
-          none by default, and the GUI is reachable from your whole LAN.
-       2. Under Settings -> Connections, consider turning off "Global
-          Discovery" and "Enable Relaying". With Tailscale already set up
-          (H7), this Pi does not need Syncthing's own public discovery/
-          relay servers to stay reachable while you are away from home -
-          it stays reachable over your private tailnet instead, and this
-          keeps it off any public discovery infrastructure entirely.
-          See CLAUDE.md #40.
+       1. First device - normally your desktop, with your existing vault:
 
-     Then add a folder to sync:
+            sudo -u sentinel $LS_BIN link --data $LS_DATA \\
+              --vault main --name desktop --url http://$TS_IP:8384 --minutes 60
 
-       3. Click "Add Folder" and set its path to exactly:
+          The last line printed is a one-time pairing link, valid for 60
+          minutes. Paste it into the Lockstep Sync plugin's settings in
+          Obsidian on that device, or scan it as a QR code instead:
 
-              $STORAGE/obsidian
+            sudo -u sentinel $LS_BIN link --data $LS_DATA \\
+              --vault main --name desktop --url http://$TS_IP:8384 --minutes 60 \\
+              | tail -1 | xargs qrencode -t ANSIUTF8 -m 2
 
-          (add a subfolder per vault if you sync more than one, e.g.
-          $STORAGE/obsidian/Notes)
-       4. Install Syncthing on each other device (PC/iPad/phone) too, and
-          open its GUI or app there.
-       5. Back on this Pi, click "Add Remote Device" and enter each
-          device's ID (shown in its own Syncthing GUI/app under Actions ->
-          Show ID, or scan its QR code) - once per device.
-       6. On each device, accept the connection request from this Pi when
-          it appears, then share the same folder back to it, pointed at
-          that device's own Obsidian vault folder.
-       7. In Obsidian on each device, just open that folder as the vault -
-          no plugin is needed; Syncthing keeps the files themselves in
-          sync underneath it.
+       2. Each additional device (phone, tablet, another PC):
 
-     For the "away from home" path to work without relying on Syncthing's
-     own public relay/discovery servers, install Tailscale on each of
-     those devices too and join them to the same tailnet - Syncthing then
-     finds this Pi over it automatically, the same as on the home LAN.
+            sudo -u sentinel $LS_BIN token add --data $LS_DATA \\
+              --vault main --name phone
+
+          then add it in that device's Obsidian the same way.
+
+     Install Tailscale on every device you want to sync (the same official
+     app used for H7) and join them to this same tailnet - each one then
+     reaches this Pi at http://$TS_IP:8384 from anywhere, not just your
+     home LAN. If this Pi's own Tailscale IP changes later (e.g. after a
+     re-auth), the address above goes stale - check with 'tailscale ip -4'
+     and re-run the commands above with the new address.
 
 EOS
 fi

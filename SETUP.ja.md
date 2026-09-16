@@ -119,7 +119,7 @@ sudo ./setup.sh
 | 6 | 音声を 3.5mm ジャックへ ( `dietpi-set_hardware soundcard rpi-bcm2835-3.5mm` ) | — |
 | 7 | SWAP を無効化 | — |
 | 8 | Tailscale を導入 (パッケージのみ。dietpi-software に ID が無いため Tailscale 自身のインストールスクリプトを使う) | — |
-| 9 | Syncthing を導入 (パッケージのみ。保存先を外部ドライブへ切り替えるのは、ドライブがマウントされたあとの `install.sh` — 下記参照) | 50 |
+| 9 | 既存の Syncthing をアンインストール (後継に置き換え済みのため)、Lockstep Sync のサーバーバイナリを導入 (パッケージのみ。対応する dietpi-software ID は存在しません — 保存先/サービスの設定は、ドライブがマウントされたあとの `install.sh` が行います。下記参照) | 50 (アンインストール) |
 
 - **H3 — 再起動。** Bluetooth・音声出力・SWAP の変更は再起動しないと反映
   されません。`setup.sh` はここで再起動するか尋ねます。まだ `/opt` には
@@ -174,21 +174,25 @@ sudo ./setup.sh
   必要があります (前回の指定は憶えていません) — 手動で再度実行するときは
   必ず付け直してください。断った場合も Tailscale 自体は導入済みのまま
   未接続で残るので、同じコマンドでいつでも後から接続できます。
-- **H8 — Syncthing (任意)、Obsidian の同期用。** `setup.sh` の案内に
-  沿って進めます: `http://<PiのIP>:8384` で GUI のユーザー名/パスワードを
-  設定 (既定では未設定です)、任意で設定 → 接続 の「グローバル
-  ディスカバリ」「リレーを有効化」をオフに (H7 の Tailscale が既に
-  「外出先からの到達性」を担っているため、これによりこの Pi の
-  Syncthing をどんな公開ディスカバリ網にも一切載せずに済みます)、
-  外部ドライブ上の `obsidian` フォルダを共有フォルダとして追加、各端末を
-  デバイス ID でペアリング。「外出先」の経路が Syncthing 自身の公開
-  リレーサーバーではなく自分の tailnet 経由で働くよう、各端末にも
-  Syncthing (と Tailscale) を導入してください。Obsidian 側にプラグインは
-  不要です — 各端末で、同期されたフォルダをそのまま Vault として開くだけ
-  です。Syncthing を Self-hosted LiveSync + CouchDB より選んだ理由
-  (32bit ARM 向けの CouchDB 公式パッケージが存在しないこと、64bit でも
-  公式ガイドがこの Pi よりずっと多い RAM を前提にしていること) と、
-  保存先を SD カードから外す仕組みは CLAUDE.md #40 を参照してください。
+- **H8 — Lockstep Sync (任意)、Obsidian の同期用。** 各端末の Obsidian に
+  [Lockstep Sync](https://community.obsidian.md/plugins/lockstep-sync)
+  コミュニティプラグインを導入している前提です — このステップは Pi 側の
+  *サーバー* のセットアップとペアリングだけを行います。H7 (Tailscale) が
+  既に接続済みであることが前提です: サーバーは自分の tailnet からしか
+  到達できず、素の LAN やインターネットからは一切届きません
+  (AdGuard の :8083 と同じパターンの iptables ルールを Guardian が
+  2 分ごとに再適用して強制します。CLAUDE.md #61 参照)。ペアリングに GUI は
+  なく、`setup.sh` が実行すべきコマンドをそのまま表示します — 最初の
+  端末用には 60 分だけ有効な一度きりのペアリングリンクとその QR コード、
+  2 台目以降にはそれぞれ専用のトークンを発行します。Lockstep Sync は
+  エンドツーエンドで暗号化されており、Syncthing と違い Pi 自身には
+  平文の Vault を一切保存しません。**64bit (ARM64) の DietPi イメージが
+  必須です** — Lockstep Sync のサーバーには 32bit ARM 向けビルドが無く、
+  これは Syncthing を最初に選んだ際に Self-hosted LiveSync + CouchDB を
+  却下したのと同じ制約です (CLAUDE.md #40)。32bit イメージの場合この
+  ステップは自動的にスキップされ、Obsidian の同期は未設定のままになります。
+  詳しい理由 (サーバーを専用ユーザーではなく `sentinel` ユーザーとして
+  動かしている理由を含む) は CLAUDE.md #61 を参照してください。
 
 ## 各フェーズを個別に実行する場合
 
@@ -234,7 +238,7 @@ WiFi ホットスポットも起動後にこれを触ることがあります。
 | ホットスポットの DNS 転送先 | ホットスポットの再設定 | AdGuard へ向け直す |
 | ディスク使用量 | 蓄積 | 92% で警告し、診断バンドルを 1 つ保持 |
 | yt-dlp のバージョン | サイト側の変更 | 週 1 回の更新を試行 |
-| Syncthing の保存先の外部ドライブへのリダイレクト | DietPi による Syncthing の再導入、ドライブマウントとの起動時競合 | device+inode 比較で検知し、バインドマウントし直す |
+| Lockstep Sync のポート 8384 が Tailscale 外から到達可能になっていないか | 再起動、hostapd | iptables ルールを再投入 (`lo`/`tailscale0` のみ許可) |
 
 ## 更新するとき
 
@@ -276,8 +280,8 @@ git リモートを確認し、新しいコミットがあれば自分で `updat
 | 8083 がまだ外から開ける | `systemctl start sentinel-guardian`。`journalctl -t sentinel-guardian -n 20` |
 | ネットワークログが空 | 設定タブの AdGuard パスワードが違う、または AdGuard 側でクエリログが無効。Tailscale 接続の直後に空になった場合は `tailscale status` を確認 — `--accept-dns=false` を付けずに接続していないか |
 | `setup.sh` が想定と違うフェーズから始まる | `sudo ./setup.sh --reset` |
-| Syncthing の GUI に繋がらない、端末がペアリングできない | `systemctl status syncthing`、`journalctl -u syncthing -n 60 --no-pager` |
-| Syncthing が外部ドライブではなく SD カードに書き込んでいる | `stat -c '%d:%i' /mnt/VIDEOSD/syncthing /mnt/dietpi_userdata/syncthing` — 一致していれば正常 (同じバインドマウント)。一致していなければ Guardian の次の周期 (最大 2 分) を待つか、`sudo ./install.sh` を再実行 |
+| Lockstep Sync のサーバーが動いていない、端末がペアリングできない | `systemctl status sentinel-lockstep-sync`、`journalctl -u sentinel-lockstep-sync -n 60 --no-pager` |
+| 別の端末から Lockstep Sync に繋がらない | その端末が同じ tailnet に参加しているか確認 (`tailscale status`) — 素の LAN やインターネットからは意図的に到達できず、`tailscale0` からのみ到達できます (CLAUDE.md #61) |
 | 音楽が「再生中」なのに無音 | `sudo sentinel-logs 2 full` の audio ブロックを見ます。`open sentinel_music` が FAILS なら Guardian が次の周期 (最大 2 分) で asound.conf を直します。急ぐときは `sudo /opt/sentinel/scripts/sentinel-fix-audio-output.sh`。切り分けとして設定タブの「音楽と音声アナウンスを同時に鳴らす」をオフにすると dmix を使わない経路になります |
 | Tailscale を後から設定したい | `sudo sentinel-tailscale up` — 表示されたログイン URL をスマホや PC のブラウザで開きます。状態は `sentinel-tailscale status` |
 | 状況をまとめて貼りたい | `sudo sentinel-logs` — いま問題になっている所だけを短く出します (`sentinel-logs 6 full` で範囲拡大 + 音声の実地テスト) |

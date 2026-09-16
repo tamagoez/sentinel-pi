@@ -117,7 +117,7 @@ because the order matters:
 | 6 | Audio routed to the 3.5mm jack (`dietpi-set_hardware soundcard rpi-bcm2835-3.5mm`) | — |
 | 7 | SWAP disabled | — |
 | 8 | Tailscale installed (package only, via Tailscale's own install script — no dietpi-software ID exists for it) | — |
-| 9 | Syncthing installed (package only; `install.sh` redirects its storage onto the external drive once it's mounted — see below) | 50 |
+| 9 | Syncthing uninstalled if present (superseded); Lockstep Sync server binary installed (package only, no dietpi-software ID exists for it — `install.sh` sets up its storage/service once the external drive is mounted, see below) | 50 (uninstall) |
 
 - **H3 — the reboot.** Bluetooth, the audio route and the SWAP change need a
   restart. `setup.sh` offers to reboot; nothing has been installed to `/opt`
@@ -170,21 +170,25 @@ which re-checks the whole configuration every 2 minutes and repairs drift.
   always repeat it if you ever run the command again by hand. Say no and
   Tailscale stays installed but disconnected; connect later with the same
   command.
-- **H8 — Syncthing (optional), for Obsidian sync.** `setup.sh` walks
-  through: setting a GUI username/password at `http://<Pi-IP>:8384` (there
-  is none by default), optionally turning off Global Discovery/Relaying
-  under Settings → Connections (Tailscale from H7 already covers "away
-  from home" reachability, so this keeps this Pi's Syncthing off any
-  public discovery network entirely), adding a folder pointed at
-  `<external-drive>/obsidian`, and pairing each of your other devices by
-  Device ID. Install Syncthing (and Tailscale) on those devices too so the
-  "away from home" path works over your own tailnet rather than
-  Syncthing's public relay servers. No Obsidian plugin is needed — just
-  open the synced folder as a vault on each device. See CLAUDE.md #40 for
-  why Syncthing was chosen over Self-hosted LiveSync + CouchDB (no
-  official CouchDB package exists for 32-bit ARM, and even on 64-bit its
-  official guidance assumes far more RAM than this Pi has to spare) and
-  how its storage is kept off the SD card.
+- **H8 — Lockstep Sync (optional), for Obsidian sync.** Requires the
+  [Lockstep Sync](https://community.obsidian.md/plugins/lockstep-sync)
+  community plugin in Obsidian on each device — this step only sets up and
+  pairs the *server* side on the Pi. It requires H7 (Tailscale) to already
+  be connected: the server is reachable only over your tailnet, never the
+  open LAN or internet, enforced by Guardian re-applying an iptables rule
+  every 2 minutes (the same pattern already used for AdGuard's :8083, see
+  CLAUDE.md #61). Pairing has no web GUI — `setup.sh` prints the exact
+  commands to run, which generate a one-time pairing link (valid 60
+  minutes) plus its QR code for the first device, and a fresh token for
+  each device after that. Lockstep Sync is end-to-end encrypted and keeps
+  no plaintext copy of your vault on the Pi itself, unlike Syncthing.
+  **Requires a 64-bit (ARM64) DietPi image** — Lockstep Sync's server has
+  no 32-bit ARM build, the same constraint that ruled out Self-hosted
+  LiveSync + CouchDB when Syncthing was first chosen (CLAUDE.md #40); if
+  your image is 32-bit, this step is skipped automatically and Obsidian
+  sync is left unconfigured. See CLAUDE.md #61 for the full reasoning,
+  including why the server runs as the `sentinel` user rather than a
+  separate one.
 
 ## Running the phases by hand
 
@@ -230,7 +234,7 @@ and repairs it:
 | Hotspot DNS target | hotspot reconfigured | point back at AdGuard |
 | Disk space | accumulation | warn at 92%, keep one diagnostics bundle |
 | yt-dlp version | site changes | try an update weekly |
-| Syncthing home redirected to the external drive | DietPi reinstalling Syncthing, or a boot-time race with the drive mount | re-bind-mount it (checked by comparing device+inode) |
+| Lockstep Sync port 8384 reachable outside Tailscale | reboot, hostapd | re-insert iptables rules (allows only `lo`/`tailscale0`) |
 
 ## Updating
 
@@ -273,8 +277,8 @@ by hand on the box. `journalctl -t sentinel-autoupdate` shows its history.
 | 8083 still reachable | `systemctl start sentinel-guardian`; `journalctl -t sentinel-guardian -n 20` |
 | Network log empty | AdGuard password wrong in the settings tab, or query logging off in AdGuard; also check `tailscale status` if it started right after connecting Tailscale — DNS must have been accepted with `--accept-dns=false` |
 | `setup.sh` starts from the wrong phase | `sudo ./setup.sh --reset` |
-| Syncthing GUI unreachable or devices won't pair | `systemctl status syncthing`; `journalctl -u syncthing -n 60 --no-pager` |
-| Syncthing writing to the SD card instead of the external drive | `stat -c '%d:%i' /mnt/VIDEOSD/syncthing /mnt/dietpi_userdata/syncthing` — the two should match (same bind mount); if not, wait up to 2 minutes for Guardian, or re-run `sudo ./install.sh` |
+| Lockstep Sync server not running or devices won't pair | `systemctl status sentinel-lockstep-sync`; `journalctl -u sentinel-lockstep-sync -n 60 --no-pager` |
+| Lockstep Sync unreachable from another device | Make sure that device is on the same tailnet (`tailscale status`) — it is deliberately unreachable from the plain LAN or internet, only `tailscale0` (CLAUDE.md #61) |
 | Music says "playing" but is silent | Read the audio block of `sudo sentinel-logs 2 full`. If `open sentinel_music` FAILS, Guardian rewrites asound.conf within 2 minutes; to do it now, run `sudo /opt/sentinel/scripts/sentinel-fix-audio-output.sh`. To rule mixing out entirely, turn off "play music and voice at the same time" in Settings |
 | Setting up Tailscale later | `sudo sentinel-tailscale up` — open the printed login URL in any browser. Check with `sentinel-tailscale status` |
 | Pasting the current state somewhere | `sudo sentinel-logs` — a short digest of just what is currently wrong (`sentinel-logs 6 full` widens it and adds real audio open tests) |

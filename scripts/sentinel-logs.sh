@@ -31,7 +31,6 @@ MAXLEN=200
 MAXMSG=25
 
 STORAGE="${SENTINEL_STORAGE:-/mnt/VIDEOSD}"
-ST_DEFAULT=/mnt/dietpi_userdata/syncthing
 SVC_USER=sentinel
 
 hdr() { printf '\n----- %s -----\n' "$*"; }
@@ -43,7 +42,7 @@ kv "uptime" "$(uptime -p 2>/dev/null || uptime)"
 command -v vcgencmd >/dev/null 2>&1 && kv "temp" "$(vcgencmd measure_temp 2>/dev/null)"
 
 hdr "services"
-for u in sentinel.service sentinel-guardian.timer syncthing.service \
+for u in sentinel.service sentinel-guardian.timer sentinel-lockstep-sync.service \
          bluetooth.service hciuart.service hostapd.service adguardhome.service \
          sentinel-bluealsa.service sentinel-bluealsa-aplay.service \
          sentinel-bt-agent.service sentinel-autoupdate.timer; do
@@ -53,7 +52,8 @@ for u in sentinel.service sentinel-guardian.timer syncthing.service \
   systemctl is-failed --quiet "$u" 2>/dev/null && state="$state (FAILED)"
   # A unit pinned at start-limit-hit ignores every `systemctl start` until
   # reset-failed, so call that out by name rather than just "failed"
-  # (CLAUDE.md #9 - this has bitten Syncthing and the BlueALSA units).
+  # (CLAUDE.md #9 - this has bitten the old Syncthing setup and the
+  # BlueALSA units).
   if systemctl show -p Result --value "$u" 2>/dev/null | grep -q start-limit; then
     state="$state (start-limit-hit: needs systemctl reset-failed $u)"
   fi
@@ -83,19 +83,16 @@ if runuser -u "$SVC_USER" -- test -w "$STORAGE/sentinel" 2>/dev/null; then
 else
   kv "$SVC_USER can write" "NO ($STORAGE/sentinel) <-- sentinel will crash-loop"
 fi
-if [[ -d "$ST_DEFAULT" ]]; then
-  kv "$ST_DEFAULT" "$(ls -ld "$ST_DEFAULT" 2>/dev/null | awk '{print $1, $3":"$4}')$(mountpoint -q "$ST_DEFAULT" 2>/dev/null && echo ' [mounted]' || echo ' [plain dir]')"
-  # Report the user the service actually runs as. Testing a hardcoded
-  # 'dietpi' here printed a reassuring "can write: yes" for hours while
-  # Syncthing (User=syncthing) was failing on that very directory.
-  ST_USER=$(systemctl show syncthing -p User --value 2>/dev/null)
-  [[ -n "$ST_USER" ]] || ST_USER=dietpi
-  if runuser -u "$ST_USER" -- test -w "$ST_DEFAULT" 2>/dev/null; then
-    kv "$ST_USER can write" "yes"
+if [[ -x /usr/local/bin/lockstep-sync-server ]]; then
+  LS_DATA="$STORAGE/lockstep-sync"
+  # Runs as $SVC_USER (CLAUDE.md #61 - unlike the old Syncthing setup,
+  # there is no separate user here to get wrong), so this is the same
+  # write test as $STORAGE/sentinel above, just against its own directory.
+  if runuser -u "$SVC_USER" -- test -w "$LS_DATA" 2>/dev/null; then
+    kv "$SVC_USER can write" "yes ($LS_DATA)"
   else
-    kv "$ST_USER can write" "NO <-- Syncthing cannot start"
+    kv "$SVC_USER can write" "NO ($LS_DATA) <-- Lockstep Sync cannot start"
   fi
-  kv "$ST_USER groups" "$(id -nG "$ST_USER" 2>/dev/null)"
 fi
 
 hdr "audio"
@@ -232,7 +229,7 @@ SINCE="${HOURS} hours ago"
 if journalctl -n1 --no-pager >/dev/null 2>&1; then
   digest "sentinel (app)"   journalctl -u sentinel --since "$SINCE" -o short-iso --no-pager
   digest "guardian"         journalctl -t sentinel-guardian --since "$SINCE" -o short-iso --no-pager
-  digest "syncthing"        journalctl -u syncthing --since "$SINCE" -o short-iso --no-pager
+  digest "lockstep sync"    journalctl -u sentinel-lockstep-sync --since "$SINCE" -o short-iso --no-pager
   digest "bluetooth"        journalctl -u bluetooth -u sentinel-bluealsa -u sentinel-bluealsa-aplay \
                                        --since "$SINCE" -o short-iso --no-pager
   digest "system (errors)"  journalctl -p err --since "$SINCE" -o short-iso --no-pager
@@ -249,7 +246,7 @@ fi
 # and not one line saying why.
 if journalctl -n1 --no-pager >/dev/null 2>&1; then
   BROKEN=""
-  for u in sentinel.service syncthing.service bluetooth.service hciuart.service \
+  for u in sentinel.service sentinel-lockstep-sync.service bluetooth.service hciuart.service \
            hostapd.service adguardhome.service sentinel-bluealsa.service \
            sentinel-bluealsa-aplay.service sentinel-bt-agent.service; do
     systemctl list-unit-files "$u" >/dev/null 2>&1 || continue
