@@ -27,14 +27,24 @@ Raspberry Pi 3B+ の制約上の設計判断:
   受け付けないため曲を毎回完全停止していたが (`music.duck_for_voice()`)、
   「音楽の音量が意図せず変わる」「重ねて鳴らしたい」という報告を受けて
   dmix 導入に切り替えた。`_mixing_ready()` が `sentinel_voice` という
-  named PCM の存在を都度確認し、用意できていれば ducking せず重ねて鳴らす
+  named PCM の存在を都度確認し、用意できていれば曲を止めずに重ねて鳴らす
   — 用意できていない場合 (LADSPA プラグイン欠如以外の何らかの理由で
   `sentinel-setup-audio-mixing.sh` が失敗していた場合など) だけ、
   `duck_for_voice()`/`resume_from_voice()` による旧来の「完全に止めて
-  から喋る」経路に自動でフォールバックする。Bluetooth 接続中だけは別に
-  例外で、`bluealsa-aplay` がこの dmix を経由せず ALSA デバイスを直接
-  掴むため、割り込むと双方が壊れる。その間はアナウンス自体を静かに
-  スキップする (元々の設計のまま)。
+  から喋る」経路に自動でフォールバックする。
+
+  重ねて鳴らす場合も、音楽を常に全音量のまま流し続けるわけではない。
+  「アナウンスの声が音楽に埋もれて聞き取りにくい」という要望があり、
+  `music.duck_volume_for_voice()`/`resume_volume_after_voice()` が
+  `voice_duck_percent` の設定に従ってアナウンス中だけ音楽の音量を
+  一時的に下げ、話し終えたら元に戻す。`duck_for_voice()` (曲を完全に
+  停止する) とは別の、より軽い経路 — mpg123 を止めも開き直しもせず、
+  再生中でも即座に効く `V <percent>` コマンドで音量だけ動かすため、
+  sudo も asound.conf の書き換えも一切経由しない。
+
+  Bluetooth 接続中だけは別に例外で、`bluealsa-aplay` がこの dmix を
+  経由せず ALSA デバイスを直接掴むため、割り込むと双方が壊れる。その間は
+  アナウンス自体を静かにスキップする (元々の設計のまま)。
 
 - 音量は `sentinel_voice` PCM 自身が持つ ALSA softvol コントロール
   ("SentinelVoice"、`amixer -c <card> sset SentinelVoice <%>`) を操作
@@ -300,12 +310,18 @@ def _speak_sync(text: str, device: str | None) -> None:
 def speak_test(text: str) -> tuple[bool, str]:
     """設定タブの「テスト再生」用。キューを経由せず即座に鳴らす。"""
     mixing = _mixing_ready()
-    ducked = music.duck_for_voice() if not mixing else False
+    # 重ねて鳴らせる場合は曲を止めず、voice_duck_percent の設定に従って
+    # 音量だけ一時的に下げる (duck_volume_for_voice())。重ねられない場合
+    # だけ、以前どおり曲を完全に止める (duck_for_voice())。
+    stopped = music.duck_for_voice() if not mixing else False
+    ducked = music.duck_volume_for_voice() if mixing else False
     try:
         _speak_sync(text, "sentinel_voice" if mixing else _fallback_device())
     finally:
-        if ducked:
+        if stopped:
             music.resume_from_voice()
+        if ducked:
+            music.resume_volume_after_voice()
     if STATE["last_error"]:
         return False, STATE["last_error"]
     return True, f"再生しました ({STATE['engine']})"
@@ -324,16 +340,21 @@ async def loop() -> None:
             STATE["skipped"] += 1
             continue
         # dmix ミキシングが用意できていれば曲を止めずに重ねて鳴らす
-        # (CLAUDE.md #31)。用意できていない場合だけ、以前どおり曲を
-        # 完全に止めてから喋る (_mixing_ready() 参照)。
+        # (CLAUDE.md #31)。voice_duck_percent の設定に従って音楽の音量
+        # だけ一時的に下げ (duck_volume_for_voice())、話し終えたら元の
+        # 音量に戻す。重ねられない場合だけ、以前どおり曲を完全に止めて
+        # から喋る (_mixing_ready() 参照)。
         mixing = await asyncio.to_thread(_mixing_ready)
-        ducked = await asyncio.to_thread(music.duck_for_voice) if not mixing else False
+        stopped = await asyncio.to_thread(music.duck_for_voice) if not mixing else False
+        ducked = await asyncio.to_thread(music.duck_volume_for_voice) if mixing else False
         try:
             await asyncio.to_thread(_speak_sync, text,
                                     "sentinel_voice" if mixing else _fallback_device())
         finally:
-            if ducked:
+            if stopped:
                 await asyncio.to_thread(music.resume_from_voice)
+            if ducked:
+                await asyncio.to_thread(music.resume_volume_after_voice)
 
 
 async def time_signal_loop() -> None:

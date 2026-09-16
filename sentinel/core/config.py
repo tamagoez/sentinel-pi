@@ -206,9 +206,21 @@ DEFAULTS: dict[str, Any] = {
     # --- 音声アナウンス (Open JTalk 優先、espeak-ng へフォールバック。
     #     mpg123 の音楽ライブラリとは別経路、CLAUDE.md #27) ---
     "voice_enabled": False,               # 総元栓。False ならどのカテゴリも喋らない
-    "voice_volume": 70,                   # 0-100。ALSA numid=1 (PCM Playback
-                                           # Volume) を直接操作する (bluetooth.py
-                                           # の _apply_volume() と同じコントロール)
+    "voice_volume": 70,                   # 0-100。sentinel_voice PCM 自身の
+                                           # softvol コントロール ("SentinelVoice")
+                                           # を操作する。numid=1 (PCM Playback
+                                           # Volume、bluetooth.py の
+                                           # _apply_volume() が使うコントロール)
+                                           # とは別物 (CLAUDE.md #31)
+    "voice_duck_percent": 35,             # dmix で音楽とアナウンスを重ねて鳴らす
+                                           # とき (CLAUDE.md #31)、アナウンス中は
+                                           # 音楽の音量をこの割合まで一時的に
+                                           # 下げる (100 = 下げない)。mpg123 の
+                                           # ソフトウェアボリューム (V コマンド、
+                                           # 即座に反映される) だけを動かすので
+                                           # music_volume の設定値そのものは
+                                           # 変更しない — アナウンスが終われば
+                                           # 元の音量にそのまま戻る
     "voice_rate": 1.0,                    # 速さの倍率 (0.5-2.0)。Open JTalk の -r
                                            # にそのまま渡し、espeak-ng では
                                            # words-per-minute に変換する
@@ -216,7 +228,11 @@ DEFAULTS: dict[str, Any] = {
                                            # 空なら espeak-ng の既定 (Open JTalk 側
                                            # は日本語音声モデル固定のため無関係)
     "voice_time_enabled": False,          # 時報 (n 分ごとに現在時刻を読み上げる)
-    "voice_time_interval_minutes": 60,    # 時報の間隔 (分)
+    "voice_time_interval_minutes": 30,    # 時報の間隔 (分)。壁時計の分境界に
+                                           # 揃えて判定するため (time_signal_loop()
+                                           # 参照)、60 の約数でなければ :00 と
+                                           # 揃わない半端な時刻に鳴る。既定の 30
+                                           # なら毎時 :00 と :30 に鳴る
     "voice_time_text": "{hour}時{minute}分です",           # {hour} {minute}
     "voice_error_enabled": True,          # エラー通知 (定時処理の例外など) を喋る
     "voice_error_text": "{message}",                        # {message}
@@ -321,6 +337,7 @@ _RANGES: dict[str, tuple[float, float]] = {
     "timelapse_tile_width": (160, 1280),
     "session_hours": (1, 8760),
     "voice_volume": (0, 100),
+    "voice_duck_percent": (0, 100),
     "voice_rate": (0.5, 2.0),
     "voice_time_interval_minutes": (1, 720),
 }

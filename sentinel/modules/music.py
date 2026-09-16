@@ -775,6 +775,54 @@ def resume_from_voice() -> None:
     PLAYER.play(PLAYER.position)
 
 
+# アナウンス直前に覚えた「下げる前の音量」。None なら現在下げていない。
+_pre_duck_volume: int | None = None
+
+
+def duck_volume_for_voice() -> bool:
+    """dmix でアナウンスと曲を重ねて鳴らせるとき (voice.py の
+    _mixing_ready()) に、曲を止めずに voice_duck_percent の設定に従って
+    一時的に音量だけ下げる。duck_for_voice() (曲を完全に停止する経路)
+    とは別物 — こちらは mpg123 を止めも開き直しもしない。
+
+    mpg123 の `V <percent>` は再生中に送っても即座に反映されるリモート
+    コマンドなので (再起動が要る asound.conf 書き換えとは違う)、この
+    ducking は sudo も asound.conf の書き換えも一切経由しない、ごく軽い
+    処理で完結する。`config.music_volume` (利用者が設定した本来の音量)
+    自体は一切変更しない — アナウンスが終わればそのまま元の値に戻る。
+
+    戻り値は実際に下げたかどうか。呼んでいないのに
+    resume_volume_after_voice() を呼んで音量を戻さないよう、呼び出し元
+    (voice.py) はこの戻り値を見てから resume を呼ぶこと。"""
+    global _pre_duck_volume
+    if PLAYER.proc is None or not PLAYER.playing:
+        return False
+    if _pre_duck_volume is not None:
+        # 何らかの理由で前回の resume が呼ばれていない (二重にアナウンスが
+        # 重なった等)。既に下げた状態のまま新たに基準を取り直すと、次の
+        # resume で「下げた後の音量」を「元の音量」として書き戻してしまう
+        # ため、ここでは何もしない (呼び出し元は False を見て、この回は
+        # 自分では戻さないと判断する)。
+        return False
+    percent = int(config.get("voice_duck_percent"))
+    if percent >= 100:
+        return False
+    current = int(config.get("music_volume"))
+    _pre_duck_volume = current
+    ducked = max(0, min(current, current * percent // 100))
+    PLAYER._send(f"V {ducked}")
+    return True
+
+
+def resume_volume_after_voice() -> None:
+    global _pre_duck_volume
+    if _pre_duck_volume is None:
+        return
+    if PLAYER.proc is not None:
+        PLAYER._send(f"V {_pre_duck_volume}")
+    _pre_duck_volume = None
+
+
 # ---------------------------------------------------------------- yt-dlp
 
 DOWNLOADS: list[dict] = []
@@ -797,16 +845,38 @@ def _find_entry(url: str) -> dict | None:
     return None
 
 
+_YTDLP_TIMEOUT_SEC = 3 * 3600  # プレイリストは 1 曲より遥かに時間がかかりうる
+
+# --progress-template が出す機械可読な進捗行の接頭辞。yt-dlp 本体の人間
+#向け表示 (バージョンによって書式が変わりうる) はパースせず、この専用の
+# 行だけを見る。info.* は現在ダウンロード中の項目のメタデータ (プレイ
+# リスト内の位置を含む)、progress.* はその項目のダウンロード進捗 —
+# どちらも yt-dlp 公式ドキュメントの --progress-template 節が明記する
+# 区別どおり (info 側は -o の出力テンプレートと同じ辞書)。プレイリストで
+# なければ playlist_index/playlist_count は "NA" になる。
+_PROGRESS_PREFIX = "SENTINEL_PROGRESS|"
+_PROGRESS_TEMPLATE = (
+    "download:" + _PROGRESS_PREFIX +
+    "%(progress._percent_str)s|%(progress._eta_str)s|"
+    "%(info.playlist_index)s|%(info.playlist_count)s|%(info.title)s"
+)
+
+
 def _run_ytdlp(url: str, entry: dict) -> None:
-    """mp3 で取得する。mpg123 が扱えるのが mp3 のみのため形式を固定する。"""
+    """mp3 で取得する。mpg123 が扱えるのが mp3 のみのため形式を固定する。
+
+    プレイリスト URL なら全曲取得する (--no-playlist を付けない)。単曲の
+    URL であれば従来どおり 1 曲だけ取得される — yt-dlp 自身がその区別を
+    URL から判断するので、こちら側で URL の形を見分ける必要はない。"""
     if shutil.which("yt-dlp") is None:
         entry.update(state="error", message="yt-dlp がインストールされていません")
         return
     cmd = [
-        "yt-dlp", "--no-playlist", "--no-progress", "--newline",
+        "yt-dlp", "--newline",
         "-x", "--audio-format", "mp3", "--audio-quality", "0",
         "--embed-metadata", "--embed-thumbnail", "--convert-thumbnails", "jpg",
         "--no-overwrites",
+        "--progress-template", _PROGRESS_TEMPLATE,
         # --restrict-filenames was here previously and stripped every
         # non-ASCII character - it forces filenames down to [A-Za-z0-9_.-]
         # only, so any Japanese title lost its actual characters entirely
@@ -816,24 +886,67 @@ def _run_ytdlp(url: str, entry: dict) -> None:
         "-o", str(config.MUSIC_DIR / "%(uploader,artist)s - %(title)s.%(ext)s"),
         url,
     ]
+    entry.update(percent="", eta="", item_index=None, item_count=None)
     try:
-        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=1800)
-    except subprocess.TimeoutExpired:
-        entry.update(state="error", message="タイムアウトしました")
-        return
+        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                text=True, bufsize=1)
     except Exception as exc:
         entry.update(state="error", message=str(exc))
         return
+
+    # 直近の生ログを少しだけ保持し、失敗時にエラーメッセージとして使う
+    # (進捗行はここに積まない — 大量に流れるため失敗理由が埋もれる)。
+    tail: collections.deque[str] = collections.deque(maxlen=20)
+    got_title = ""
+    finished_count = 0  # プレイリストで実際に何曲仕上がったか
+    try:
+        for raw in proc.stdout:
+            line = raw.rstrip("\n")
+            if line.startswith(_PROGRESS_PREFIX):
+                parts = line[len(_PROGRESS_PREFIX):].split("|", 4)
+                if len(parts) == 5:
+                    pct, eta, idx, cnt, title = (p.strip() for p in parts)
+                    msg = []
+                    if idx not in ("", "NA") and cnt not in ("", "NA"):
+                        entry["item_index"] = idx
+                        entry["item_count"] = cnt
+                        msg.append(f"{idx}/{cnt}曲目")
+                    if pct and pct != "NA":
+                        entry["percent"] = pct
+                        msg.append(pct)
+                    if eta and eta not in ("NA", "Unknown"):
+                        entry["eta"] = eta
+                        msg.append(f"残り{eta}")
+                    if msg:
+                        entry["message"] = " ".join(msg)
+                    if title and title != "NA":
+                        entry["title"] = title
+                continue
+            tail.append(line)
+            if "[ExtractAudio]" in line:
+                # mp3 への変換が終わった = その曲は仕上がった。プレイリスト
+                # では複数回出るため、最後の 1 回だけでなく件数も数える。
+                finished_count += 1
+                got_title = Path(line.split(":", 1)[-1].strip()).name
+    except Exception:
+        pass
+    try:
+        proc.wait(timeout=_YTDLP_TIMEOUT_SEC)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        entry.update(state="error", message="タイムアウトしました")
+        return
+
     if proc.returncode == 0:
-        title = ""
-        for line in proc.stdout.splitlines():
-            if "Destination:" in line or "[ExtractAudio]" in line:
-                title = Path(line.split(":")[-1].strip()).name
-        entry.update(state="done", title=title or "完了", message="")
+        # 2 曲以上仕上がっていればプレイリストとして扱う。最後の 1 曲名
+        # だけを出すと「1 曲しか取れなかった」ように見えてしまうため。
+        title = f"{finished_count}曲 完了" if finished_count > 1 else \
+            (got_title or entry.get("title") or "完了")
+        entry.update(state="done", title=title, message="", percent="", eta="")
         PLAYER.scan()
     else:
-        tail = (proc.stderr or proc.stdout).strip().splitlines()
-        entry.update(state="error", message=tail[-1] if tail else "不明なエラー")
+        err_lines = [l for l in tail if l.strip()]
+        entry.update(state="error", message=err_lines[-1] if err_lines else "不明なエラー")
 
 
 async def download_loop() -> None:
