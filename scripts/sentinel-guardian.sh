@@ -422,36 +422,37 @@ check_storage_owner() {
 }
 
 # ------------------------------------------------------------------ 8b. Lockstep Sync firewall
-# sentinel-lockstep-sync.service (CLAUDE.md #61) binds 0.0.0.0:8384 rather
-# than a specific address (the Tailscale interface's own IP is only
-# assigned after 'tailscale up' has run and can change if the node is
-# re-authed), so reachability is restricted here instead, the same
-# DROP-based pattern check_firewall() above already uses for AdGuard's
-# :8083 - except this one allows the tailscale0 interface through as well
-# as loopback, rather than blocking every non-loopback source outright.
-# Re-checked every cycle for the same reason as :8083's rule: iptables
-# rules live only in kernel memory and do not survive a reboot on their
-# own.
+# sentinel-lockstep-sync.service (CLAUDE.md #61) binds 0.0.0.0:8384. An
+# earlier version of this function restricted that port to loopback +
+# tailscale0 only, the same DROP-based pattern check_firewall() above uses
+# for AdGuard's :8083. That turned out to be more restrictive than wanted:
+# syncing should also work from the plain LAN, without Tailscale connected
+# at all - the same trust boundary this project's own Web UI (:8080) has
+# always used (CLAUDE.md "意図的にしていないこと" - LAN-internal is the
+# boundary, not something layered with its own firewalling). **Do not
+# reintroduce a Tailscale-only DROP rule here** - that is the exact
+# restriction this function now undoes.
+#
+# It still runs every cycle, but only to remove: a Pi that ran the earlier
+# version may still have the old DROP rules sitting in kernel memory, and
+# nothing clears those on its own just because this script stopped adding
+# them - Guardian has to explicitly remove them once, or such a Pi would
+# stay LAN-unreachable until its next reboot.
 LOCKSTEP_PORT=8384
 check_lockstep_firewall() {
   command -v iptables >/dev/null || return 0
-  systemctl list-unit-files sentinel-lockstep-sync.service &>/dev/null || return 0
 
-  local applied=0
+  local removed=0
   for cmd in iptables ip6tables; do
     command -v "$cmd" >/dev/null || continue
-    if ! "$cmd" -C INPUT -p tcp --dport "$LOCKSTEP_PORT" ! -i lo ! -i tailscale0 -j DROP 2>/dev/null; then
-      "$cmd" -I INPUT 1 -p tcp --dport "$LOCKSTEP_PORT" ! -i lo ! -i tailscale0 -j DROP 2>/dev/null && applied=1
-    fi
-    # Forwarded traffic (hotspot clients -> Pi) never needs to reach this
-    # port - Tailscale traffic terminates locally at the tailscale0
-    # interface and is handled by the INPUT rule above, not FORWARD - so
-    # this blocks it unconditionally, same as AdGuard's :8083 FORWARD rule.
-    if ! "$cmd" -C FORWARD -p tcp --dport "$LOCKSTEP_PORT" -j DROP 2>/dev/null; then
-      "$cmd" -I FORWARD 1 -p tcp --dport "$LOCKSTEP_PORT" -j DROP 2>/dev/null && applied=1
-    fi
+    while "$cmd" -C INPUT -p tcp --dport "$LOCKSTEP_PORT" ! -i lo ! -i tailscale0 -j DROP 2>/dev/null; do
+      "$cmd" -D INPUT -p tcp --dport "$LOCKSTEP_PORT" ! -i lo ! -i tailscale0 -j DROP 2>/dev/null && removed=1
+    done
+    while "$cmd" -C FORWARD -p tcp --dport "$LOCKSTEP_PORT" -j DROP 2>/dev/null; do
+      "$cmd" -D FORWARD -p tcp --dport "$LOCKSTEP_PORT" -j DROP 2>/dev/null && removed=1
+    done
   done
-  (( applied )) && fixed "reapplied the port $LOCKSTEP_PORT firewall rules (Tailscale-only)"
+  (( removed )) && fixed "removed the old Tailscale-only restriction on port $LOCKSTEP_PORT (now reachable on the LAN too)"
   return 0
 }
 

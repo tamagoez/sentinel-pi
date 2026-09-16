@@ -177,14 +177,15 @@ sudo ./setup.sh
 - **H8 — Lockstep Sync (任意)、Obsidian の同期用。** 各端末の Obsidian に
   [Lockstep Sync](https://community.obsidian.md/plugins/lockstep-sync)
   コミュニティプラグインを導入している前提です — このステップは Pi 側の
-  *サーバー* のセットアップとペアリングだけを行います。H7 (Tailscale) が
-  既に接続済みであることが前提です: サーバーは自分の tailnet からしか
-  到達できず、素の LAN やインターネットからは一切届きません
-  (AdGuard の :8083 と同じパターンの iptables ルールを Guardian が
-  2 分ごとに再適用して強制します。CLAUDE.md #61 参照)。ペアリングに GUI は
-  なく、`setup.sh` が実行すべきコマンドをそのまま表示します — 最初の
-  端末用には 60 分だけ有効な一度きりのペアリングリンクとその QR コード、
-  2 台目以降にはそれぞれ専用のトークンを発行します。Lockstep Sync は
+  *サーバー* のセットアップとペアリングだけを行います。サーバーは
+  素の LAN から到達できます — このプロジェクト自身の Web UI (`:8080`)
+  と同じ到達性で、家から出ない端末には Tailscale は不要です。ペアリングに
+  GUI はなく、`setup.sh` が実行すべきコマンドをそのまま表示します —
+  最初の端末用には 60 分だけ有効な一度きりのペアリングリンクとその
+  QR コード、2 台目以降にはそれぞれ専用のリンク/トークンを発行します。
+  ペアリングには使うアドレスが埋め込まれるため、端末ごとに選んでください
+  — 家から出ない端末には LAN のアドレス、外出先からも同期したい端末には
+  (H7 が接続済みなら) Tailscale のアドレスを使います。Lockstep Sync は
   エンドツーエンドで暗号化されており、Syncthing と違い Pi 自身には
   平文の Vault を一切保存しません。**64bit (ARM64) の DietPi イメージが
   必須です** — Lockstep Sync のサーバーには 32bit ARM 向けビルドが無く、
@@ -192,7 +193,7 @@ sudo ./setup.sh
   却下したのと同じ制約です (CLAUDE.md #40)。32bit イメージの場合この
   ステップは自動的にスキップされ、Obsidian の同期は未設定のままになります。
   詳しい理由 (サーバーを専用ユーザーではなく `sentinel` ユーザーとして
-  動かしている理由を含む) は CLAUDE.md #61 を参照してください。
+  動かしている理由を含む) は CLAUDE.md #61/#62 を参照してください。
 
 ## 各フェーズを個別に実行する場合
 
@@ -238,7 +239,7 @@ WiFi ホットスポットも起動後にこれを触ることがあります。
 | ホットスポットの DNS 転送先 | ホットスポットの再設定 | AdGuard へ向け直す |
 | ディスク使用量 | 蓄積 | 92% で警告し、診断バンドルを 1 つ保持 |
 | yt-dlp のバージョン | サイト側の変更 | 週 1 回の更新を試行 |
-| Lockstep Sync のポート 8384 が Tailscale 外から到達可能になっていないか | 再起動、hostapd | iptables ルールを再投入 (`lo`/`tailscale0` のみ許可) |
+| Lockstep Sync のポート 8384 が古いファイアウォールルールで塞がれていないか | 以前のバージョン (Tailscale 限定にしていた頃) からアップグレードした機体 | 古い iptables の DROP ルールを削除する (既定で Web UI と同じく LAN から到達可能に) |
 
 ## 更新するとき
 
@@ -281,7 +282,9 @@ git リモートを確認し、新しいコミットがあれば自分で `updat
 | ネットワークログが空 | 設定タブの AdGuard パスワードが違う、または AdGuard 側でクエリログが無効。Tailscale 接続の直後に空になった場合は `tailscale status` を確認 — `--accept-dns=false` を付けずに接続していないか |
 | `setup.sh` が想定と違うフェーズから始まる | `sudo ./setup.sh --reset` |
 | Lockstep Sync のサーバーが動いていない、端末がペアリングできない | `systemctl status sentinel-lockstep-sync`、`journalctl -u sentinel-lockstep-sync -n 60 --no-pager` |
-| 別の端末から Lockstep Sync に繋がらない | その端末が同じ tailnet に参加しているか確認 (`tailscale status`) — 素の LAN やインターネットからは意図的に到達できず、`tailscale0` からのみ到達できます (CLAUDE.md #61) |
+| ブラウザで `http://<PiのIP>:8384` を開くと 404 になる | 正常です — Web GUI は無く、プラグイン/CLI が話す API だけが存在します (CLAUDE.md #62)。ペアリングは H8 の `link`/`token add` コマンドから行ってください |
+| 同じ LAN 上の別端末から Lockstep Sync に繋がらない | その端末が Pi の実際の LAN IP を使っているか確認し、`sudo ss -ltn 'sport = :8384'` で `0.0.0.0` で listen しているか確認 (CLAUDE.md #62) |
+| 外出先の端末から Lockstep Sync に繋がらない | その端末が同じ tailnet に Tailscale で接続しているか、かつ LAN のアドレスではなく Tailscale のアドレスでペアリングしたか確認 (`tailscale status`、CLAUDE.md #62) |
 | 音楽が「再生中」なのに無音 | `sudo sentinel-logs 2 full` の audio ブロックを見ます。`open sentinel_music` が FAILS なら Guardian が次の周期 (最大 2 分) で asound.conf を直します。急ぐときは `sudo /opt/sentinel/scripts/sentinel-fix-audio-output.sh`。切り分けとして設定タブの「音楽と音声アナウンスを同時に鳴らす」をオフにすると dmix を使わない経路になります |
 | Tailscale を後から設定したい | `sudo sentinel-tailscale up` — 表示されたログイン URL をスマホや PC のブラウザで開きます。状態は `sentinel-tailscale status` |
 | 状況をまとめて貼りたい | `sudo sentinel-logs` — いま問題になっている所だけを短く出します (`sentinel-logs 6 full` で範囲拡大 + 音声の実地テスト) |

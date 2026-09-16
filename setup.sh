@@ -362,45 +362,59 @@ if [[ ! -x "$LS_BIN" ]]; then
 elif ! systemctl is-active --quiet sentinel-lockstep-sync 2>/dev/null; then
   w "sentinel-lockstep-sync.service is not running; install.sh should have"
   w "started it. Check: systemctl status sentinel-lockstep-sync"
-elif ! command -v tailscale >/dev/null || ! tailscale ip -4 >/dev/null 2>&1; then
-  w "Lockstep Sync is reachable only over Tailscale (CLAUDE.md #61) - connect"
-  w "to Tailscale first (H7 above), then re-run this step:  sudo ./setup.sh"
 else
-  TS_IP=$(tailscale ip -4 2>/dev/null | head -1)
+  IP=$(my_ip)
+  TS_IP=""
+  command -v tailscale >/dev/null && TS_IP=$(tailscale ip -4 2>/dev/null | head -1)
   cat <<EOS
      Lockstep Sync keeps no plaintext copy of your notes on this Pi - it
-     only relays end-to-end encrypted data between your devices, over your
-     private tailnet (never the open internet). Pairing works from the
-     command line, one device at a time, using a short-lived link/QR code:
+     only relays end-to-end encrypted data between your devices. Pairing
+     works from the command line, one device at a time, using a
+     short-lived link/QR code. Each pairing bakes in the address that
+     device will use, so pick per device: the LAN address below for one
+     that never leaves home, the Tailscale address (if shown) for one
+     that needs to sync from away too.
 
        1. First device - normally your desktop, with your existing vault:
 
             sudo -u sentinel $LS_BIN link --data $LS_DATA \\
-              --vault main --name desktop --url http://$TS_IP:8384 --minutes 60
+              --vault main --name desktop --url http://${IP:-<this-Pi-IP>}:8384 --minutes 60
 
           The last line printed is a one-time pairing link, valid for 60
           minutes. Paste it into the Lockstep Sync plugin's settings in
           Obsidian on that device, or scan it as a QR code instead:
 
             sudo -u sentinel $LS_BIN link --data $LS_DATA \\
-              --vault main --name desktop --url http://$TS_IP:8384 --minutes 60 \\
+              --vault main --name desktop --url http://${IP:-<this-Pi-IP>}:8384 --minutes 60 \\
               | tail -1 | xargs qrencode -t ANSIUTF8 -m 2
 
-       2. Each additional device (phone, tablet, another PC):
+       2. Each additional device (phone, tablet, another PC) - repeat
+          with a new --name, and swap in the Tailscale address below
+          instead of the LAN one for a device that needs away-from-home
+          access:
 
-            sudo -u sentinel $LS_BIN token add --data $LS_DATA \\
-              --vault main --name phone
-
-          then add it in that device's Obsidian the same way.
-
-     Install Tailscale on every device you want to sync (the same official
-     app used for H7) and join them to this same tailnet - each one then
-     reaches this Pi at http://$TS_IP:8384 from anywhere, not just your
-     home LAN. If this Pi's own Tailscale IP changes later (e.g. after a
-     re-auth), the address above goes stale - check with 'tailscale ip -4'
-     and re-run the commands above with the new address.
+            sudo -u sentinel $LS_BIN link --data $LS_DATA \\
+              --vault main --name phone --url http://${IP:-<this-Pi-IP>}:8384 --minutes 60
 
 EOS
+  if [[ -n "$TS_IP" ]]; then
+    cat <<EOS
+     Tailscale address (for a device that also needs "away from home"
+     access): http://$TS_IP:8384 - install Tailscale on that device too
+     (the same official app used for H7) and join it to this tailnet.
+     If this Pi's own Tailscale IP changes later (e.g. after a re-auth),
+     re-check it with 'tailscale ip -4' before pairing a new device.
+
+EOS
+  else
+    cat <<EOS
+     The commands above only reach this Pi from your home LAN. For a
+     device that also needs "away from home" access, connect this Pi to
+     Tailscale (H7 above) and install it on that device too, then
+     re-run this step for its tailnet address to appear here.
+
+EOS
+  fi
 fi
 
 ok "Setup complete."
