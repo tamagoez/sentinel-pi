@@ -56,6 +56,76 @@ log = logging.getLogger("sentinel.music")
 AUDIO_EXT = {".mp3"}
 _SCAN_EXT = {".mp3", ".m4a", ".opus", ".ogg", ".flac", ".wav", ".webm"}
 
+# カテゴリー名 (「勉強用」「休憩用」のような MUSIC_DIR 直下のサブフォルダ名)
+# として許す文字。フォルダ名としてそのまま使うため、パス区切りや隠し
+# フォルダ化に繋がる文字は避ける。camera_overrides のキーのような自由入力
+# ではなくファイルシステム上の実体になるため、ここだけ検証が要る。
+_CATEGORY_RE = re.compile(r"^[^/\\.\x00][^/\\\x00]{0,63}$")
+
+
+def _valid_category(name: str) -> bool:
+    """カテゴリー名としてフォルダ名に使って安全か。空文字列 (=「未分類」/
+    フィルタなし) は別扱いなのでここでは弾かない — 呼び出し元で判定する。"""
+    return bool(_CATEGORY_RE.match(name)) and name not in (".", "..")
+
+
+def list_categories() -> list[str]:
+    """MUSIC_DIR 直下のサブフォルダ名を一覧する。深さ 1 段だけを見る —
+    「勉強用」「休憩用」のような分類が目的で、ネストした構造は想定して
+    いない。"""
+    try:
+        return sorted(p.name for p in config.MUSIC_DIR.iterdir()
+                     if p.is_dir() and not p.name.startswith("."))
+    except Exception:
+        return []
+
+
+def _category_of(track: Path) -> str:
+    """MUSIC_DIR からの相対パスの最初のフォルダ名。直下に置かれた曲
+    (未分類) は空文字列。"""
+    try:
+        rel = track.relative_to(config.MUSIC_DIR)
+    except ValueError:
+        return ""
+    return rel.parts[0] if len(rel.parts) > 1 else ""
+
+
+def find_track_path(name: str) -> Path | None:
+    """曲名 (拡張子付きのファイル名) から実際の場所を探す。カテゴリー分け
+    (サブフォルダ) 導入前は「曲名 = MUSIC_DIR 直下のファイル名」で済んで
+    いたが、カテゴリーは MUSIC_DIR のサブフォルダとして持つため、
+    `config.MUSIC_DIR / name` を直接組み立てるだけではカテゴリー内の曲を
+    見つけられない。既にスキャン済みの PLAYER.tracks (rglob で全カテゴリー
+    を横断済み) から一致するものを探す。同名ファイルが複数カテゴリーに
+    存在する場合は最初に見つかったものを返す — 曲名をキーにした既存の
+    イコライザー上書き (CLAUDE.md #32、music_eq_track_overrides) と同じ
+    「ファイル名で一意」という前提をここでも踏襲している。"""
+    for t in PLAYER.tracks:
+        if t.name == name:
+            return t
+    return None
+
+
+def move_track(name: str, category: str) -> Path:
+    """曲をカテゴリー (MUSIC_DIR 直下のサブフォルダ) へ移動する。
+    category="" は「未分類」、つまり MUSIC_DIR 直下へ戻すことを意味する。
+    呼び出し元は成功後に PLAYER.scan() を呼んで一覧へ反映すること
+    (delete_track の既存route と同じパターン、CLAUDE.md 各所)。"""
+    src = find_track_path(name)
+    if src is None:
+        raise FileNotFoundError(name)
+    if category and not _valid_category(category):
+        raise ValueError("カテゴリー名が使えません (パス区切りや先頭のドットは不可)")
+    dest_dir = config.MUSIC_DIR / category if category else config.MUSIC_DIR
+    dest = dest_dir / src.name
+    if dest.resolve() == src.resolve():
+        return dest
+    if dest.exists():
+        raise FileExistsError(f"「{category or '未分類'}」に同名の曲が既にあります")
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    src.rename(dest)
+    return dest
+
 # mbeq (swh-plugins) の 15 バンドの中心周波数。
 # scripts/sentinel-setup-audio-mixing.sh へ渡す順序と一致させること。
 EQ_BAND_HZ = ["50", "100", "156", "220", "311", "440", "622", "880",
@@ -227,6 +297,15 @@ class Player:
         with self._lock:
             found = sorted(p for p in config.MUSIC_DIR.rglob("*")
                            if p.is_file() and p.suffix.lower() in AUDIO_EXT)
+            cat_filter = str(config.get("music_category_filter") or "")
+            if cat_filter:
+                # 「勉強用」「休憩用」のようなカテゴリー分け。フォルダが
+                # 消えている/リネームされているなど、フィルタ先が実際には
+                # 1 曲も無ければ全曲へ静かにフォールバックする — 空の
+                # 再生対象で立ち往生するより、まず鳴らし続ける方を優先。
+                narrowed = [p for p in found if _category_of(p) == cat_filter]
+                if narrowed:
+                    found = narrowed
             current = self.current_path()
             self.tracks = found
             self._rebuild_order(keep=current)
@@ -620,6 +699,7 @@ class Player:
                 "suspended_by": self.suspended_by,
                 "track": path.name if path else "",
                 "track_path": str(path) if path else "",
+                "category": _category_of(path) if path else "",
                 "position": round(self.position, 1),
                 "duration": round(self.duration, 1),
                 "index": self.cursor,
@@ -630,6 +710,8 @@ class Player:
                 "seed": self.seed,
                 "error": self.last_error,
                 "alive": self.proc is not None and self.proc.poll() is None,
+                "category_filter": str(config.get("music_category_filter") or ""),
+                "categories": list_categories(),
             }
 
     def playlist(self) -> list[dict]:
@@ -639,6 +721,7 @@ class Player:
                 if ti < len(self.tracks):
                     t = self.tracks[ti]
                     out.append({"index": pos, "name": t.name,
+                                "category": _category_of(t),
                                 "current": pos == self.cursor})
             return out
 
@@ -826,15 +909,17 @@ def resume_volume_after_voice() -> None:
 # ---------------------------------------------------------------- yt-dlp
 
 DOWNLOADS: list[dict] = []
-_DL_QUEUE: "asyncio.Queue[str]" = asyncio.Queue()
+_DL_QUEUE: "asyncio.Queue[tuple[str, str]]" = asyncio.Queue()
 
 
-def enqueue_download(url: str) -> dict:
+def enqueue_download(url: str, category: str = "") -> dict:
+    if category and not _valid_category(category):
+        raise ValueError("カテゴリー名が使えません (パス区切りや先頭のドットは不可)")
     entry = {"url": url, "state": "queued", "title": "", "message": "",
-             "at": time.time()}
+             "category": category, "at": time.time()}
     DOWNLOADS.insert(0, entry)
     del DOWNLOADS[50:]
-    _DL_QUEUE.put_nowait(url)
+    _DL_QUEUE.put_nowait((url, category))
     return entry
 
 
@@ -862,15 +947,25 @@ _PROGRESS_TEMPLATE = (
 )
 
 
-def _run_ytdlp(url: str, entry: dict) -> None:
+def _run_ytdlp(url: str, entry: dict, category: str = "") -> None:
     """mp3 で取得する。mpg123 が扱えるのが mp3 のみのため形式を固定する。
 
     プレイリスト URL なら全曲取得する (--no-playlist を付けない)。単曲の
     URL であれば従来どおり 1 曲だけ取得される — yt-dlp 自身がその区別を
-    URL から判断するので、こちら側で URL の形を見分ける必要はない。"""
+    URL から判断するので、こちら側で URL の形を見分ける必要はない。
+
+    category を指定すると、取得した曲を MUSIC_DIR 直下ではなくそのサブ
+    フォルダへ直接保存する (「勉強用」「休憩用」のような分類、
+    list_categories() 参照) — あとから move_track() で移すのではなく、
+    ダウンロードの時点で仕分け先を選べるようにするため。"""
     if shutil.which("yt-dlp") is None:
         entry.update(state="error", message="yt-dlp がインストールされていません")
         return
+    if category and not _valid_category(category):
+        entry.update(state="error", message="カテゴリー名が使えません")
+        return
+    out_dir = config.MUSIC_DIR / category if category else config.MUSIC_DIR
+    out_dir.mkdir(parents=True, exist_ok=True)  # 新しいカテゴリーへ直接ダウンロードする場合、フォルダがまだ無い
     cmd = [
         "yt-dlp", "--newline",
         "-x", "--audio-format", "mp3", "--audio-quality", "0",
@@ -883,7 +978,7 @@ def _run_ytdlp(url: str, entry: dict) -> None:
         # (not just risky ones). yt-dlp already sanitizes filesystem-unsafe
         # characters (/, control chars, ...) by default without this flag,
         # so dropping it keeps Japanese titles while staying filesystem-safe.
-        "-o", str(config.MUSIC_DIR / "%(uploader,artist)s - %(title)s.%(ext)s"),
+        "-o", str(out_dir / "%(uploader,artist)s - %(title)s.%(ext)s"),
         url,
     ]
     entry.update(percent="", eta="", item_index=None, item_count=None)
@@ -951,16 +1046,16 @@ def _run_ytdlp(url: str, entry: dict) -> None:
 
 async def download_loop() -> None:
     while True:
-        url = await _DL_QUEUE.get()
+        url, category = await _DL_QUEUE.get()
         entry = _find_entry(url) or {"url": url, "state": "running", "title": "",
-                                     "message": "", "at": time.time()}
+                                     "message": "", "category": category, "at": time.time()}
         # エコモード中と定時処理中はダウンロードを止める (CPU と I/O を空ける)
         while MODE.mode != NORMAL:
             entry["state"] = "waiting"
             entry["message"] = "通常モードへの復帰を待っています"
             await asyncio.sleep(20)
         entry.update(state="running", message="")
-        await asyncio.to_thread(_run_ytdlp, url, entry)
+        await asyncio.to_thread(_run_ytdlp, url, entry, category)
 
 
 # ---------------------------------------------------------------- ループ

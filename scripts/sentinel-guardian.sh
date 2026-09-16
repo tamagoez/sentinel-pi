@@ -244,11 +244,37 @@ check_services() {
   systemctl list-unit-files hostapd.service &>/dev/null && units+=(hostapd.service)
   systemctl list-unit-files syncthing.service &>/dev/null && units+=(syncthing.service)
 
+  # hciuart.service is the one unit here whose "inactive" resting state
+  # unit_needs_start() cannot reliably tell apart from broken. CLAUDE.md
+  # #51 tried modelling it via Type=/Result= - first assuming
+  # Type=oneshot, then widening to Type=forking with Result=success - and
+  # real hardware kept restarting it on essentially every single 2-minute
+  # cycle regardless (`FIXED: started hciuart.service` logged dozens of
+  # times per hour, still happening after both attempted fixes were
+  # deployed). Modelling this unit's properties has failed twice, so this
+  # stops trying: hciuart already has a strictly better supervisor.
+  # check_bluetooth() above restarts hciuart *and* bluetooth.service the
+  # moment `bluetoothctl show` actually reports no controller - the one
+  # symptom that matters - so nothing here needs to re-derive "is hciuart
+  # actually broken" from ActiveState/Type/Result at all. For this unit,
+  # only a genuine ActiveState=failed (systemd's own unambiguous "this
+  # errored out" signal, needed for the CLAUDE.md #12 startup-race case:
+  # hciuart failing outright before bluetoothd ever gets to notice) counts
+  # as broken here; merely "inactive" does not restart it.
+  # **Do not route hciuart back through unit_needs_start()'s inactive
+  # handling** - that is exactly the restart storm this replaces, twice
+  # confirmed on real hardware.
+  local failed_only_units=(hciuart.service)
+
   for u in "${units[@]}"; do
     systemctl list-unit-files "$u" &>/dev/null || continue
     systemctl is-enabled --quiet "$u" 2>/dev/null || {
       systemctl enable "$u" >/dev/null 2>&1 && fixed "enabled $u"; }
-    unit_needs_start "$u" || continue
+    if [[ " ${failed_only_units[*]} " == *" $u "* ]]; then
+      systemctl is-failed --quiet "$u" 2>/dev/null || continue
+    else
+      unit_needs_start "$u" || continue
+    fi
     # A unit stuck "failed (start-limit-hit)" ignores a plain start
     # ("start request repeated too quickly"); reset-failed clears that
     # counter and is a harmless no-op otherwise.

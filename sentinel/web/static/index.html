@@ -354,13 +354,23 @@ try{
           <input id="dl-url" placeholder="https://..." style="flex:1">
           <button class="p" onclick="addDownload()">追加</button>
         </div>
+        <div class="row" style="margin-top:6px">
+          <span class="faint" style="font-size:11px">保存先</span>
+          <select id="dl-cat" style="width:auto" onchange="onDlCatChange(this)"></select>
+        </div>
         <div class="hint faint" style="font-size:11px;margin-top:6px">
-          mp3 で保存します。エコモード中と定時処理中は自動的に待機します。
+          mp3 で保存します。プレイリスト URL なら全曲まとめて取得します。
+          エコモード中と定時処理中は自動的に待機します。
         </div>
         <table style="margin-top:10px"><tbody id="dls"></tbody></table>
       </div></div>
     </div>
     <div class="card" style="margin-top:12px"><h3>プレイリスト <span id="pl-n" class="faint"></span></h3>
+      <div class="row" style="margin-bottom:8px">
+        <span class="faint" style="font-size:11px">カテゴリー</span>
+        <select id="m-cat-filter" style="width:auto" onchange="mus('category_filter',{category:this.value})"></select>
+        <span class="hint faint" style="font-size:11px">選んだカテゴリーの曲だけを再生対象にします。「すべて」で解除。</span>
+      </div>
       <div class="list" id="playlist"></div></div>
   </section>
 
@@ -1187,22 +1197,70 @@ function renderMusic(full){
   $("#m-shuf").style.background = s.shuffle ? "var(--p-bg)" : "";
 
   if(full){
+    const cats = s.categories || [];
+    renderCategorySelect($("#m-cat-filter"), cats, s.category_filter || "", "すべて", false);
+    renderCategorySelect($("#dl-cat"), cats, $("#dl-cat").dataset.picked || "", "未分類", true);
     $("#pl-n").textContent = `(${(MUSIC.playlist||[]).length} 曲)`;
     $("#playlist").innerHTML = (MUSIC.playlist||[]).map(t =>
       `<div class="tk ${t.current?"cur":""}">
         <span class="i" onclick="mus('jump',{index:${t.index}})" style="cursor:pointer">${t.index+1}</span>
         <span class="n" onclick="mus('jump',{index:${t.index}})" style="cursor:pointer">${esc(t.name)}</span>
+        <select onclick="event.stopPropagation()" onchange="moveTrackCategory('${esc(t.name).replace(/'/g,"\\'")}', this)"
+                style="width:auto;font-size:10px;flex:none" title="カテゴリー">
+          ${trackCategoryOptions(cats, t.category || "")}
+        </select>
         <span onclick="event.stopPropagation();deleteTrack('${esc(t.name).replace(/'/g,"\\'")}')"
               style="color:var(--bad);cursor:pointer;flex:none;padding:0 4px" title="削除">✕</span>
        </div>`).join("")
       || `<div class="body faint" style="padding:12px">曲がありません。URL から追加するか、音楽フォルダに mp3 を置いてください。</div>`;
     $("#dls").innerHTML = (MUSIC.downloads||[]).map(d => {
       const lbl = {queued:"待機中", waiting:"通常モード待ち", running:"取得中", done:"完了", error:"失敗"}[d.state] || d.state;
-      return `<tr><td style="max-width:220px;overflow:hidden;text-overflow:ellipsis">${esc(d.title || d.url)}</td>
+      return `<tr><td style="max-width:220px;overflow:hidden;text-overflow:ellipsis">${esc(d.title || d.url)}${d.category?` <span class="faint">(${esc(d.category)})</span>`:""}</td>
         <td class="${d.state==="error"?"":"muted"}" style="${d.state==="error"?"color:var(--bad)":""}">${lbl}</td>
         <td class="faint">${esc(d.message||"")}</td></tr>`;
     }).join("");
   }
+}
+// カテゴリー選択 <select> の中身。__new__ は「新しいカテゴリーを作る」の
+// 特別値 — 実在のフォルダ名と衝突しないよう二重下線で予約している。
+// フィルタ用 (再生対象の絞り込み) には出さない — まだ 1 曲も無い
+// カテゴリーを選んでも scan() 側で全曲へ静かにフォールバックするだけで
+// 意味が無いため (music.py の Player.scan() 参照)。
+function catOptionsHtml(cats, current, emptyLabel, allowNew){
+  // current がまだ実在しないカテゴリー (フォルダがディスク上にまだ無い、
+  // 新規作成直後でダウンロードがまだ走っていない場合など) でも選択を
+  // 見失わないよう、一覧に無ければ差し込んでおく。
+  const list = (current && !cats.includes(current)) ? [...cats, current] : cats;
+  const opts = [`<option value="" ${current===""?"selected":""}>${esc(emptyLabel)}</option>`]
+    .concat(list.map(c => `<option value="${esc(c)}" ${c===current?"selected":""}>${esc(c)}</option>`));
+  if(allowNew) opts.push(`<option value="__new__">+ 新しいカテゴリー...</option>`);
+  return opts.join("");
+}
+function trackCategoryOptions(cats, current){ return catOptionsHtml(cats, current, "未分類", true); }
+function renderCategorySelect(el, cats, current, emptyLabel, allowNew){
+  if(document.activeElement === el) return; // 操作中に描き替えて選択を消さない
+  el.innerHTML = catOptionsHtml(cats, current, emptyLabel, allowNew);
+}
+function promptNewCategory(){
+  const name = (prompt("新しいカテゴリー名 (例: 勉強用)") || "").trim();
+  if(!name) return null;
+  if(/[\/\\.\x00]/.test(name[0]) || /[\/\\\x00]/.test(name)){
+    toast("カテゴリー名にスラッシュや先頭のドットは使えません", true); return null;
+  }
+  return name;
+}
+async function moveTrackCategory(name, sel){
+  let category = sel.value;
+  if(category === "__new__"){
+    const created = promptNewCategory();
+    if(!created){ sel.value = ""; return; }
+    category = created;
+  }
+  try{
+    await api("/api/music/track/category", {method:"PUT", headers:{"Content-Type":"application/json"},
+      body: JSON.stringify({name, category})});
+    toast("カテゴリーを変更しました"); loadMusic();
+  }catch(e){ toast(e.message, true); loadMusic(); }
 }
 $("#m-seekbar").addEventListener("click", e => {
   const s = (DATA.music || MUSIC.status || {});
@@ -1224,10 +1282,24 @@ function toggleShuffle(){
   const cur = (DATA.music || MUSIC.status || {}).shuffle;
   cfg({music_shuffle: !cur}).then(() => mus("rescan"));
 }
+function onDlCatChange(sel){
+  if(sel.value === "__new__"){
+    const created = promptNewCategory();
+    if(!created){ sel.value = sel.dataset.picked || ""; return; }
+    // フォルダは実際にダウンロードされるまで存在しない。選んだ名前を
+    // 一時的な <option> として差し込み、次のポーリング再描画でも
+    // (dataset.picked を見て) 消えないようにする。
+    const opt = document.createElement("option");
+    opt.value = created; opt.textContent = created; opt.selected = true;
+    sel.insertBefore(opt, sel.lastElementChild);
+  }
+  sel.dataset.picked = sel.value;
+}
 async function addDownload(){
   const url = $("#dl-url").value.trim();
   if(!url) return;
-  try{ await post("/api/music/download", {url}); $("#dl-url").value = ""; toast("ダウンロードキューに追加しました"); loadMusic(); }
+  const category = $("#dl-cat").dataset.picked || "";
+  try{ await post("/api/music/download", {url, category}); $("#dl-url").value = ""; toast("ダウンロードキューに追加しました"); loadMusic(); }
   catch(e){ toast(e.message, true); }
 }
 
