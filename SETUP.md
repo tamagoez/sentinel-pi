@@ -172,18 +172,23 @@ which re-checks the whole configuration every 2 minutes and repairs drift.
   command.
 - **H8 — Lockstep Sync (optional), for Obsidian sync.** Requires the
   [Lockstep Sync](https://community.obsidian.md/plugins/lockstep-sync)
-  community plugin in Obsidian on each device — this step only sets up and
-  pairs the *server* side on the Pi. The server is reachable on the plain
-  LAN, same as this project's own Web UI (`:8080`) — no Tailscale needed
-  for devices that stay at home. Pairing has no web GUI — `setup.sh`
-  prints the exact commands to run, which generate a one-time pairing
-  link (valid 60 minutes) plus its QR code for the first device, and a
-  fresh link/token for each device after that; each pairing bakes in the
-  address that device will use, so pick the LAN address for one that
-  never leaves home, or the Tailscale address (if H7 is connected) for
-  one that also needs "away from home" access. Lockstep Sync is
-  end-to-end encrypted and keeps no plaintext copy of your vault on the
-  Pi itself, unlike Syncthing.
+  community plugin **installed and enabled in Obsidian on each device
+  before you open its pairing link** — this step only sets up and pairs
+  the *server* side on the Pi. The server is reachable on the plain LAN,
+  same as this project's own Web UI (`:8080`) — no Tailscale needed for
+  devices that stay at home. Pairing has no web GUI to log into, but it
+  is not a value you type into the plugin either — `setup.sh` prints a
+  command that generates a one-time pairing link (valid 60 minutes),
+  and you open *that link* in a browser **on the device being paired**;
+  the page it loads hands off to the already-installed plugin through an
+  `obsidian://` link and fills in that device's Server URL / Device
+  token for you automatically. A QR code variant of the same command is
+  also printed, for pairing a phone/tablet that already has the plugin
+  ready. Each pairing bakes in the address that device will use, so pick
+  the LAN address for one that never leaves home, or the Tailscale
+  address (if H7 is connected) for one that also needs "away from home"
+  access. Lockstep Sync is end-to-end encrypted and keeps no plaintext
+  copy of your vault on the Pi itself, unlike Syncthing.
   **Requires a 64-bit (ARM64) DietPi image** — Lockstep Sync's server has
   no 32-bit ARM build, the same constraint that ruled out Self-hosted
   LiveSync + CouchDB when Syncthing was first chosen (CLAUDE.md #40); if
@@ -281,6 +286,7 @@ by hand on the box. `journalctl -t sentinel-autoupdate` shows its history.
 | `setup.sh` starts from the wrong phase | `sudo ./setup.sh --reset` |
 | Lockstep Sync server not running or devices won't pair | `systemctl status sentinel-lockstep-sync`; `journalctl -u sentinel-lockstep-sync -n 60 --no-pager` |
 | Lockstep Sync `http://<Pi-IP>:8384` gives 404 in a browser | Normal — there is no web GUI, only the API the plugin/CLI talk to (CLAUDE.md #62). Pair with the `link`/`token add` commands from H8 instead |
+| Lockstep Sync pairing link says "This link has expired or was already used" | Install and enable the Lockstep Sync plugin in Obsidian on the target device **before** opening the link (the link hands off to the plugin via an `obsidian://` link — with nothing installed to receive it, the attempt still consumes the one-time link). Open a freshly-generated link, on that same device, in an actual browser — not in the terminal, not on a different device, not reused after 60 minutes or after a previous attempt (CLAUDE.md #63) |
 | Lockstep Sync unreachable from another device on the LAN | Confirm the device used the Pi's actual LAN IP, and check `sudo ss -ltn 'sport = :8384'` shows it listening on `0.0.0.0` (CLAUDE.md #62) |
 | Lockstep Sync unreachable from a device away from home | That device needs Tailscale connected to the same tailnet, and must have been paired with the Tailscale address, not the LAN one (`tailscale status`, CLAUDE.md #62) |
 | Music says "playing" but is silent | Read the audio block of `sudo sentinel-logs 2 full`. If `open sentinel_music` FAILS, Guardian rewrites asound.conf within 2 minutes; to do it now, run `sudo /opt/sentinel/scripts/sentinel-fix-audio-output.sh`. To rule mixing out entirely, turn off "play music and voice at the same time" in Settings |

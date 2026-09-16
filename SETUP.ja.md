@@ -174,20 +174,25 @@ sudo ./setup.sh
   必要があります (前回の指定は憶えていません) — 手動で再度実行するときは
   必ず付け直してください。断った場合も Tailscale 自体は導入済みのまま
   未接続で残るので、同じコマンドでいつでも後から接続できます。
-- **H8 — Lockstep Sync (任意)、Obsidian の同期用。** 各端末の Obsidian に
+- **H8 — Lockstep Sync (任意)、Obsidian の同期用。** **リンクを開く前に**、
+  各端末の Obsidian へ
   [Lockstep Sync](https://community.obsidian.md/plugins/lockstep-sync)
-  コミュニティプラグインを導入している前提です — このステップは Pi 側の
-  *サーバー* のセットアップとペアリングだけを行います。サーバーは
+  コミュニティプラグインを導入・有効化しておく必要があります — このステップ
+  は Pi 側の *サーバー* のセットアップとペアリングだけを行います。サーバーは
   素の LAN から到達できます — このプロジェクト自身の Web UI (`:8080`)
   と同じ到達性で、家から出ない端末には Tailscale は不要です。ペアリングに
-  GUI はなく、`setup.sh` が実行すべきコマンドをそのまま表示します —
-  最初の端末用には 60 分だけ有効な一度きりのペアリングリンクとその
-  QR コード、2 台目以降にはそれぞれ専用のリンク/トークンを発行します。
-  ペアリングには使うアドレスが埋め込まれるため、端末ごとに選んでください
-  — 家から出ない端末には LAN のアドレス、外出先からも同期したい端末には
-  (H7 が接続済みなら) Tailscale のアドレスを使います。Lockstep Sync は
-  エンドツーエンドで暗号化されており、Syncthing と違い Pi 自身には
-  平文の Vault を一切保存しません。**64bit (ARM64) の DietPi イメージが
+  ログインするGUIはありませんが、かといってプラグインの画面に自分で値を
+  打ち込むものでもありません — `setup.sh` が表示するコマンドは、60 分だけ
+  有効な一度きりのペアリングリンクを発行するだけのもので、**そのリンクを
+  ペアリングしたい端末自身のブラウザで開く**と、そのページが `obsidian://`
+  リンク経由ですでに導入済みのプラグインへ自動的に引き継ぎ、その端末の
+  Server URL / Device token を自動で埋めてくれます。同じコマンドの QR
+  コード版も表示されるので、プラグインの準備ができているスマホ/タブレット
+  はそちらで読み取っても構いません。ペアリングには使うアドレスが埋め込ま
+  れるため、端末ごとに選んでください — 家から出ない端末には LAN のアドレス、
+  外出先からも同期したい端末には (H7 が接続済みなら) Tailscale のアドレスを
+  使います。Lockstep Sync はエンドツーエンドで暗号化されており、Syncthing
+  と違い Pi 自身には平文の Vault を一切保存しません。**64bit (ARM64) の DietPi イメージが
   必須です** — Lockstep Sync のサーバーには 32bit ARM 向けビルドが無く、
   これは Syncthing を最初に選んだ際に Self-hosted LiveSync + CouchDB を
   却下したのと同じ制約です (CLAUDE.md #40)。32bit イメージの場合この
@@ -283,6 +288,7 @@ git リモートを確認し、新しいコミットがあれば自分で `updat
 | `setup.sh` が想定と違うフェーズから始まる | `sudo ./setup.sh --reset` |
 | Lockstep Sync のサーバーが動いていない、端末がペアリングできない | `systemctl status sentinel-lockstep-sync`、`journalctl -u sentinel-lockstep-sync -n 60 --no-pager` |
 | ブラウザで `http://<PiのIP>:8384` を開くと 404 になる | 正常です — Web GUI は無く、プラグイン/CLI が話す API だけが存在します (CLAUDE.md #62)。ペアリングは H8 の `link`/`token add` コマンドから行ってください |
+| ペアリングリンクを開くと「This link has expired or was already used」になる | ペアリング先の端末で Lockstep Sync プラグインを**リンクを開く前に**導入・有効化してください (このリンクはプラグインへ `obsidian://` 経由で引き継ぐ仕組みで、受け取るプラグインが無い状態で試すと、それだけでこの一度きりのリンクが消費されてしまいます)。新しく発行し直したリンクを、ペアリングしたい端末自身の実際のブラウザで開いてください — ターミナル上や別の端末で開いたもの、60分を過ぎたもの、一度試したものの使い回しは無効です (CLAUDE.md #63) |
 | 同じ LAN 上の別端末から Lockstep Sync に繋がらない | その端末が Pi の実際の LAN IP を使っているか確認し、`sudo ss -ltn 'sport = :8384'` で `0.0.0.0` で listen しているか確認 (CLAUDE.md #62) |
 | 外出先の端末から Lockstep Sync に繋がらない | その端末が同じ tailnet に Tailscale で接続しているか、かつ LAN のアドレスではなく Tailscale のアドレスでペアリングしたか確認 (`tailscale status`、CLAUDE.md #62) |
 | 音楽が「再生中」なのに無音 | `sudo sentinel-logs 2 full` の audio ブロックを見ます。`open sentinel_music` が FAILS なら Guardian が次の周期 (最大 2 分) で asound.conf を直します。急ぐときは `sudo /opt/sentinel/scripts/sentinel-fix-audio-output.sh`。切り分けとして設定タブの「音楽と音声アナウンスを同時に鳴らす」をオフにすると dmix を使わない経路になります |
