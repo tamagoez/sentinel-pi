@@ -19,6 +19,11 @@
 #      the analog output actually is, so the samples go to HDMI. This
 #      happens when asound.conf was written before the card detection fix
 #      (CLAUDE.md #37), or when ALSA card numbering shifts across a reboot.
+#   4. sentinel_music opens fine but sentinel_voice - a separate PCM
+#      definition in the same file, with its own "SentinelVoice" softvol
+#      control - does not, so voice announcements silently fall back to
+#      stopping music instead of mixing with it (CLAUDE.md #65). This used
+#      to go completely unchecked here.
 #
 # This is the single bash copy of find_output_card() (CLAUDE.md #37):
 # sentinel-guardian.sh's check_audio() delegates here instead of keeping
@@ -317,6 +322,50 @@ else
     fixed_msg "created $ASOUND for card $CARD - music and voice can be mixed again"
     reset_retry create
   fi
+fi
+
+# sentinel_voice is written by the same sentinel-setup-audio-mixing.sh call
+# as sentinel_music, into the same /etc/asound.conf, but it is its own PCM
+# definition (a "type softvol" stage with its own "SentinelVoice" ALSA
+# control, CLAUDE.md #31) - not just an alias for sentinel_music. Nothing
+# above actually opens it: the block that repairs sentinel_music only ever
+# tests sentinel_music, so a break isolated to the voice PCM (its softvol
+# control failing to create/open even though the shared dmix slave and
+# sentinel_music both work fine) was invisible here and to voice.py's own
+# _mixing_ready() check, which just falls back to duck_for_voice() forever
+# without anything ever repairing the actual cause. Test and repair it with
+# the same "actually try it" discipline, independently and with its own
+# backoff key so its retry schedule cannot borrow or donate wait time to
+# the unrelated sentinel_music one.
+if aplay -L 2>/dev/null | grep -qx 'sentinel_voice'; then
+  if pcm_opens sentinel_voice; then
+    ok "sentinel_voice opens and accepts audio"
+    reset_retry voice_rewrite
+  else
+    w "sentinel_voice exists in asound.conf but will not open:"
+    timeout 6 aplay -D sentinel_voice -f S16_LE -r 44100 -c 2 -d 1 /dev/zero 2>&1 \
+      | sed 's/^/       /' >&2
+    if pcm_opens "hw:$CARD,0"; then
+      # The card and the shared dmix slave both work (or the sentinel_music
+      # block above already proved so) - this PCM's own definition is what
+      # is broken. Rewriting asound.conf recreates the "SentinelVoice"
+      # control from scratch. EQ is written off here for the same reason as
+      # the sentinel_music repair above: modules/music.py re-applies the
+      # user's bands on the next track, and a working mix beats a silent
+      # one with EQ intact.
+      if [[ -x "$SETUP_MIX" ]] && may_retry voice_rewrite && "$SETUP_MIX" "$CARD" off >/dev/null 2>&1 \
+           && pcm_opens sentinel_voice; then
+        fixed_msg "rewrote $ASOUND for card $CARD - sentinel_voice opens again"
+        reset_retry voice_rewrite
+      else
+        w "sentinel_voice still will not open - voice announcements will duck (stop) music instead of mixing with it"
+      fi
+    else
+      w "hw:$CARD,0 will not open either - see the sentinel_music section above"
+    fi
+  fi
+else
+  say "sentinel_voice is not defined - voice announcements will duck (stop) music instead of mixing with it"
 fi
 
 (( FIXED )) && exit 10

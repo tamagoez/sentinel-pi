@@ -2575,6 +2575,81 @@ upstream の [obsidian-lockstep-sync](https://github.com/stephansergeev/obsidian
 という前提で新たな重複排除ロジックを足さないでください** — サーバー側の
 実装を確認した限り、その前提自体が誤りです。
 
+### 64. Bluetooth ペアリング: 相手端末の PIN/確認画面は確認するもの。Pi 側 agent が確認プロンプトに無応答だと失敗する
+
+「各機器で PIN 番号が出て、無視してスキップしてもペアリングできませんでした
+と表示される」という報告がありました。まず利用者側の操作として明確にして
+おきたいのは、**相手端末 (スマホ/PC) に出る確認画面は無視・スキップする
+ものではなく、確認して「ペア設定/OK」を押すもの**だという点です。Pi 側の
+capability を NoInputNoOutput (無表示・無確認) にしていても、これは
+「Pi 側の agent が何を求められても自動で答える」という申告でしかなく、
+Bluetooth の SSP (Secure Simple Pairing) は相手側の端末が独自に確認画面を
+出すこと自体は妨げません — 実際、CLAUDE.md #16 が参照した既知のリグレッ
+ション報告 ([RPi-Distro/repo#291](https://github.com/RPi-Distro/repo/issues/291)
+のコメント、[Raspberry Pi Forums](https://forums.raspberrypi.com/viewtopic.php?t=324225))
+でも「(NoInputNoOutput でも) 確認は要求され続ける」「相手端末に出る PIN は
+無視せず yes を押す」という報告があり、これはこのプロジェクト固有の不具合
+ではなく Bluetooth スタック側の一般的な挙動です。
+
+とはいえ、それだけでは説明のつかないもう一つの穴がありました。#16 の
+`sentinel-bt-agent.sh` は bluetoothctl の対話セッションを `coproc` で
+模倣していますが、監視していたのは `Connected: yes`/`Paired: yes`/
+`Bonded: yes` という**接続確立後**のイベント行だけで、ペアリングの過程で
+**Pi 側の agent 自身に** `RequestConfirmation`/`RequestAuthorization` 等が
+飛んできて `Confirm passkey NNNNNN (yes/no):` のようなプロンプトが
+標準出力に出た場合には、一切応答していませんでした。この状態では
+Pi 側からの応答がいつまでも来ないため、相手端末の確認画面をどれだけ
+正しく操作しても (無視してもきちんと押しても)、最終的に
+`AuthenticationTimeout` でペアリングが失敗します。「PIN を無視/スキップ
+してもペアリングできない」という報告は、利用者側の誤操作 (無視すべきで
+なかった) と、この Pi 側の無応答という 2 つが重なっていた可能性が高いと
+判断しました。
+
+`sentinel-bt-agent.sh` の読み取りループに、`(yes/no)` を含む行が来たら
+無条件で `yes` を返す処理を追加しました。`Confirm passkey`・
+`Confirm pairing`・`Authorize service` はいずれも同じ `(yes/no)` という
+書式でプロンプトを出すため、文言ごとに個別分岐する必要はありません。
+**この自動応答を外さないでください** — 同じ「相手端末には確認画面が出て
+いるのに、Pi 側の agent が無応答のまま固まってペアリングに失敗する」
+不具合に戻ります。この Pi 側の agent が NoInputNoOutput で登録されている
+以上、真の Just Works が成立する組み合わせでは本来この分岐は素通りする
+だけで、実害はありません。
+
+### 65. `sentinel-fix-audio-output.sh` は `sentinel_music` しか実際に開いて確認していなかった
+
+「音声ガイダンスと音楽のミキシングがいまだにできない」という報告があり
+ました。CLAUDE.md #31/#41/#46/#57 と手を尽くしてきましたが、確認すると
+`sentinel-fix-audio-output.sh` の「実際に開けるか試す」検証区間 (#4) が
+`sentinel_music` **だけ**を対象にしており、`sentinel_voice` は一度も
+実際に開いて確かめていませんでした。この2つは同じ `/etc/asound.conf` の
+同じ `sentinel-setup-audio-mixing.sh` 呼び出しで一緒に書かれますが、
+`sentinel_music` は素通し (`type plug`) または LADSPA 段を経て dmix へ
+繋がるだけなのに対し、`sentinel_voice` は独自の "SentinelVoice" という
+ALSA softvol コントロールを新規に持つ、実体の異なる PCM 定義です
+(CLAUDE.md #31)。同じ dmix スレーブ・同じカードを使っていても、
+`sentinel_music` が正常に開けることは `sentinel_voice` が開けることを
+何も保証しません。
+
+この非対称性のせいで、`sentinel_music` が正常な限り Guardian は「音声
+出力は健康」と報告し続ける一方、`voice.py` の `_mixing_ready()` は
+独自に `sentinel_voice` を試して失敗し続け、**誰にも修復されないまま**
+`duck_for_voice()` (曲を完全に止めてから喋る、重ねない) へ静かに
+フォールバックし続けていました。「音楽は普通に鳴るのに、なぜか読み上げ
+と重ならない」という症状と一致します。
+
+`sentinel-fix-audio-output.sh` に `sentinel_music` と全く対称な
+`sentinel_voice` 専用の検証・修復区間を追加しました。開けなければ
+`hw:$CARD,0` 自体が開けるかで「カード/dmix スレーブの問題」か
+「`sentinel_voice` 自身の定義 (softvol コントロール) の問題」かを切り分け、
+後者なら `sentinel-setup-audio-mixing.sh` を再実行して asound.conf を
+書き直します。再試行のバックオフ (CLAUDE.md #57 の指数バックオフパターン)
+は `sentinel_music` 用のものと**別のキー**(`voice_rewrite`) を使います —
+同じキーを共有すると、無関係などちらかの失敗streakがもう一方の再試行
+間隔を不当に伸ばすことになるためです。**この `sentinel_voice` 専用の
+検証を外して `sentinel_music` の結果だけで「音声出力は健康」と判定する
+実装に戻さないでください** — 同じ「音楽は鳴るのに読み上げとは重ならない」
+不具合に戻ります。
+
 ## モジュール構成
 
 各モジュールは疎結合で、`core/state.py` の `MODE` を購読するだけです。
@@ -2595,7 +2670,10 @@ scripts/sentinel-fix-audio-output.sh
                     dmix スレーブ (hw:N,0) が実際のアナログ出力カードと
                     一致しているかを確認する。find_output_card() の
                     bash 版はここ 1 本だけ (Guardian の check_audio() は
-                    このスクリプトへ委譲する、CLAUDE.md #41)
+                    このスクリプトへ委譲する、CLAUDE.md #41)。
+                    sentinel_music と sentinel_voice を対称に、それぞれ
+                    独立した検証・修復区間・再試行バックオフキーで
+                    実際に開けるか試す (CLAUDE.md #65)
 scripts/sentinel-logs.sh
                     `sentinel-logs [時間] [full]` (/usr/local/bin/sentinel-logs)。
                     貼り付け用に「今おかしい所」だけを短く出す。同じ
@@ -2637,7 +2715,9 @@ scripts/sentinel-bt-agent.sh
                     sentinel-bt-agent.service から起動される、永続的な
                     ペアリングエージェント。bt-agent (bluez-tools) の
                     NoInputNoOutput リグレッションを避けるため bluetoothctl
-                    を直接駆動する (CLAUDE.md #16)
+                    を直接駆動する (CLAUDE.md #16)。Pi 側の agent 自身に
+                    "Confirm passkey ... (yes/no)" 等が飛んできた場合は
+                    無条件で yes を返す (CLAUDE.md #64)
 scripts/sentinel-autoupdate.sh
                     sentinel-autoupdate.timer (30 分ごと) から起動される。
                     git clone の場所を install.sh/update.sh が書き出す
