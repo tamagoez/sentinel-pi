@@ -3,9 +3,16 @@
 BlueALSA が BlueZ と ALSA の間を仲介し、bluealsa-aplay が受信音声を
 ALSA デバイスへ流す。Sentinel 側の役割は「接続の検知」と「BGM の退避・復帰」。
 
-接続検知は bluetoothctl の info 出力を定期的に読む方式にする。
-D-Bus を直接叩く方が上品だが、dbus-python への依存を増やさないこと、
-そして bluetoothd の再起動をまたいでも壊れないことを優先した。
+接続検知は bluetoothctl の info 出力を定期的に読む方式のまま — 単なる
+状態の読み取りにはこれで十分で、書き換える理由が無い。ペアリング要求への
+応答 (SSP エージェント) だけは modules/bt_agent.py が dbus-next 経由で
+D-Bus の Agent1 を実装している。bluetoothctl の対話セッションをテキスト
+スクレイピングしていた旧実装は、bluetoothctl 自身がまだ D-Bus 接続を
+確立し切る前にエージェント登録を試みて失敗することがあり (実機で
+"Failed to register agent object" として確認)、この種のタイミング競合は
+CLI の出力を読むだけでは確実に検出できないため、実際の D-Bus 呼び出しの
+成否で判断できる実装に置き換えた (CLAUDE.md の Bluetooth ペアリング
+刷新の節を参照)。
 """
 
 from __future__ import annotations
@@ -16,7 +23,7 @@ import re
 import shutil
 import subprocess
 
-from ..core import audio, config
+from ..core import config
 from ..core.state import NORMAL, MODE
 from . import music
 
@@ -118,30 +125,41 @@ def paired_devices() -> list[dict]:
     return devices
 
 
-def _card() -> str | None:
-    # core/audio.find_output_card() を使う理由は core/audio.py の docstring
-    # 参照 — aplay -l の最初のカードを無条件で使うと、機体によっては
-    # bcm2835 のアナログ出力ではなく HDMI を掴んでしまう。
-    idx = audio.find_output_card()
-    return str(idx) if idx is not None else None
+def _pcm_path(addr: str) -> str:
+    """BlueALSA の PCM オブジェクトの D-Bus パス。この Pi はアダプタが
+    hci0 の 1 つだけという前提を置いている — set_alias() の
+    `/org/bluez/hci0/dev_...` と同じ前提 (このプロジェクト全体で単一
+    アダプタ構成のみ対象、CLAUDE.md 冒頭のハードウェア表を参照)。"""
+    return f"/org/bluealsa/hci0/dev_{addr.upper().replace(':', '_')}/a2dpsnk"
 
 
 def _apply_volume(addr: str) -> None:
-    """その端末向けに保存済みの音量があれば ALSA の再生音量へ反映する。
-    mpg123 の音量 (music_volume, ソフトウェア側のゲイン) とは別物 -
-    Bluetooth から流れてくる音声は mpg123 を経由せず bluealsa-aplay が
-    直接 ALSA へ書き込むため、ハードウェア側のミキサーを直接操作する
-    必要がある。numid=1 は bcm2835 サウンドカードの "PCM Playback Volume"
-    (numid=3 の出力ルート選択とは別のコントロール、sentinel-guardian.sh の
-    check_audio() と対になる)。"""
+    """その端末向けに保存済みの音量があれば bluealsa 側の再生音量へ
+    反映する。mpg123 の音量 (music_volume, ソフトウェア側のゲイン) とは
+    別物 - Bluetooth から流れてくる音声は mpg123 を経由せず
+    bluealsa-aplay が直接鳴らすため、bluealsa 側で音量を持つ必要がある。
+
+    **共有ハードウェアレジスタ (numid=1) はもう操作しない。** 以前は
+    `amixer -c <card> cset numid=1 <%>` で bcm2835 の "PCM Playback
+    Volume" を直接書き換えていたが、これは音楽・音声アナウンス・この Pi
+    の出力全体で共有される 1 つのレジスタで、Bluetooth の端末ごとの
+    音量を変えるたびに他の音量まで意図せず動いてしまっていた
+    (実際に報告された不具合、CLAUDE.md #31 と同種の混同)。`bluealsa-cli`
+    (bluez-alsa-utils に同梱) はこの接続だけに閉じた音量コントロールを
+    D-Bus 経由で公開しており、SoftVolume を明示的に有効化したうえで
+    そちらへ直接書き込む — 他のどの音量にも触れない。A2DP の音量範囲は
+    0-127 (bluealsa-cli(1) 参照)。"""
     vols = config.get("bt_device_volumes") or {}
     pct = vols.get(addr)
     if pct is None:
         return
-    card = _card()
-    if card is None:
-        return
-    _run(["amixer", "-c", card, "cset", "numid=1", f"{int(pct)}%"])
+    path = _pcm_path(addr)
+    # SoftVolume が off (= 相手端末の AVRCP 絶対音量にまかせる) のままだと
+    # このあとの volume 書き込みが効かないことがあるため、毎回明示的に
+    # on にしてから書く。
+    _run(["bluealsa-cli", "soft-volume", path, "on"])
+    value = round(max(0, min(100, int(pct))) * 127 / 100)
+    _run(["bluealsa-cli", "volume", path, str(value)])
 
 
 def set_device_volume(addr: str, pct: int) -> None:

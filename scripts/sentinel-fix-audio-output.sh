@@ -8,22 +8,24 @@
 #
 #   1. The shared hardware volume (numid=1, "PCM Playback Volume") is
 #      parked at its floor, i.e. silent. Nothing in this project ever puts
-#      it back: voice.py stopped touching numid=1 when it moved to its own
-#      softvol control (CLAUDE.md #31), bluetooth.py only writes it when a
-#      Bluetooth device connects (CLAUDE.md #15), and Guardian only ever
-#      checked numid=3. So a single low value - from an old voice volume,
-#      or a Bluetooth device whose stored volume was near zero - silences
-#      music permanently with nothing reporting an error.
+#      it back: voice.py scales its own WAV samples instead of touching any
+#      ALSA mixer control at all, and bluetooth.py only ever writes
+#      bluealsa's own per-connection volume (bluealsa-cli), never numid=1.
+#      So a single low value - from an old install, or a value left behind
+#      by a previous release that did still touch it - silences music
+#      permanently with nothing reporting an error.
 #   2. Output routing (numid=3) points somewhere other than the jack.
-#   3. /etc/asound.conf's dmix slave (hw:N,0) names a different card than
-#      the analog output actually is, so the samples go to HDMI. This
-#      happens when asound.conf was written before the card detection fix
-#      (CLAUDE.md #37), or when ALSA card numbering shifts across a reboot.
-#   4. sentinel_music opens fine but sentinel_voice - a separate PCM
-#      definition in the same file, with its own "SentinelVoice" softvol
-#      control - does not, so voice announcements silently fall back to
-#      stopping music instead of mixing with it (CLAUDE.md #65). This used
-#      to go completely unchecked here.
+#   3. The card that `sysdefault:CARD=<N>` actually opens is not the analog
+#      output - this happens when ALSA's card numbering shifts across a
+#      reboot (a new USB device attached before the audio card, for
+#      instance).
+#
+# Unlike earlier versions of this script, there is no configuration file to
+# repair here at all. `sysdefault:CARD=<N>` is alsa-lib's own per-card
+# dmix route - it needs no `/etc/asound.conf` and cannot drift out of sync
+# with anything, because there is nothing written to disk to drift. See
+# CLAUDE.md's audio-mixing redesign section for the full history of why
+# this project stopped hand-writing that file.
 #
 # This is the single bash copy of find_output_card() (CLAUDE.md #37):
 # sentinel-guardian.sh's check_audio() delegates here instead of keeping
@@ -31,22 +33,15 @@
 # exactly one place per language (core/audio.py for Python).
 #
 #   Usage: sentinel-fix-audio-output.sh [--quiet]
+#          sentinel-fix-audio-output.sh --print-card   (no root needed)
 #   Exit:  0 nothing needed | 10 fixed something | 1 could not fix
+#
+# --print-card only prints the detected card index (or nothing, with a
+# non-zero exit, if none is found) and does not touch anything - it exists
+# so install.sh can reuse this script's find_output_card() priority instead
+# of keeping a third copy of it (CLAUDE.md #37: exactly one bash copy).
 
 set -uo pipefail
-
-QUIET=0
-[[ "${1:-}" == "--quiet" ]] && QUIET=1
-FIXED=0
-
-[[ $EUID -eq 0 ]] || { echo "sentinel-fix-audio-output.sh: must run as root" >&2; exit 1; }
-
-say() { (( QUIET )) || printf '  %s\n' "$*"; }
-ok()  { (( QUIET )) || printf '  [OK] %s\n' "$*"; }
-w()   { printf '  [!!] %s\n' "$*" >&2; }
-fixed_msg() { FIXED=1; printf '  [FIXED] %s\n' "$*"; }
-
-command -v amixer >/dev/null 2>&1 || exit 0
 
 find_output_card() {
   # Same priority as core/audio.py's find_output_card(): prefer the
@@ -75,6 +70,24 @@ find_output_card() {
   return 1
 }
 
+if [[ "${1:-}" == "--print-card" ]]; then
+  find_output_card
+  exit $?
+fi
+
+QUIET=0
+[[ "${1:-}" == "--quiet" ]] && QUIET=1
+FIXED=0
+
+[[ $EUID -eq 0 ]] || { echo "sentinel-fix-audio-output.sh: must run as root" >&2; exit 1; }
+
+say() { (( QUIET )) || printf '  %s\n' "$*"; }
+ok()  { (( QUIET )) || printf '  [OK] %s\n' "$*"; }
+w()   { printf '  [!!] %s\n' "$*" >&2; }
+fixed_msg() { FIXED=1; printf '  [FIXED] %s\n' "$*"; }
+
+command -v amixer >/dev/null 2>&1 || exit 0
+
 CARD=$(find_output_card) || { w "no ALSA playback card found (aplay -l empty)"; exit 1; }
 say "Analog output card: $CARD"
 
@@ -82,8 +95,7 @@ say "Analog output card: $CARD"
 # bcm2835's PCM Playback Volume is an INTEGER control in hundredths of a
 # dB (typically min=-10239, max=400), where the minimum is silence. Only
 # treat the very bottom of the range as broken - anything above that is a
-# deliberate "quiet but audible" setting (a Bluetooth per-device volume,
-# for instance) and must not be overridden.
+# deliberate "quiet but audible" setting and must not be overridden.
 VOL_INFO=$(amixer -c "$CARD" cget numid=1 2>/dev/null)
 VOL_NAME=$(grep -m1 -oE "name='[^']*'" <<<"$VOL_INFO" | cut -d"'" -f2)
 VOL_LINE=$(grep -m1 'type=INTEGER' <<<"$VOL_INFO")
@@ -142,90 +154,27 @@ elif [[ -n "$ROUTE" ]]; then
   ok "output routing ($ROUTE_NAME) is already AUX"
 fi
 
-# ---------------------------------------------------------------- 3. asound.conf
-# The dmix slave card is baked into /etc/asound.conf as hw:N,0. Only
-# modules/music.py can regenerate it (it owns the equalizer settings that
-# go into the same file), so report a mismatch rather than writing a
-# version here that would silently drop the user's EQ.
-ASOUND=/etc/asound.conf
-if [[ -f "$ASOUND" ]]; then
-  CONF_CARD=$(grep -oE 'pcm "hw:[0-9]+,0"' "$ASOUND" | head -n1 | grep -oE '[0-9]+' | head -n1)
-  if [[ -n "$CONF_CARD" && "$CONF_CARD" != "$CARD" ]]; then
-    w "$ASOUND mixes into card $CONF_CARD but the analog output is card $CARD"
-    w "music would be playing into the wrong card (usually HDMI = silence)"
-    say "the open test below rewrites it for card $CARD if it really will not play"
-  else
-    ok "$ASOUND mixes into card ${CONF_CARD:-?} (matches the analog output)"
-  fi
-fi
-
-# ---------------------------------------------------------------- 4. real open test
+# ---------------------------------------------------------------- 3. real open test
 # Same "actually try it" discipline as sentinel-fix-storage-owner.sh's
-# can_write() (CLAUDE.md #8) - a config that looks right but will not open
-# is exactly the failure this is meant to catch.
-#
-# This section REPAIRS rather than only reports, because the failure mode
-# it catches takes the whole machine's audio down, not just mixing:
-# sentinel-setup-audio-mixing.sh points pcm.!default at the same dmix, so
-# a dmix that cannot open its slave silences bluealsa-aplay and every
-# bare `aplay` too, not only Sentinel's music.
-SETUP_MIX="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/sentinel-setup-audio-mixing.sh"
-
+# can_write() (CLAUDE.md #8) - a card that looks right but will not open is
+# exactly the failure this is meant to catch. `sysdefault:CARD=<N>` needs no
+# configuration file, so there is nothing here to rewrite - only the card
+# itself can be at fault, which unstick_card() below addresses.
 pcm_opens() {
   timeout 6 aplay -D "$1" -f S16_LE -r 44100 -c 2 -d 1 -q /dev/zero >/dev/null 2>&1
 }
 
-# Guardian runs this every 2 minutes. Rewriting /etc/asound.conf costs
-# several real playback opens (the setup script tests what it wrote), and
-# repeatedly opening and closing bcm2835 is the very churn that wedges the
-# card (CLAUDE.md #45) - so a repair that did not take must not be retried
-# on every cycle. This used to be a flat 1-hour cooldown, but that is too
-# conservative for the common case: a burst of USB contention (camera
-# resubmit errors, a Bluetooth churn storm) breaks the dmix config while
-# hw:$CARD,0 itself still opens fine, meaning the break is isolated to the
-# asound.conf layer and a retry a few minutes later is very likely to
-# succeed - yet the flat cooldown left mixing off for up to an hour after
-# a single bad moment. Back off exponentially instead, the same pattern
-# camera.py already uses for its own reconnect storms
-# (_CORRUPT_RECONNECT_MAX_BACKOFF, CLAUDE.md #19): start at 2 minutes so
-# the very next Guardian cycle can retry, double on each further failure,
-# and cap at 1 hour so a truly broken card does not get hammered forever.
-# **Do not collapse this back into a flat cooldown** - that is the exact
-# regression this section fixes (mixing staying off for up to an hour after
-# a transient, already-recovered failure).
-_AUDIO_RETRY_BASE_SEC=120
-_AUDIO_RETRY_MAX_SEC=3600
-
-may_retry() {
-  local stamp="/run/sentinel-audio-$1" now last_try=0 count=0 wait
-  now=$(date +%s)
-  if [[ -f "$stamp" ]]; then
-    read -r last_try count < "$stamp" 2>/dev/null || { last_try=0; count=0; }
-  fi
-  wait=$(( _AUDIO_RETRY_BASE_SEC * (1 << count) ))
-  (( wait > _AUDIO_RETRY_MAX_SEC )) && wait=$_AUDIO_RETRY_MAX_SEC
-  if (( now - last_try < wait )); then
-    return 1
-  fi
-  (( count < 10 )) && count=$((count + 1))
-  printf '%s %s\n' "$now" "$count" > "$stamp"
-  return 0
-}
-
-# Called once a repair actually took (pcm_opens sentinel_music succeeded
-# afterwards) so the *next* failure starts backing off from the short
-# interval again, instead of inheriting a long wait earned by a previous,
-# unrelated failure streak.
-reset_retry() {
-  rm -f "/run/sentinel-audio-$1"
-}
+# Guardian runs this every 2 minutes; repeatedly opening and closing
+# bcm2835 is itself the churn that can wedge the card (CLAUDE.md #45), so a
+# driver reload that did not help must not be retried on every cycle.
+_RELOAD_COOLDOWN_SEC=600
 
 unstick_card() {
   # A bcm2835 left wedged by a client that crashed mid-stream refuses
   # every open until the driver is reloaded - the state CLAUDE.md #45
-  # describes ("failed to close VCHI service connection"), which until now
-  # needed a reboot to clear. Reloading the ALSA driver is the documented
-  # remedy for this class of "card listed but will not open"
+  # describes ("failed to close VCHI service connection"). Reloading the
+  # ALSA driver is the documented remedy for this class of "card listed
+  # but will not open"
   # (https://bbs.archlinux.org/viewtopic.php?id=173709). Only ever do this
   # when nothing holds /dev/snd - yanking the driver out from under a live
   # player would be the more damaging bug - and at most once every 10
@@ -236,7 +185,7 @@ unstick_card() {
     w "not reloading the ALSA driver: something still has /dev/snd open"
     return 1
   fi
-  if [[ -f "$stamp" ]] && (( $(date +%s) - $(stat -c %Y "$stamp" 2>/dev/null || echo 0) < 600 )); then
+  if [[ -f "$stamp" ]] && (( $(date +%s) - $(stat -c %Y "$stamp" 2>/dev/null || echo 0) < _RELOAD_COOLDOWN_SEC )); then
     w "not reloading the ALSA driver again yet (tried within the last 10 minutes)"
     return 1
   fi
@@ -258,114 +207,24 @@ unstick_card() {
   return 1
 }
 
-if aplay -L 2>/dev/null | grep -qx 'sentinel_music'; then
-  if pcm_opens sentinel_music; then
-    ok "sentinel_music opens and accepts audio"
-    # Healthy right now - if an earlier failure left a backoff stamp behind,
-    # drop it so the next real failure starts from the short retry interval
-    # again instead of inheriting a wait earned by an unrelated past streak.
-    reset_retry rewrite
-    reset_retry create
-  else
-    w "sentinel_music exists in asound.conf but will not open:"
-    timeout 6 aplay -D sentinel_music -f S16_LE -r 44100 -c 2 -d 1 /dev/zero 2>&1 \
-      | sed 's/^/       /' >&2
-    # Distinguish "the dmix definition is wrong" from "the card itself
-    # cannot be opened right now". dmix opens its slave with a fixed
-    # format, so a card that is busy, or a bcm2835 left in a stuck state
-    # by a crashed client, fails here with a bare "Invalid argument" and
-    # no hint as to which of the two it is.
-    if ! pcm_opens "hw:$CARD,0"; then
-      w "hw:$CARD,0 will not open either - the card is busy or stuck, not a config problem"
-      holders=$(fuser -v /dev/snd/* 2>&1 | tail -n +2 | tr -s ' ' | paste -sd' ' -)
-      [[ -n "$holders" ]] && w "  /dev/snd holders: $holders"
-      if unstick_card; then
-        # A module reload can change card numbering, so ask again rather
-        # than trusting the index we resolved before the reload.
-        NEWCARD=$(find_output_card) && [[ -n "$NEWCARD" ]] && CARD="$NEWCARD"
-        if pcm_opens "hw:$CARD,0"; then
-          fixed_msg "the sound card was stuck; reloading the ALSA driver cleared it (card is now $CARD)"
-        fi
-      fi
-    fi
-    if ! pcm_opens sentinel_music && pcm_opens "hw:$CARD,0"; then
-      # The hardware is fine, so the dmix definition is what is wrong -
-      # a stale card index, or a file left behind by an older release.
-      # Rewrite it for the card we actually found. EQ is written off:
-      # modules/music.py re-applies the user's bands on the next track
-      # (its staleness check compares the file, not just its own memo),
-      # and audible music without EQ beats silent music with it.
-      if [[ -x "$SETUP_MIX" ]] && may_retry rewrite && "$SETUP_MIX" "$CARD" off >/dev/null 2>&1 \
-           && pcm_opens sentinel_music; then
-        fixed_msg "rewrote $ASOUND for card $CARD - sentinel_music opens again"
-        reset_retry rewrite
-      elif [[ -f "$ASOUND" ]]; then
-        # Last resort. asound.conf also redefines pcm.!default as this
-        # same dmix, so leaving a dmix that cannot open in place silences
-        # bluealsa-aplay and every other ALSA client on the machine, not
-        # just Sentinel. Moving it aside restores the plain hardware
-        # default: mixing and EQ stop, but sound comes back.
-        mv -f "$ASOUND" "$ASOUND.broken" 2>/dev/null
-        fixed_msg "moved an unopenable $ASOUND to $ASOUND.broken - audio falls back to the card directly (no mixing/EQ)"
-        w "  re-enable mixing later with: $SETUP_MIX $CARD off"
-      fi
-    fi
-  fi
+if pcm_opens "sysdefault:CARD=$CARD"; then
+  ok "sysdefault:CARD=$CARD opens and accepts audio"
 else
-  # Without this PCM, music.py plays to plughw:<card>,0 directly (it no
-  # longer falls back to ALSA's bare default, which on a multi-card Pi is
-  # usually HDMI). Mixing music with voice announcements stays off until
-  # the dmix setup succeeds, but music itself is audible.
-  say "sentinel_music is not defined - music plays straight to card $CARD (no mixing)"
-  if [[ -x "$SETUP_MIX" ]] && may_retry create && "$SETUP_MIX" "$CARD" off >/dev/null 2>&1 \
-       && pcm_opens sentinel_music; then
-    fixed_msg "created $ASOUND for card $CARD - music and voice can be mixed again"
-    reset_retry create
-  fi
-fi
-
-# sentinel_voice is written by the same sentinel-setup-audio-mixing.sh call
-# as sentinel_music, into the same /etc/asound.conf, but it is its own PCM
-# definition (a "type softvol" stage with its own "SentinelVoice" ALSA
-# control, CLAUDE.md #31) - not just an alias for sentinel_music. Nothing
-# above actually opens it: the block that repairs sentinel_music only ever
-# tests sentinel_music, so a break isolated to the voice PCM (its softvol
-# control failing to create/open even though the shared dmix slave and
-# sentinel_music both work fine) was invisible here and to voice.py's own
-# _mixing_ready() check, which just falls back to duck_for_voice() forever
-# without anything ever repairing the actual cause. Test and repair it with
-# the same "actually try it" discipline, independently and with its own
-# backoff key so its retry schedule cannot borrow or donate wait time to
-# the unrelated sentinel_music one.
-if aplay -L 2>/dev/null | grep -qx 'sentinel_voice'; then
-  if pcm_opens sentinel_voice; then
-    ok "sentinel_voice opens and accepts audio"
-    reset_retry voice_rewrite
-  else
-    w "sentinel_voice exists in asound.conf but will not open:"
-    timeout 6 aplay -D sentinel_voice -f S16_LE -r 44100 -c 2 -d 1 /dev/zero 2>&1 \
-      | sed 's/^/       /' >&2
-    if pcm_opens "hw:$CARD,0"; then
-      # The card and the shared dmix slave both work (or the sentinel_music
-      # block above already proved so) - this PCM's own definition is what
-      # is broken. Rewriting asound.conf recreates the "SentinelVoice"
-      # control from scratch. EQ is written off here for the same reason as
-      # the sentinel_music repair above: modules/music.py re-applies the
-      # user's bands on the next track, and a working mix beats a silent
-      # one with EQ intact.
-      if [[ -x "$SETUP_MIX" ]] && may_retry voice_rewrite && "$SETUP_MIX" "$CARD" off >/dev/null 2>&1 \
-           && pcm_opens sentinel_voice; then
-        fixed_msg "rewrote $ASOUND for card $CARD - sentinel_voice opens again"
-        reset_retry voice_rewrite
-      else
-        w "sentinel_voice still will not open - voice announcements will duck (stop) music instead of mixing with it"
-      fi
+  w "sysdefault:CARD=$CARD will not open:"
+  timeout 6 aplay -D "sysdefault:CARD=$CARD" -f S16_LE -r 44100 -c 2 -d 1 /dev/zero 2>&1 \
+    | sed 's/^/       /' >&2
+  holders=$(fuser -v /dev/snd/* 2>&1 | tail -n +2 | tr -s ' ' | paste -sd' ' -)
+  [[ -n "$holders" ]] && w "  /dev/snd holders: $holders"
+  if unstick_card; then
+    # A module reload can change card numbering, so ask again rather than
+    # trusting the index we resolved before the reload.
+    NEWCARD=$(find_output_card) && [[ -n "$NEWCARD" ]] && CARD="$NEWCARD"
+    if pcm_opens "sysdefault:CARD=$CARD"; then
+      fixed_msg "the sound card was stuck; reloading the ALSA driver cleared it (card is now $CARD, sysdefault opens)"
     else
-      w "hw:$CARD,0 will not open either - see the sentinel_music section above"
+      w "sysdefault:CARD=$CARD still will not open after reloading the driver"
     fi
   fi
-else
-  say "sentinel_voice is not defined - voice announcements will duck (stop) music instead of mixing with it"
 fi
 
 (( FIXED )) && exit 10

@@ -76,7 +76,7 @@ run packages.txt bash -c '
 say "collecting systemd status"
 run systemd.txt bash -c '
   for u in sentinel sentinel-guardian.timer sentinel-guardian.service \
-           sentinel-bluealsa sentinel-bluealsa-aplay sentinel-bt-agent \
+           sentinel-bluealsa sentinel-bluealsa-aplay \
            bluetooth adguardhome AdGuardHome dietpi-wifi-hotspot hostapd; do
     echo "---- $u ----"
     systemctl status "$u" --no-pager -l 2>&1 | head -15

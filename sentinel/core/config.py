@@ -148,23 +148,22 @@ DEFAULTS: dict[str, Any] = {
     "music_shuffle_seed": 0,              # 0 なら起動時に生成
     "music_autoplay_on_presence": True,
     "mpg123_buffer_kb": 1024,             # アンダーラン対策のバッファ
-    "audio_mixing_enabled": True,         # ALSA dmix で音楽と音声アナウンスを
-                                           # 同時に鳴らす (CLAUDE.md #31)。
-                                           # False にすると dmix を一切使わず、
-                                           # 音楽はアナログ出力へ直接、読み上げ
-                                           # は曲を止めてから鳴らす #31 以前の
-                                           # 挙動に戻る。dmix・イコライザー・
-                                           # 同時再生のどれかを疑うときの切り分け
-                                           # 用スイッチ (オフでも音は鳴る)
-    "alsa_device": "",                    # 空なら sentinel_music (dmix 経由、
-                                           # 音声アナウンスと同時に鳴らせる。
-                                           # CLAUDE.md #31) を使う
-    "music_eq_enabled": False,            # イコライザーを有効にする (既定オフ。
-                                           # CPU 負荷と ALSA 再接続の手間を避け
-                                           # たい場合はオフのままにする)
+    "alsa_device": "",                    # 空なら core/audio.analog_device() が
+                                           # 返す sysdefault:CARD=<N> (alsa-lib
+                                           # 自身の per-card dmix ルート、音声
+                                           # アナウンス・Bluetooth と自動的に
+                                           # 重なって鳴る) を使う。設定ファイル
+                                           # を必要としないため、切り分け用に
+                                           # 明示的なデバイスを指定したいとき
+                                           # だけここを埋める
+    "music_eq_enabled": False,            # イコライザーを有効にする (既定オフ)。
+                                           # mpg123 自身のリモート EQ コマンドを
+                                           # 使うため、切り替えに再起動もASOUND
+                                           # の書き換えも要らない
     "music_eq_bands": {},                 # 全体の既定バンド設定。帯域 Hz (文字列)
-                                           # -> ゲイン dB (-20〜+20)。無いバンドは
-                                           # 0dB (フラット)
+                                           # -> ゲイン dB (-12〜+12、mpg123 の
+                                           # 実用域 0.00-3.00 倍に対応)。無い
+                                           # バンドは 0dB (フラット)
     "music_eq_track_overrides": {},       # 曲のファイル名 -> {帯域Hz: ゲインdB}
                                            # (music_eq_bands と同じ形式)。
                                            # 指定が無い曲は music_eq_bands を使う
@@ -221,15 +220,12 @@ DEFAULTS: dict[str, Any] = {
     # --- 音声アナウンス (Open JTalk 優先、espeak-ng へフォールバック。
     #     mpg123 の音楽ライブラリとは別経路、CLAUDE.md #27) ---
     "voice_enabled": False,               # 総元栓。False ならどのカテゴリも喋らない
-    "voice_volume": 70,                   # 0-100。sentinel_voice PCM 自身の
-                                           # softvol コントロール ("SentinelVoice")
-                                           # を操作する。numid=1 (PCM Playback
-                                           # Volume、bluetooth.py の
-                                           # _apply_volume() が使うコントロール)
-                                           # とは別物 (CLAUDE.md #31)
-    "voice_duck_percent": 35,             # dmix で音楽とアナウンスを重ねて鳴らす
-                                           # とき (CLAUDE.md #31)、アナウンス中は
-                                           # 音楽の音量をこの割合まで一時的に
+    "voice_volume": 70,                   # 0-100。TTS/効果音が書き出す WAV の
+                                           # サンプルを Python 側で直接スケール
+                                           # する (voice._scale_wav())。ALSA の
+                                           # ミキサー/softvol は一切経由しない
+    "voice_duck_percent": 35,             # 音楽とアナウンスを重ねて鳴らすとき、
+                                           # アナウンス中は音楽の音量をこの割合まで一時的に
                                            # 下げる (100 = 下げない)。mpg123 の
                                            # ソフトウェアボリューム (V コマンド、
                                            # 即座に反映される) だけを動かすので

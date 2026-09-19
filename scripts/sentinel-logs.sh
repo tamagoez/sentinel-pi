@@ -45,7 +45,7 @@ hdr "services"
 for u in sentinel.service sentinel-guardian.timer sentinel-lockstep-sync.service \
          bluetooth.service hciuart.service hostapd.service adguardhome.service \
          sentinel-bluealsa.service sentinel-bluealsa-aplay.service \
-         sentinel-bt-agent.service sentinel-autoupdate.timer; do
+         sentinel-autoupdate.timer; do
   systemctl list-unit-files "$u" >/dev/null 2>&1 || continue
   state=$(systemctl is-active "$u" 2>/dev/null)
   [[ -n "$state" ]] || state="unknown"
@@ -114,46 +114,24 @@ if [[ -n "$CARD" ]]; then
     kv "numid=$n $nm" "$(grep -m1 -oE ': values=[^ ]+' <<<"$info" | cut -d= -f2) $(grep -m1 -oE 'min=-?[0-9]+,max=-?[0-9]+' <<<"$info")"
   done
 fi
-kv "asound.conf card" "$(grep -oE 'pcm "hw:[0-9]+,0"' /etc/asound.conf 2>/dev/null | head -n1 | grep -oE '[0-9]+' | head -n1 || echo 'no /etc/asound.conf')"
-kv "asound.conf EQ" "$(grep -q 'type ladspa' /etc/asound.conf 2>/dev/null && echo 'on (ladspa/mbeq)' || echo off)"
-
-# "Listed in aplay -L" only means asound.conf parses. dmix opens its slave
-# (hw:N,0) lazily, so a PCM can be listed and still refuse every open -
-# and in that state music and voice announcements are both silent with no
-# error anywhere. Test the real thing (CLAUDE.md #8); /dev/zero is digital
-# silence, so nothing is audible. Skipped in the default run because each
-# test costs a second - `sentinel-logs <hours> full` includes it.
+# There is no /etc/asound.conf to inspect any more - music, voice
+# announcements and bluealsa-aplay all target sysdefault:CARD=<N> directly
+# (alsa-lib's own per-card dmix route), so the only thing left to check is
+# whether that device actually opens. Skipped in the default run because
+# the test costs a second - `sentinel-logs <hours> full` includes it.
 if [[ "$FULL" == "full" ]]; then
-  for dev in sentinel_music sentinel_voice "hw:${CARD:-0},0"; do
-    if timeout 6 aplay -D "$dev" -f S16_LE -r 44100 -c 2 -d 1 -q /dev/zero >/dev/null 2>&1; then
-      kv "open $dev" "ok"
-    else
-      kv "open $dev" "FAILS: $(timeout 6 aplay -D "$dev" -f S16_LE -r 44100 -c 2 -d 1 /dev/zero 2>&1 | tail -n1)"
-    fi
-  done
+  if timeout 6 aplay -D "sysdefault:CARD=${CARD:-0}" -f S16_LE -r 44100 -c 2 -d 1 -q /dev/zero >/dev/null 2>&1; then
+    kv "open sysdefault:CARD=${CARD:-0}" "ok"
+  else
+    kv "open sysdefault:CARD=${CARD:-0}" "FAILS: $(timeout 6 aplay -D "sysdefault:CARD=${CARD:-0}" -f S16_LE -r 44100 -c 2 -d 1 /dev/zero 2>&1 | tail -n1)"
+  fi
   holders=$(fuser -v /dev/snd/* 2>&1 | tail -n +2 | tr -s ' ' | paste -sd' ' -)
   [[ -n "$holders" ]] && kv "/dev/snd holders" "$holders"
 else
-  kv "sentinel_music PCM" "$(aplay -L 2>/dev/null | grep -qx sentinel_music && echo 'defined (run: sentinel-logs 2 full  to test it opens)' || echo MISSING)"
+  kv "sysdefault:CARD=${CARD:-0}" "(run: sentinel-logs 2 full  to test it opens)"
 fi
 MPG123_CMD=$(pgrep -a mpg123 2>/dev/null | head -n1)
 kv "mpg123" "$(cut -c1-120 <<<"${MPG123_CMD:-not running}")"
-# mpg123 -a plughw:N,0 means it is holding the hardware device directly,
-# bypassing dmix entirely. That is not just "mixing is off" - as long as
-# mpg123 keeps that device open, dmix can never open the SAME device as
-# its own slave, so every open attempt against sentinel_music/sentinel_voice
-# fails for as long as mpg123 stays on this fallback (confirmed on real
-# hardware: the failure was "aplay: pcm_write: write error: Interrupted
-# system call" from aplay's open() blocking on the busy device until its
-# own `timeout` wrapper killed it - a symptom that gave no hint of the
-# actual cause without seeing this line). music.py's own loop() now
-# retries sentinel_music periodically while stuck here (CLAUDE.md #67),
-# but if this keeps showing plughw for more than ~10 minutes at a stretch,
-# something is preventing that recovery - say so plainly rather than
-# leaving the reader to guess from the raw command line.
-if [[ "$MPG123_CMD" == *"-a plughw:"* ]]; then
-  kv "  mpg123 output" "bypassing dmix (direct hw) - THIS is what makes sentinel_music/sentinel_voice fail to open below, not a broken asound.conf"
-fi
 
 hdr "tailscale"
 if command -v tailscale >/dev/null 2>&1; then
@@ -248,23 +226,14 @@ if journalctl -n1 --no-pager >/dev/null 2>&1; then
   digest "guardian"         journalctl -t sentinel-guardian --since "$SINCE" -o short-iso --no-pager
   digest "lockstep sync"    journalctl -u sentinel-lockstep-sync --since "$SINCE" -o short-iso --no-pager
   digest "bluetooth"        journalctl -u bluetooth -u sentinel-bluealsa -u sentinel-bluealsa-aplay \
-                                       -u sentinel-bt-agent --since "$SINCE" -o short-iso --no-pager
+                                       --since "$SINCE" -o short-iso --no-pager
   digest "system (errors)"  journalctl -p err --since "$SINCE" -o short-iso --no-pager
 
-  # sentinel-bt-agent.service echoes the raw bluetoothctl transcript
-  # (Confirm passkey/Authorize service prompts, the "yes" this project
-  # sends back per CLAUDE.md #64, Connected/Paired/trust lines) to its own
-  # stdout. None of that matches the digest() filter above - it has no
-  # ERR/Failed/etc keyword even when it is exactly the evidence a pairing
-  # report needs - so a failed pairing attempt left zero trace here before
-  # this. Unlike the noisy restart-loop units above, this one is naturally
-  # low-volume (only fires during an actual pairing attempt), so print its
-  # recent lines unfiltered rather than trying to guess which ones matter.
-  BT_TAIL=$(journalctl -u sentinel-bt-agent --since "$SINCE" -o cat --no-pager 2>/dev/null | tail -n 40)
-  if [[ -n "$BT_TAIL" ]]; then
-    hdr "pairing agent transcript (sentinel-bt-agent, last 40 lines)"
-    sed 's/^/  /' <<<"$BT_TAIL"
-  fi
+  # The pairing agent (modules/bt_agent.py, "sentinel.bt_agent" logger) now
+  # runs inside sentinel.service and logs through the same Python logging
+  # setup as everything else in the app, so its lines are already covered
+  # by the "sentinel (app)" digest above - there is no separate unit or
+  # transcript to extract any more.
 else
   hdr "journal"
   echo "  cannot read the journal as $(id -un) - re-run with: sudo sentinel-logs $HOURS"
@@ -280,7 +249,7 @@ if journalctl -n1 --no-pager >/dev/null 2>&1; then
   BROKEN=""
   for u in sentinel.service sentinel-lockstep-sync.service bluetooth.service hciuart.service \
            hostapd.service adguardhome.service sentinel-bluealsa.service \
-           sentinel-bluealsa-aplay.service sentinel-bt-agent.service; do
+           sentinel-bluealsa-aplay.service; do
     systemctl list-unit-files "$u" >/dev/null 2>&1 || continue
     st=$(systemctl is-active "$u" 2>/dev/null)
     [[ "$st" == "failed" || "$st" == "activating" ]] || continue

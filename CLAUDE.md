@@ -2896,6 +2896,240 @@ system call`/`Aborted by signal Terminated` で失敗している、という
 `speak_test_time()` の両方が同じ `_fmt()`/`_CATEGORY_KEYS["time"]` を
 参照する) で保つためです。
 
+### 72. 音声ミキシングと Bluetooth ペアリングを抜本的に作り直した (段階的パッチの限界)
+
+#31 から #70 まで、音声ミキシング (asound.conf + LADSPA EQ + 名前付き
+PCM) と Bluetooth ペアリング (bluetoothctl のテキストスクレイピング) は
+何度も「実機の症状 1 つを直す」パッチを重ねてきました。しかし利用者から
+「小手先の変更では無理なようです。現在導入しているパッケージに縛られず
+Web で調べ直し、抜本的な変更を厭わないでください」という報告があり、
+決定的な手がかりが 2 つ示されました。
+
+1. **`bluealsa-aplay --pcm=default` (`systemd/sentinel-bluealsa-aplay.
+   service`、このプロジェクトが一度も書き換えていない既定の引数) は、
+   このプロジェクトが `/etc/asound.conf` に `pcm.!default`/`ctl.!default`
+   を独自定義するまで、それだけで問題なく動いていました。** 利用者が
+   「昔 bluealsa-aplay を使っていた頃は PIN 無しで普通に運用できた」と
+   証言したのはこのことで、"default" という ALSA の既定デバイス自体は
+   何も壊れていません。壊していたのはこちらが `pcm.!default` を独自の
+   (壊れやすい) dmix チェーンへ強制的に向け変えていたことでした。
+2. **mpg123 を 2 つ同時に起動してみたところ、何の設定もせずそのまま
+   重なって鳴りました。** これは alsa-lib が全カードに対して自動生成
+   する `sysdefault:CARD=<N>` という per-card dmix ルートが最初から
+   存在するためです (alsa-lib 1.0.9 以降、ハードウェアミキシング非対応
+   カードには標準で用意される — [alsa.opensrc.org/Dmix](https://alsa.opensrc.org/Dmix))。
+   bcm2835 の素の `dmix:CARD=...` には既知のハングバグがありますが、
+   `sysdefault` はまさにその回避策として Raspberry Pi フォーラムで案内
+   されている経路です
+   ([forums.raspberrypi.com](https://www.raspberrypi.org/forums/viewtopic.php?t=262071))。
+
+つまり `sentinel-setup-audio-mixing.sh` が書いていた `/etc/asound.conf`
+(#31) は、**最初から存在した、設定ファイル不要の仕組みを、わざわざ
+壊れやすい手書きの代替に置き換えていた**ということです。#32 のイコラ
+イザー (LADSPA/mbeq)・#35〜#70 にわたる数々の「asound.conf が壊れた/
+ズレた/再生成されない」系の不具合は、すべてこの不要な複雑さから生まれて
+いました。以下、抜本的に作り直した箇所です。
+
+**音声出力: `sysdefault:CARD=<N>` に統一し、`/etc/asound.conf` を廃止**
+
+- `core/audio.py` に `analog_device(card=None)` を追加。
+  `find_output_card()` (Headphones → bcm2835 → 先頭のカードという優先
+  順位、CLAUDE.md #37。ここは変更なし) で見つけたカードから
+  `sysdefault:CARD=<N>` を組み立てるだけです。
+- `music.py`・`voice.py`・`scripts/sentinel-fix-audio-output.sh` の
+  すべてがこれを使います。`sentinel-guardian.sh` の `check_audio()` は
+  今までどおり `sentinel-fix-audio-output.sh` (`--print-card` を新設、
+  install.sh がカード検出を再利用するため) へ委譲するだけです。
+- **`scripts/sentinel-setup-audio-mixing.sh` を削除しました。** これに
+  伴い `/etc/sudoers.d/sentinel` からもこのスクリプト用の行を削除して
+  います — 書き込むべき root 専用ファイルがそもそも無くなったため、
+  sudo 経由の権限昇格ルート自体が 1 つ減りました。
+- `sentinel-fix-audio-output.sh` は asound.conf の再構成ロジックを丸ごと
+  削除し、「numid=1 の床値解除」「numid=3 のルート復元」
+  「`sysdefault:CARD=<N>` が実際に開くかの確認 + 開かなければ ALSA
+  ドライバの再読み込み」だけの、ずっと短いスクリプトになりました。
+  設定ファイルが存在しない以上、そもそも「ズレて壊れる」という不具合の
+  クラス自体が発生し得ません。
+- **`systemd/sentinel-bluealsa-aplay.service` は `--pcm=default` から
+  `--pcm=sysdefault:CARD=<N>` (install.sh が実際のカードで sed 置換) へ
+  変更しました。** 素の `default` に戻すだけでも動作はしたはずですが
+  (#1 の発見のとおり)、alsa-lib 自身のカード選択が HDMI と Headphones の
+  どちらを優先するかは機体依存で確認しようがなく、CLAUDE.md #37 が
+  まさに警告している曖昧さです。`music.py`/`voice.py` と全く同じ
+  `sysdefault:CARD=<N>` を明示することで、この 3 つの音声プロデューサー
+  すべてが同じ理由で同じデバイスへ書き込む、という一貫した設計にして
+  います。**この明示を外して `--pcm=default` に戻さないでください** —
+  多カード機で HDMI を掴む曖昧さが復活します。
+
+**イコライザー: mpg123 自身のリアルタイム EQ を直接叩く。LADSPA を廃止**
+
+mpg123 の `-R` リモートプロトコルには元から `E <channel> <band>
+<gain>` という実時間イコライザーコマンドがあります (`doc/README.remote`
+に明記 — 32 サブバンド、既定ゲイン 1.00、"values work best between
+0.00 and 3.00")。**再生中に送るだけで即座に反映され、mpg123 の再起動も
+外部設定ファイルも一切要りません。**
+
+`music.py` の EQ 実装をまるごと置き換えました。
+
+- `_eq_subband_gains()` が、UI の 15 バンド (Hz ラベル、既存のまま) の
+  dB 値を、44.1kHz を基準にした Nyquist 比から最寄りのサブバンド
+  (0-31) へ写像し、`10**(dB/20)` で線形ゲインへ変換、実用域
+  `[0.0, 3.0]` へクランプします。
+- `Player._apply_eq(track_name)` が、曲を読み込むたび (`play()`)、また
+  設定タブで EQ を変更した直後 (`refresh_eq()`) に、この 32 バンドを
+  `E 3 <band> <gain>` として mpg123 へ直接送ります。前回送った値と同じ
+  なら何もしません (無駄な 32 行の送信を避けるだけの軽いメモで、
+  #32/#35 のような「再構成に失敗したら何もかも壊れる」類のクールダウン
+  機構ではありません — 送信自体が失敗する余地がほぼ無いため)。
+- **削除したもの**: `_apply_audio_mixing()`・`_asound_card()`・
+  `_asound_eq_on()`・`_last_applied_eq`・`_eq_sync_failed_at`・
+  `_last_effective_eq`・`_EQ_RETRY_COOLDOWN_SEC`・EQ 変更のたびに
+  mpg123 を "S"+"Q" で落として再起動していたロジック全体。これらは
+  すべて「asound.conf を書き換えて mpg123 を作り直す」という、もう
+  存在しない手順のためだけに存在していました。
+- UI のバンド範囲を ±20dB から ±12dB へ絞りました
+  (`music._EQ_DB_RANGE`)。mpg123 の実用域 (線形 0.00-3.00 ≈
+  -∞〜+9.5dB) に合わせた値で、それを超えた値は「動かしても実際には
+  頭打ちで変わらない」という誤解を招くだけだったためです。
+- `music.py` の `loop()` から、#67/#70 で追加した「mpg123 が
+  `plughw:` フォールバックに留まっていないか定期的に再確認する」
+  ロジック (`_MIX_RECHECK_BASE`/`last_mix_recheck`/
+  `_mix_recheck_backoff`) をまるごと削除しました。`sysdefault:CARD=<N>`
+  は設定ファイルに依存しないため、mpg123 が「フォールバック経路に
+  留まる」という状態自体が発生し得ません。
+
+**音楽と音声アナウンスの重ね合わせ: sysdefault が構造的に保証する**
+
+以前は `sentinel_music`/`sentinel_voice` という名前付き PCM が実際に
+開けるかどうかで「重ねて鳴らせるか、曲を完全に止めるしかないか」を毎回
+判定していました (`_mixing_ready()`)。`sysdefault:CARD=<N>` は
+alsa-lib 自身が常に用意するため、この判定・この二重の経路そのものが
+不要になりました。
+
+- `music.py` から `duck_for_voice()`/`resume_from_voice()` (曲を完全に
+  停止する旧経路) を削除しました。`duck_volume_for_voice()`/
+  `resume_volume_after_voice()` (音量だけ一時的に下げる、mpg123 の
+  `V` コマンドのみを使う軽い経路) だけが残ります。
+- `voice.py` から `_mixing_ready()`・`_fallback_device()`・
+  `_sound_card()` を削除し、`_device()` 1 本 (`audio.analog_device()`
+  を返すだけ) にまとめました。`speak_test()`・`speak_test_time()`・
+  `loop()` はどれも「重ねられるか」の分岐が無くなり、常に
+  `duck_volume_for_voice()` を使います。
+- **Bluetooth 接続中のアナウンススキップは残しています。** これはもう
+  技術的な制約ではありません — `bluealsa-aplay` も同じ
+  `sysdefault:CARD=<N>` を使うため、原理的には重ねて鳴らせます。
+  「電話でストリーミング中の音楽に日本語の時報が混ざる」体験を避ける
+  ための、意図した仕様上の選択として残しています。
+
+**音量制御: numid=1 の奪い合いをやめ、ストリームごとに独立させる**
+
+以前は「音楽 (mpg123 の V コマンド、ソフトウェア側)」「音声アナウンス
+(`SentinelVoice` という専用の ALSA softvol コントロール)」
+「Bluetooth (numid=1、bcm2835 の共有ハードウェアレジスタ)」という
+3 つの異なる仕組みが同居していました。numid=1 は音楽・Bluetooth・
+この Pi の出力全体で共有される 1 つのレジスタで、#15/#31/#41 が繰り
+返し「numid=1 と numid=3 を混同するな」「他の音量を意図せず動かすな」
+と警告してきたのはまさにこの共有状態が原因でした。
+
+- **音声アナウンス**: `voice._scale_wav()` が、open_jtalk/espeak-ng が
+  書き出す WAV のサンプルそのものを Python 側で直接スケールします
+  (標準ライブラリの `wave`/`array` のみ、非推奨化された `audioop` には
+  依存しません)。ALSA のミキサー/softvol を一切経由しないため、
+  `SentinelVoice` コントロールも、それを書き込むための root 権限も
+  不要になりました。`voice_chime_path` が `.mp3` を指す場合は mpg123
+  自身の `-f <スケール>` (既定 32768=1.0 倍) を使い、同じ「ツール自身の
+  機能で完結させる」方針を踏襲しています。
+- **Bluetooth**: `bluetooth._apply_volume()` は numid=1 の代わりに
+  `bluealsa-cli` (bluez-alsa-utils に同梱、新規パッケージ不要) を使い
+  ます。まず `bluealsa-cli soft-volume <PCM パス> on` でその接続だけの
+  ソフトウェア音量を有効化し (既定では相手端末の AVRCP 絶対音量に
+  委譲されており、こちらからの書き込みが効かないことがあるため)、
+  続けて `bluealsa-cli volume <PCM パス> <0-127>` で直接設定します。
+  PCM パスは `/org/bluealsa/hci0/dev_<MAC>/a2dpsnk` という決まった
+  形式で組み立てられます (この Pi はアダプタが 1 つだけという前提、
+  `bluetooth.set_alias()` の `/org/bluez/hci0/...` と同じ前提)。
+  amixer も numid も一切登場しません。
+- 音楽 (mpg123 の `V` コマンド) は変更していません — これは元々
+  numid=1 を経由していなかったので、混同の当事者ではありませんでした。
+- 3 つの音量がそれぞれ完全に独立した経路になったため、numid=1 は
+  もう「この機体全体の物理的な音量つまみ」としてだけ存在します。
+  `sentinel-fix-audio-output.sh` はこれが床値 (無音) に張り付いていない
+  かだけを確認し続けます — 誰も per-stream の目的でこれを書き込まない
+  ため、#15/#31/#41 のような混同はもう起こり得ません。
+
+**Bluetooth ペアリング: `bluetoothctl` のテキストスクレイピングをやめ、
+D-Bus の Agent1 を直接実装する**
+
+#16/#64/#66/#69 の `scripts/sentinel-bt-agent.sh` は、`bluetoothctl` を
+bash の `coproc` として動かし、その標準出力をパースして「ペアリングは
+成功したらしい」と推測する方式でした。これは本質的に脆い設計です —
+`bluetoothctl` はインタラクティブな CLI ツールであり、確実な IPC 手段
+として作られていません。#69 で実機ログから確認した
+`"Failed to register agent object"` → `"No agent is registered"` は、
+`bluetoothctl` 自身の D-Bus 接続がまだ確立し切っていない一瞬にコマンドを
+送ってしまうという、この方式が原理的に抱える弱点の表れでした。
+
+新設した `modules/bt_agent.py` が `org.bluez.Agent1` を D-Bus オブジェ
+クトとして直接エクスポートし、`org.bluez.AgentManager1.RegisterAgent()`
+/ `RequestDefaultAgent()` を実際に呼び出します。これらは同期的な D-Bus
+呼び出しなので、成功したかどうかはその場で例外の有無から確実に分かり
+ます — テキスト出力を監視して「それらしい行が来るまで待つ」という
+推測が一切不要になりました。
+
+- 依存は `dbus-next` (pure Python、asyncio ネイティブ、zero-dependency、
+  `install.sh` の venv へ pip install) を使います。`python-dbus` +
+  PyGObject の GLib メインループという定石ではなく、このプロジェクト
+  自身が既に asyncio ベース (`core.supervisor.SUPERVISOR`) であるため、
+  同じイベントループに乗る実装の方が一貫性があります。
+- `main.py` が `SUPERVISOR.spawn("bt-agent", bt_agent.loop)` で通常の
+  モジュールと同じパターンで起動します。**独立した systemd サービス
+  ではありません** — `scripts/sentinel-bt-agent.sh` と
+  `systemd/sentinel-bt-agent.service` は削除し、`install.sh` は
+  旧バージョンからのアップグレード時にこのユニットが残っていれば
+  無効化・削除します (新しい agent と D-Bus の default-agent 枠を
+  取り合うことになるため)。
+  `sentinel-guardian.sh`/`sentinel-logs.sh`/`sentinel-diagnose.sh` から
+  もこのユニット名への参照をすべて外しました — agent のログは
+  `sentinel.service` 自身の journal (`sentinel.bt_agent` logger) に
+  そのまま流れるため、専用の抽出ロジックも不要になりました。
+- バス切断の検出には `bus.wait_for_disconnect()` を使います (bluetoothd
+  の再起動などで接続が切れたことを確実に検知する dbus-next の
+  API) — `asyncio.sleep()` でただ待つだけの実装だと、切断されても
+  次に何か送信しようとするまで気付けません。切断を検知したら
+  `loop()` の外側のリトライ (指数バックオフ、上限 60 秒) が再接続・
+  再登録します。
+- 端末の自動 trust (旧 #16 の「Authorize service を毎回聞かれると
+  接続が確立直後に切れる」対策) は、起動時の一括 trust
+  (`_trust_known_devices()`) と、`InterfacesAdded` シグナル購読による
+  新規端末の即時 trust (`_watch_new_devices()`) の両方を D-Bus の
+  プロパティ書き込みとして直接行います — `bluetoothctl trust <MAC>`
+  のサブプロセス呼び出しはもう経由しません。
+- `dbus-next` が見つからない環境 (venv の再構築が必要な場合など) では
+  警告を出して何もしない、という段階的劣化にしています —
+  このプロジェクト全体の「壊れても他の機能は道連れにしない」方針
+  (Open JTalk→espeak-ng、LADSPA EQ→off、dmix→direct-hw と同じ考え方)
+  を踏襲しています。
+- `bluetooth.py` 自身 (接続検知・音量・エイリアス変更) は
+  `bluetoothctl` ベースのままです。単純な状態の読み取り・書き込みには
+  この方式で十分で、agent 登録のようなタイミング競合の問題を抱えて
+  いなかったため、変更する理由がありませんでした。
+
+**この節が置き換えるもの**: #31/#32/#35 (旧 dmix + LADSPA EQ の導入)、
+#37 の一部 (find_output_card() 自体は変更なし、使い先が変わっただけ)、
+#41 の音声関連部分、#46 の EQ_ACTIVE 関連部分、#57 (asound.conf の
+指数バックオフ再試行)、#65 (`sentinel_voice` の対称検証)、#67/#70
+(mpg123/dmix デッドロックとその再確認ループ) は、いずれも**もう存在
+しないコードの説明**です。#16/#64/#66/#69 (Bluetooth ペアリングの
+一連の対策) も同様に、`sentinel-bt-agent.sh` という**もう存在しない
+スクリプト**についての記録です。これらの節を削除はしていません —
+「何を試して、なぜそれでも直らなかったか」という記録には価値がある
+ため、今後の判断のために残します。ただし**今のコードを理解するには
+この #72 を読んでください** — 古い節に書かれている `asound.conf`・
+`sentinel_music`・`sentinel_voice`・`SentinelVoice`・
+`sentinel-bt-agent.sh`・LADSPA・numid=1 の音楽/Bluetooth 用途は、
+すべてこの節で置き換えられた設計です。**これらの節の記述を信じて
+古い実装へ戻さないでください。**
+
 ## モジュール構成
 
 各モジュールは疎結合で、`core/state.py` の `MODE` を購読するだけです。
@@ -2912,14 +3146,16 @@ scripts/sentinel-fix-storage-owner.sh
 scripts/sentinel-fix-audio-output.sh
                     「再生中と表示されるのに無音」を直す。共有ハード
                     ウェア音量 (numid=1) が最下端 = 消音なら戻し、出力
-                    ルート (numid=3) を AUX に固定し、asound.conf の
-                    dmix スレーブ (hw:N,0) が実際のアナログ出力カードと
-                    一致しているかを確認する。find_output_card() の
-                    bash 版はここ 1 本だけ (Guardian の check_audio() は
-                    このスクリプトへ委譲する、CLAUDE.md #41)。
-                    sentinel_music と sentinel_voice を対称に、それぞれ
-                    独立した検証・修復区間・再試行バックオフキーで
-                    実際に開けるか試す (CLAUDE.md #65)
+                    ルート (numid=3) を AUX に固定し、
+                    `sysdefault:CARD=<N>` (core/audio.analog_device()、
+                    CLAUDE.md #72) が実際に開くかを確認して、開かなければ
+                    ALSA ドライバを再読み込みする。設定ファイルは一切
+                    書かない (書くものが存在しない)。find_output_card()
+                    の bash 版はここ 1 本だけ (Guardian の check_audio()
+                    はこのスクリプトへ委譲する、CLAUDE.md #41)。
+                    `--print-card` で検出したカード番号だけを出力する
+                    モードもあり、install.sh がこれを使って
+                    bluealsa-aplay のユニットへ同じカードを渡す
 scripts/sentinel-logs.sh
                     `sentinel-logs [時間] [full]` (/usr/local/bin/sentinel-logs)。
                     貼り付け用に「今おかしい所」だけを短く出す。同じ
@@ -2929,11 +3165,10 @@ scripts/sentinel-logs.sh
                     なる)。冒頭にサービス・ストレージ・音声・ポートの状態
                     ブロックを置き、数字に文脈を与える。tar.gz を作る
                     sentinel-diagnose とは用途が別 (CLAUDE.md #42)。
-                    mpg123 が plughw:N,0 (dmix を経由しない直接出力) を
-                    掴んでいる場合はその旨を明示し (CLAUDE.md #67)、
-                    sentinel-bt-agent のペアリング生ログ (Confirm
-                    passkey・trust 等) を直近 40 行そのまま出す
-                    (CLAUDE.md #64/#67 の切り分け用)
+                    Bluetooth ペアリングエージェント (modules/bt_agent.py)
+                    は sentinel.service の中で動くため、専用の journal
+                    抽出は無く「sentinel (app)」の digest にそのまま
+                    含まれる (CLAUDE.md #72)
 scripts/sentinel-adguard-8083.sh
                     AdGuard Home の :8083 への直接アクセスを一時的に
                     有効化 / 恒久的に無効化する (人が手動で実行する)
@@ -2962,32 +3197,12 @@ scripts/sentinel-set-hotspot-ssid.sh
                     /etc/hostapd/hostapd.conf は root しか書き込めないため
                     sudoers で個別に許可し、modules/hotspot.py が sudo 経由
                     で呼ぶ (sentinel-set-governor.sh と同じパターン)
-scripts/sentinel-bt-agent.sh
-                    sentinel-bt-agent.service から起動される、永続的な
-                    ペアリングエージェント。bt-agent (bluez-tools) の
-                    NoInputNoOutput リグレッションを避けるため bluetoothctl
-                    を直接駆動する (CLAUDE.md #16)。Pi 側の agent 自身に
-                    "Confirm passkey ... (yes/no)" 等が飛んできた場合は
-                    無条件で yes を返す (CLAUDE.md #64)。register_agent()
-                    が "agent NoInputNoOutput" を "Agent registered" の
-                    確認が取れるまで最大 10 回再試行してから
-                    default-agent を送る — bluetoothctl 起動直後は自身の
-                    D-Bus 接続がまだ確立し切っていないことがある
-                    (CLAUDE.md #69)
 scripts/sentinel-autoupdate.sh
                     sentinel-autoupdate.timer (30 分ごと) から起動される。
                     git clone の場所を install.sh/update.sh が書き出す
                     /var/lib/sentinel/repo-path から読み、git fetch して
                     リモートに新しいコミットがあれば update.sh を自動で
                     実行する (CLAUDE.md #26)
-scripts/sentinel-setup-audio-mixing.sh
-                    /etc/asound.conf を書く。音楽 (sentinel_music) と
-                    音声アナウンス (sentinel_voice) を ALSA の dmix で
-                    同時に重ねて鳴らせるようにし、イコライザー有効時は
-                    LADSPA (mbeq) 段を挟む。root しか書き込めないため
-                    sudoers で個別に許可し、modules/music.py が sudo 経由
-                    で呼ぶ (sentinel-set-governor.sh と同じパターン、
-                    CLAUDE.md #31/#32)
 
 core/config.py      設定の唯一の保管場所。型と範囲を強制する
 core/state.py       モード状態機械。「今どのモードか」の唯一の決定者
@@ -2996,12 +3211,12 @@ core/audio.py       ALSA のアナログ出力カード (3.5mm) を特定する
                     find_output_card()。aplay -l の最初のカードを無条件
                     で使うと機体によって HDMI を掴むため、"Headphones"
                     優先 → "bcm2835" → 最初のカードの順で探す。
-                    music.py/bluetooth.py/voice.py が共通で使う
-                    (CLAUDE.md #37)。pcm_opens() は
-                    named PCM (sentinel_music など) が実際に開けるかを
-                    /dev/zero の 1 秒再生で試す — aplay -L の一覧に
-                    あるかどうかでは「定義が書いてある」ことしか
-                    分からない (CLAUDE.md #46)
+                    analog_device() がそこから sysdefault:CARD=<N>
+                    (alsa-lib 自身の per-card dmix ルート、設定ファイル
+                    不要) を組み立てる — music.py/bluetooth.py/voice.py
+                    が共通で使う (CLAUDE.md #37/#72)。pcm_opens() は
+                    ALSA デバイス名が実際に開けるかを /dev/zero の 1 秒
+                    再生で試す (CLAUDE.md #46)
 
 modules/camera.py       カメラ (別プロセス)。動体検知 -> MODE.report_motion()
                          個別カメラの上書き設定は config の camera_overrides
@@ -3028,21 +3243,20 @@ modules/camera.py       カメラ (別プロセス)。動体検知 -> MODE.repor
                          (実際の再起動は maintenance.emergency_reboot() に
                          委譲、CLAUDE.md #22/#60)
 modules/music.py        mpg123 制御、位置復帰、yt-dlp キュー。alsa_device が
-                         空なら sentinel_music (dmix 経由、CLAUDE.md #31) を
-                         使う。イコライザー (music_eq_enabled/music_eq_bands/
-                         music_eq_track_overrides) は Player._sync_eq() が
-                         曲の実効設定が前回と変わったときだけ asound.conf を
-                         再構成して mpg123 を再起動する (CLAUDE.md #32)。
-                         _sync_eq() が失敗した適用は _EQ_RETRY_COOLDOWN_SEC
-                         (既定60秒) が経つまで再試行しない — mpg123 停止
-                         からの自己修復ループ (5秒おき) が失敗し続ける限り
-                         毎回この重い sudo 呼び出しを踏んで復帰できなくなる
-                         のを防ぐため (CLAUDE.md #35)。mpg123 プロセスを
-                         意図して落とす (_sync_eq() の再構成、stop()) 前には
-                         必ず _gen を進める。_read_loop() は自分が読んで
-                         いるプロセスの世代を固定引数で持ち、@P 0 などを
-                         処理する前に現在の _gen と一致するか確認してから
-                         でないと _advance_and_play() を呼ばない — 世代が
+                         空なら core/audio.analog_device() (sysdefault:
+                         CARD=<N>) を使う (CLAUDE.md #72)。イコライザー
+                         (music_eq_enabled/music_eq_bands/
+                         music_eq_track_overrides) は mpg123 自身のリモート
+                         EQ コマンド (`E <ch> <band> <gain>`、32 サブバンド)
+                         を Player._apply_eq() が直接送る — 再生中に即座に
+                         反映され、mpg123 の再起動も外部設定ファイルも
+                         不要 (CLAUDE.md #72、旧 #32/#35 の LADSPA 実装を
+                         置き換え)。mpg123 プロセスを意図して落とす
+                         (eco/Bluetooth/voice の退避、stop()) 前には必ず
+                         _gen を進める。_read_loop() は自分が読んでいる
+                         プロセスの世代を固定引数で持ち、@P 0 などを処理
+                         する前に現在の _gen と一致するか確認してからで
+                         ないと _advance_and_play() を呼ばない — 世代が
                          古ければ suspended_by の値に関わらず無視する
                          (CLAUDE.md #50)。yt-dlp はプレイリスト URL を
                          そのまま取得でき (--no-playlist を付けない)、
@@ -3051,29 +3265,35 @@ modules/music.py        mpg123 制御、位置復帰、yt-dlp キュー。alsa_d
                          item_count/message) へ反映する (CLAUDE.md #52)。
                          duck_volume_for_voice()/resume_volume_after_voice()
                          は曲を止めずに音量だけ voice_duck_percent の割合
-                         まで一時的に下げる — 曲を完全停止する
-                         duck_for_voice() とは別物 (CLAUDE.md #54)。
+                         まで一時的に下げる (CLAUDE.md #54/#72)。
                          カテゴリー (「勉強用」「休憩用」) は MUSIC_DIR
                          直下のサブフォルダそのもの。music_category_filter
                          で再生対象を絞り込み、move_track()/
                          find_track_path() で曲名からカテゴリーをまたいで
-                         実ファイルを扱う (CLAUDE.md #56)。loop() は
-                         plughw:N,0 フォールバックで生きたまま鳴り続けて
-                         いる間、120 秒おき (指数バックオフ付き、上限 1
-                         時間) に restart_playback() で dmix
-                         (sentinel_music) へ戻れないか試す — mpg123 が hw
-                         を直接掴んだままだと dmix 側が永久に開けないため、
-                         mpg123 を実際に止めないと再評価そのものが成立
-                         しない (CLAUDE.md #67)。この再試行の瞬間、
-                         _eq_sync_failed_at (#35 のクールダウン) も強制的
-                         に解除する — 解除しないと asound.conf がまだ
-                         一度も正しく作られていない機体でクールダウンが
-                         実際の再構成を妨げ続ける (CLAUDE.md #70)
+                         実ファイルを扱う (CLAUDE.md #56)
 modules/thermal.py      温度と CPU -> MODE.report_temperature()
 modules/bluetooth.py    A2DP 接続検知 -> 音楽の退避と復帰。この Pi 自身の
                          表示名 (set_local_name、bluetoothctl system-alias)
                          と相手端末のエイリアス (set_alias、D-Bus 直叩き) は
-                         別物なので混同しないこと
+                         別物なので混同しないこと。端末ごとの音量は
+                         bluealsa-cli (soft-volume を on にしてから
+                         volume を書く、0-127) を使う — numid=1 (共有
+                         ハードウェアレジスタ) はもう触らない (CLAUDE.md
+                         #72)。ペアリングエージェントは modules/bt_agent.py
+                         が別途担当する
+modules/bt_agent.py     Bluetooth ペアリングエージェント (org.bluez.Agent1
+                         を D-Bus に直接エクスポート、dbus-next 使用)。
+                         bluetoothctl のテキストスクレイピングに依存せず、
+                         RegisterAgent()/RequestDefaultAgent() の成否を
+                         同期呼び出しの例外の有無でそのまま判定する。
+                         NoInputNoOutput capability で全メソッドが例外を
+                         投げず正常終了 = 常に承認。InterfacesAdded
+                         シグナルを購読して新規端末を即座に trust し、
+                         起動時には既知端末も一括で trust する。
+                         bus.wait_for_disconnect() でバス切断 (bluetoothd
+                         再起動など) を検知し、外側のループが指数バック
+                         オフで再接続・再登録する。dbus-next が無ければ
+                         警告して何もしない段階的劣化 (CLAUDE.md #72)
 modules/hotspot.py       WiFi ホットスポット SSID の表示・変更
                          (sentinel-set-hotspot-ssid.sh を sudo 経由で呼ぶ)
 modules/terminal.py     pty over WebSocket
@@ -3102,26 +3322,27 @@ modules/maintenance.py  4 時の定時処理と再起動。emergency_reboot() �
 modules/voice.py        Open JTalk 優先/espeak-ng フォールバックの音声
                          アナウンス (時報・エラー・カメラ再起動・その他
                          システムイベント)。mpg123 の音楽ライブラリとは
-                         別経路、sentinel_voice (dmix 経由、ALSA softvol
-                         "SentinelVoice" で音量) を使い曲を止めずに重ねて
-                         鳴らす。重ねる間は voice_duck_percent の設定に
-                         従って music.duck_volume_for_voice() が音楽の
-                         音量だけ一時的に下げる (CLAUDE.md #54)。named PCM
-                         が用意できていないときだけ music.py の
-                         duck_for_voice()/resume_from_voice() (曲を完全
-                         停止) へフォールバックする (CLAUDE.md #27/#31)。
+                         別経路、core/audio.analog_device() (music.py と
+                         同じ sysdefault:CARD=<N>) を使い曲を止めずに
+                         重ねて鳴らす (CLAUDE.md #72)。重ねる間は
+                         voice_duck_percent の設定に従って
+                         music.duck_volume_for_voice() が音楽の音量だけ
+                         一時的に下げる (CLAUDE.md #54)。音量は
+                         _scale_wav() が TTS/効果音の WAV サンプルを
+                         Python 側で直接スケールする — ALSA のミキサー/
+                         softvol は一切経由しない (CLAUDE.md #72)。
                          時報は voice_time_interval_minutes (既定 30 分、
                          60 の約数を推奨) の壁時計境界で鳴る (CLAUDE.md #53)。
                          時報の文面は既定で {minute_part} を使い、0 分の
                          ときは「〜時です」(「〜時0分です」にならない、
-                         CLAUDE.md #58)。voice_chime_enabled が有効かつ
-                         dmix でミキシングできる場合、時報カテゴリだけ
-                         _play_chime() が TTS と並行して短い効果音を鳴らす
-                         (Popen で開始し、finally で回収 - 待ってから
-                         喋り始めない、CLAUDE.md #58)。voice_chime_path
-                         で内蔵の合成音の代わりに任意の .wav/.mp3 を指定
-                         できる (.mp3 は単発 mpg123、.wav は aplay、存在
-                         しなければ合成音へフォールバック、CLAUDE.md #68)。
+                         CLAUDE.md #58)。voice_chime_enabled が有効なら
+                         時報カテゴリだけ _play_chime() が TTS と並行して
+                         短い効果音を鳴らす (Popen で開始し、finally で
+                         回収 - 待ってから喋り始めない、CLAUDE.md #58)。
+                         voice_chime_path で内蔵の合成音の代わりに任意の
+                         .wav/.mp3 を指定できる (.mp3 は単発 mpg123
+                         (音量は -f スケール)、.wav は aplay、存在しなけ
+                         れば合成音へフォールバック、CLAUDE.md #68/#72)。
                          speak_test_time() は time_signal_loop() と同じ
                          組み立て・チャイム条件で、壁時計の境界を待たずに
                          今すぐ 1 回だけテスト再生する (CLAUDE.md #71)

@@ -6,13 +6,13 @@ Raspberry Pi カーネル/DietPi では HDMI 出力ごとに別カード (vc4hdm
 "Headphones") はそのあとの番号になることがある。単純に「aplay -l の
 最初の card 行」を使うと、そのような機体では HDMI カードを掴んでしまう。
 
-実機でこれを踏んだ: sentinel-setup-audio-mixing.sh が dmix の slave を
-固定フォーマット (S16_LE/44100/2ch) の `hw:0,0` で開こうとして
-"unable to open slave" / "Invalid argument" で失敗した。原因は card 0 が
-実際には HDMI 出力で、想定していた bcm2835 のアナログ出力ではなかった
-ため — amixer 系の音量操作 (numid=1/numid=3/SentinelVoice) は間違った
-カードへ静かに書き込むだけで気付きにくいが、dmix はフォーマットを
-literal に要求して開こうとするため、ここで初めて表面化した。
+実機でこれを踏んだ: dmix (`sysdefault:CARD=0`) を固定フォーマット
+(S16_LE/44100/2ch) で開こうとして "unable to open slave" /
+"Invalid argument" で失敗した。原因は card 0 が実際には HDMI 出力で、
+想定していた bcm2835 のアナログ出力ではなかったため — amixer 系の音量
+操作 (numid=1/numid=3) は間違ったカードへ静かに書き込むだけで気付き
+にくいが、dmix はフォーマットを literal に要求して開こうとするため、
+ここで初めて表面化した。
 
 この関数は "Headphones" (現行の Pi OS/DietPi カーネルでの命名) を優先し、
 無ければ旧来の単一カード構成向けに "bcm2835" を探し、それも無ければ
@@ -31,6 +31,37 @@ scripts/sentinel-guardian.sh の check_audio() は Python を呼べない
 from __future__ import annotations
 
 import subprocess
+
+
+def analog_device(card: int | None = None) -> str | None:
+    """`sysdefault:CARD=<N>` for the analog output card - the one ALSA
+    device string every audio producer in this project should target.
+
+    `sysdefault` is alsa-lib's own auto-generated per-card dmix route: it
+    exists for every card with no `/etc/asound.conf` at all, already mixes
+    any number of simultaneous streams (confirmed by testing two `mpg123`
+    processes against it directly - they overlapped and played together
+    with zero configuration), and is the ALSA project's own documented
+    workaround for the bcm2835 driver's plain `dmix:CARD=...` hanging
+    (https://www.raspberrypi.org/forums/viewtopic.php?t=262071). A previous
+    version of this project instead maintained a hand-written
+    `/etc/asound.conf` (`pcm.sentinel_music`/`pcm.sentinel_voice` over a
+    custom `dmix` slave, with a LADSPA EQ stage) that had to be regenerated
+    by a root-only helper script on every card change or EQ setting change,
+    and it also overrode `pcm.!default` - which silently redirected
+    `bluealsa-aplay --pcm=default` (its systemd unit's own argument, never
+    written by this project) onto that same fragile custom chain. That is
+    what broke Bluetooth playback and mixing at the same time, and why
+    reverting to a plain, distro-provided route fixes both at once. See
+    CLAUDE.md's audio-mixing section for the full history.
+
+    **Do not go back to a custom `/etc/asound.conf`** - `sysdefault` needs
+    none, and every prior attempt at hand-writing one produced a new class
+    of "audio.conf drifted from the actual card" bug.
+    """
+    if card is None:
+        card = find_output_card()
+    return f"sysdefault:CARD={card}" if card is not None else None
 
 
 def find_output_card() -> int | None:
@@ -66,18 +97,14 @@ _OPEN_CACHE_TTL = 30.0
 
 
 def pcm_opens(name: str, *, ttl: float = _OPEN_CACHE_TTL) -> tuple[bool, str]:
-    """named PCM (`sentinel_music` など) が **実際に開けるか** を試す。
+    """ALSA デバイス名 (`sysdefault:CARD=<N>` など) が **実際に開けるか**
+    を試す。
 
-    `aplay -L` にその名前が出てくることは「/etc/asound.conf にその定義が
-    書いてある」以上の意味を持たない。dmix はスレーブ (`hw:N,0`) を開いて
-    初めて失敗するため、定義が正しくてもカード番号がズレていたり、他の
-    プロセスがカードを直接掴んでいたりすると `unable to open slave` /
-    `Invalid argument` で開けない。それでも `aplay -L` には出続ける。
-
-    以前の `_mixing_ready()` はこの一覧にあるかどうかだけを見ていたため、
-    **開けないデバイスへ mpg123 と aplay を流し込み、エラーも音も出ない**
-    という状態になっていた (CLAUDE.md #8 の can_write()、#31 の再生テスト
-    と同じ「実物を試す」原則をここだけ守れていなかった)。
+    dmix はスレーブ (`hw:N,0`) を開いて初めて失敗するため、カード番号が
+    ズレていたり、他のプロセスがカードを直接掴んでいたりすると
+    `unable to open slave` / `Invalid argument` で開けないことがある —
+    名前を渡すだけでは分からない。CLAUDE.md #8 の can_write() と同じ
+    「実物を試す」原則をここで守る。
 
     /dev/zero を 0.4 秒だけ流すのでデジタル無音、実際には何も聞こえない。
     毎回の play() で走ると重いので ttl 秒だけ結果をキャッシュする。

@@ -20,7 +20,7 @@ from .core import errors as errors_mod
 from .core import state
 from .core.state import MODE
 from .core.supervisor import SUPERVISOR
-from .modules import bluetooth, camera, maintenance, music, netlog, notify, terminal, thermal, voice
+from .modules import bluetooth, bt_agent, camera, maintenance, music, netlog, notify, terminal, thermal, voice
 from .web import routes
 
 
@@ -73,6 +73,7 @@ async def lifespan(app: FastAPI):
     SUPERVISOR.spawn("music", music.loop)
     SUPERVISOR.spawn("music-download", music.download_loop)
     SUPERVISOR.spawn("bluetooth", bluetooth.loop)
+    SUPERVISOR.spawn("bt-agent", bt_agent.loop)
     SUPERVISOR.spawn("netlog", netlog.loop)
     SUPERVISOR.spawn("notify-send", notify.sender_loop)
     SUPERVISOR.spawn("notify-summary", notify.summary_loop)
