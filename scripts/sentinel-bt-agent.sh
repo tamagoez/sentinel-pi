@@ -40,6 +40,15 @@
 #
 # This needs no extra package: bluetoothctl is part of bluez, already a
 # hard dependency (CLAUDE.md "依存を増やさない").
+#
+# Trusting devices was still not enough for every report: some pairing
+# attempts show a PIN/passkey confirmation on the remote device that, when
+# dismissed instead of confirmed, ends in "could not pair" - and separately,
+# bluetoothctl's agent can itself receive a "Confirm passkey NNNNNN
+# (yes/no):" (or similar) prompt on its own stdin that nothing was ever
+# answering, leaving the Pi side silently stuck while the remote device's
+# own confirmation screen times out. The read loop below now answers any
+# "(yes/no)" prompt with "yes" unconditionally (CLAUDE.md #64).
 set -uo pipefail
 
 coproc BTCTL { bluetoothctl; }
@@ -61,10 +70,32 @@ done
 # bluetoothctl 自身のイベント出力 ("[CHG] Device XX:.. Connected: yes" 等)
 # を監視し、端末が現れた瞬間に trust を打ち返す。journalctl にもそのまま
 # 出力を残し、切り分けに使えるようにする。
+#
+# NoInputNoOutput の capability はあくまで「こちら側の agent が確認を
+# 求められたときに何を答えるか」の申告でしかなく、ネゴシエーションが
+# 必ず Just Works (双方とも無表示・無確認) に倒れることを保証するわけ
+# ではない。実機以外でも広く報告されている挙動として、相手側の端末は
+# capability に関わらず PIN/パスキーの確認画面を出すことがあり、それ
+# 自体は正常 (ユーザーが Pair/確認を押せば繋がる)。問題は、まれに
+# Pi 側の bluetoothctl agent 自身にも RequestConfirmation/RequestPinCode
+# 等が飛んできて "Confirm passkey NNNNNN (yes/no):" のようなプロンプトを
+# 標準出力へ出し、標準入力からの応答を待つケースがあることで、これまで
+# このループは Connected/Paired/Bonded の行しか見ておらず、この種の
+# プロンプトには一切応答しないまま固まっていた。相手側は「Pi 側からの
+# 応答がいつまでも来ない」状態になり、結局 AuthenticationTimeout で
+# ペアリング失敗として片付けられる — 「PIN が出て、無視/スキップしても
+# ペアリングできなかったと表示される」という報告はこの形と一致する。
+# "(yes/no)" を含むプロンプト行が来たら無条件で "yes" を返す (Confirm
+# passkey・Confirm pairing・Authorize service のいずれも同じ書式なので
+# 個別に文言を見分ける必要はない)。**この自動応答を外さないでください**
+# — 同じ「Pi 側の agent が無応答のまま固まり、相手には PIN 画面だけが
+# 残ってペアリングできない」不具合に戻ります。
 while IFS= read -r line <&"${BTCTL[0]}"; do
   echo "$line"
   if [[ "$line" =~ Device\ ([0-9A-Fa-f:]{17})\ .*(Connected:\ yes|Paired:\ yes|Bonded:\ yes) ]]; then
     send "trust ${BASH_REMATCH[1]}"
+  elif [[ "$line" == *'(yes/no)'* ]]; then
+    send "yes"
   fi
 done
 

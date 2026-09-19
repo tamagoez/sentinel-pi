@@ -331,10 +331,20 @@ else
   w "bluetoothctl missing (apt install bluez); new pairings may fail."
 fi
 
+# JustWorksRepairing defaults to "never" upstream - bluetoothd rejects a
+# peer-initiated Just-Works re-pair outright rather than silently accepting
+# it. Any event that resets the bond state on either side (a bluetoothd
+# restart from Guardian's own self-healing, CLAUDE.md #12/#45/#55, or the
+# phone simply forgetting the pairing) then forces a *full* new pairing
+# with a visible confirmation/passkey screen on the phone, even for a
+# device this Pi has paired with many times before. "always" lets an
+# already-known device silently re-pair with no prompt at all, which is
+# the behavior CLAUDE.md #64's report compared this project against
+# (CLAUDE.md #66).
 if [[ -f /etc/bluetooth/main.conf ]]; then
   cp -n /etc/bluetooth/main.conf /etc/bluetooth/main.conf.sentinel-backup 2>/dev/null || true
   BEFORE_SUM=$(md5sum /etc/bluetooth/main.conf | awk '{print $1}')
-  for kv in "DiscoverableTimeout=0" "PairableTimeout=0" "AlwaysPairable=true"; do
+  for kv in "DiscoverableTimeout=0" "PairableTimeout=0" "AlwaysPairable=true" "JustWorksRepairing=always"; do
     k="${kv%%=*}"; v="${kv#*=}"
     if grep -qE "^\s*#?\s*$k\s*=" /etc/bluetooth/main.conf; then
       sed -i -E "s|^\s*#?\s*$k\s*=.*|$k = $v|" /etc/bluetooth/main.conf
