@@ -2765,6 +2765,137 @@ camera.py の `_CORRUPT_RECONNECT_MAX_BACKOFF` と同じ考え方、CLAUDE.md
   フォールバックを外して「ファイルが無ければ無音」にしないでください**
   — 設定ミス 1 つで時報の効果音機能全体が沈黙します。
 
+### 69. Bluetooth の agent 登録は、bluetoothctl を起動した直後だと失敗することがある
+
+「どの不具合も直っていません」という報告があり、更新済みの `sentinel-logs`
+(#42/#43 で追加したペアリングエージェントの生ログ) を実際に確認したところ、
+#64/#66 (yes/no 自動応答・`JustWorksRepairing=always`) では説明のつかない、
+より早い段階の失敗が写っていました。
+
+```
+[bluetoothctl起動直後] agent NoInputNoOutput
+Failed to register agent object
+default-agent
+No agent is registered
+...(しばらくして)...
+Agent registered
+...
+[iPad とのペアリング試行]
+Request confirmation
+auth failed with status 0x05 (Authentication Failed)
+[agent] Confirm passkey 201492 (yes/no): yes
+auth failed with status 0x05 (Authentication Failed)
+```
+
+`agent NoInputNoOutput` を送った直後に **"Failed to register agent
+object"** が返り、続く `default-agent` も対象が居ないため **"No agent is
+registered"** で失敗しています。その後しばらくして (何が引き金かは特定
+できていませんが) 自然に `Agent registered` が現れており、`coproc` で
+`bluetoothctl` を起動した瞬間はまだ自分自身の D-Bus 接続の確立が終わって
+おらず、その状態で送った最初の `agent` コマンドが失敗することがある、と
+考えるのが最も筋が通ります。この空白の間にペアリング要求が来ると、
+Pi 側には確認を求められる agent 自体が存在しないため、SSP のネゴシエー
+ションが `0x05 (Authentication Failed)` として即座に失敗します — これは
+#64 で直した「(yes/no) プロンプトに無応答のまま固まる」とは別の失敗の
+形で、実際 `auth failed with status 0x05` は `Confirm passkey ...
+(yes/no): yes` という応答の**前**に一度出ています。つまり今回のログは、
+そもそも応答すべき agent が存在しない瞬間にペアリング要求が来ていた
+ことを示しています。#64 の yes/no 自動応答はこの空白そのものには効き
+ません — 効くべき対象 (プロンプトへの無応答) がそもそも別の不具合だから
+です。
+
+`scripts/sentinel-bt-agent.sh` に `register_agent()` を追加しました。
+`agent NoInputNoOutput` を送ったあと、最大 3 秒 (`read -t 1` を 3 回) だけ
+出力を監視して文字どおり **"Agent registered"** という行が来るまで確認を
+待ちます。来なければ (`"Failed to register agent"` を見た、またはタイム
+アウトした) 0.5 秒空けてもう一度最初から送り直し、これを最大 10 回まで
+繰り返します。**"Agent registered" を実際に見た場合だけ** `default-agent`
+を送ります — 登録に失敗したまま `default-agent` を送っても意味が無いため
+です。10 回すべて失敗したら標準エラーへ警告を出しますが、スクリプト
+自体は `exit` せず `power on`/`discoverable on`/`pairable on`/既知端末の
+trust はそのまま続行します (このプロジェクト全体の段階的劣化方針 —
+agent が無くても、せめて電源投入・discoverable 化・既知端末の trust は
+やっておいた方がまし)。**この確認なしの一発 `agent NoInputNoOutput` +
+`default-agent` に戻さないでください** — このレースは常に起きるわけでは
+なく間欠的なので、手元の軽いテストでは直ったように見えて、次のコールド
+ブートでまた同じ "Failed to register agent object" に戻ります。
+
+### 70. 音楽ミキシングの復旧は、mpg123 を止めてから最大 120 秒で再試行し、その瞬間にクールダウンも強制解除する。cold boot でカードが未検出の場合もログに残す
+
+#67 で「mpg123 が plughw を掴んだままだと dmix が永久に開けない」問題に
+periodic recheck (5 分おき) を追加しましたが、これも同じ「どの不具合も
+直っていません」報告で、起動からわずか 2 分のログで `/etc/asound.conf`
+が存在しない・`sentinel-setup-audio-mixing.sh` 自体が `Interrupted
+system call`/`Aborted by signal Terminated` で失敗している、という
+#67 とは違う (もっと早い段階の) 症状が写っていました。2 分しか経って
+いない機体では #67 の 5 分おき recheck は一度も発火し得ず、そもそも
+別の理由で再試行が起きない、と考えるべき状況でした。
+
+2 つ直しています。
+
+1. **recheck の基準間隔を 300 秒から 120 秒 (`_MIX_RECHECK_BASE`) へ
+   短縮し、起動直後にも近い間隔で 1 回目が発火するようにしました**
+   (`last_mix_recheck` の初期値を `time.time()` ではなく
+   `time.time() - _MIX_RECHECK_BASE` にする — 最初のチェックが「基準
+   間隔 + ループの初期待ち」の二重待ちにならないようにするため)。
+   120 秒という値は `sentinel-fix-audio-output.sh` 自身の
+   `_AUDIO_RETRY_BASE_SEC` (CLAUDE.md #57) に合わせています — 同じ
+   asound.conf の修復を、片方 (bash 側) は 2 分おき、もう片方 (Python
+   側) は 5 分おきで別々の周期で追いかける理由がありませんでした。
+2. **recheck が実際に `restart_playback()` を呼ぶ直前に、
+   `_eq_sync_failed_at` (CLAUDE.md #35 のクールダウン) を明示的に
+   `0.0` へ戻すようにしました。** mpg123 を止めるだけでは不十分な
+   ケースが実機にありました — `/etc/asound.conf` がまだ一度も正しく
+   作られていない機体では、`_sync_eq()` の「前回と同じ設定なら何も
+   しない」判定 (#32) と `_apply_audio_mixing()` 自身の 60 秒クール
+   ダウン (#35) の両方が、この再確認の瞬間に実際の再構成を試みることを
+   妨げてしまい、Guardian の独立した周期 (2 分) がたまたま同じ瞬間に
+   重ならない限り asound.conf が誰にも作り直されないまま stop()/play()
+   を繰り返すだけになっていました。**このクールダウン解除を外さないで
+   ください** — 同じ「mpg123 は止まるが asound.conf は誰も作り直さず、
+   フォールバックへ戻り続ける」膠着状態に戻ります。
+
+あわせて、`_apply_audio_mixing()` が `_card_index()` (`aplay -l` 経由の
+カード検出、CLAUDE.md #37) から `None` を受け取って**何もログを残さず**
+`(False, False)` を返していた無言の分岐に、重複を避けた警告ログを追加
+しました。起動直後、ALSA/USB の列挙がまだ終わっていないだけなら実害は
+無く (上記のクールダウン強制解除により、次の recheck で自然に直ります)、
+実際にカードを検出できたときは info ログで復帰を報告します。**この
+ログ追加自体は不具合の修正ではなく診断の穴埋めです** — CLAUDE.md #45 の
+教訓 (「事実が出揃うまでコードを書かない」) のとおり、次に同じ
+「直っていない」報告が来たとき、原因が「まだカードが見えていないだけ」
+なのか「本当に何かが壊れている」なのかを、この 1 行の有無だけで最初に
+切り分けられるようにするためのものです。
+
+### 71. 時報は境界を待たずに即座にテスト再生できる
+
+「時報もテストできるようにしてください」という要望がありました。既存の
+`speak_test()` (設定タブの「音声をテスト再生」) は利用者が入力した自由文
+をそのまま読み上げるだけで、時報カテゴリ固有の `{hour}`/`{minute}`/
+`{minute_part}` プレースホルダの組み立てや、`voice_chime_enabled` に
+従ったチャイム同時再生 (CLAUDE.md #58) を一切経由しません。これを
+`speak_test()` へ `category="time"` のような形で押し込むと、`{hour}` 等
+を渡さないテンプレートが `_fmt()` の「知らないプレースホルダは既定文へ
+静かにフォールバックする」経路を踏んでしまい、実際にカスタマイズした
+`voice_time_text` の文面を確認できません。
+
+`voice.py` に `speak_test_time()` を新設しました。`time_signal_loop()`
+と全く同じ組み立て (現在時刻から `{hour}`/`{minute}`/`{minute_part}` を
+作り `voice_time_text` で整形、`_mixing_ready()` に応じて ducking か
+音量だけの一時的な引き下げかを選び、dmix で重ねられる場合だけ
+`voice_chime_enabled` に従ってチャイムを同時再生する) を、
+`voice_time_interval_minutes` の壁時計境界を待たずに今すぐ 1 回だけ
+実行します。`web/routes.py` に `POST /api/voice/test-time` を追加し
+(既存の `/api/voice/test` の直後、CLAUDE.md の固定パス優先の原則には
+影響しません — どちらも `/api/voice/` 配下の固定パスです)、
+`web/static/index.html` の設定タブに「時報をテスト再生」ボタンを
+既存の「音声をテスト再生」の隣に追加しました。**この機能を
+`speak_test()` への引数追加で済ませず、独立した `speak_test_time()` の
+ままにしておいてください** — 時報固有のプレースホルダ・チャイム条件を
+テストパスにも本番パスにも同じ 1 か所 (`time_signal_loop()` と
+`speak_test_time()` の両方が同じ `_fmt()`/`_CATEGORY_KEYS["time"]` を
+参照する) で保つためです。
+
 ## モジュール構成
 
 各モジュールは疎結合で、`core/state.py` の `MODE` を購読するだけです。
@@ -2837,7 +2968,12 @@ scripts/sentinel-bt-agent.sh
                     NoInputNoOutput リグレッションを避けるため bluetoothctl
                     を直接駆動する (CLAUDE.md #16)。Pi 側の agent 自身に
                     "Confirm passkey ... (yes/no)" 等が飛んできた場合は
-                    無条件で yes を返す (CLAUDE.md #64)
+                    無条件で yes を返す (CLAUDE.md #64)。register_agent()
+                    が "agent NoInputNoOutput" を "Agent registered" の
+                    確認が取れるまで最大 10 回再試行してから
+                    default-agent を送る — bluetoothctl 起動直後は自身の
+                    D-Bus 接続がまだ確立し切っていないことがある
+                    (CLAUDE.md #69)
 scripts/sentinel-autoupdate.sh
                     sentinel-autoupdate.timer (30 分ごと) から起動される。
                     git clone の場所を install.sh/update.sh が書き出す
@@ -2923,11 +3059,16 @@ modules/music.py        mpg123 制御、位置復帰、yt-dlp キュー。alsa_d
                          find_track_path() で曲名からカテゴリーをまたいで
                          実ファイルを扱う (CLAUDE.md #56)。loop() は
                          plughw:N,0 フォールバックで生きたまま鳴り続けて
-                         いる間、5 分おき (指数バックオフ付き) に
-                         restart_playback() で dmix (sentinel_music) へ
-                         戻れないか試す — mpg123 が hw を直接掴んだままだと
-                         dmix 側が永久に開けないため、mpg123 を実際に止め
-                         ないと再評価そのものが成立しない (CLAUDE.md #67)
+                         いる間、120 秒おき (指数バックオフ付き、上限 1
+                         時間) に restart_playback() で dmix
+                         (sentinel_music) へ戻れないか試す — mpg123 が hw
+                         を直接掴んだままだと dmix 側が永久に開けないため、
+                         mpg123 を実際に止めないと再評価そのものが成立
+                         しない (CLAUDE.md #67)。この再試行の瞬間、
+                         _eq_sync_failed_at (#35 のクールダウン) も強制的
+                         に解除する — 解除しないと asound.conf がまだ
+                         一度も正しく作られていない機体でクールダウンが
+                         実際の再構成を妨げ続ける (CLAUDE.md #70)
 modules/thermal.py      温度と CPU -> MODE.report_temperature()
 modules/bluetooth.py    A2DP 接続検知 -> 音楽の退避と復帰。この Pi 自身の
                          表示名 (set_local_name、bluetoothctl system-alias)
@@ -2980,7 +3121,10 @@ modules/voice.py        Open JTalk 優先/espeak-ng フォールバックの音�
                          喋り始めない、CLAUDE.md #58)。voice_chime_path
                          で内蔵の合成音の代わりに任意の .wav/.mp3 を指定
                          できる (.mp3 は単発 mpg123、.wav は aplay、存在
-                         しなければ合成音へフォールバック、CLAUDE.md #68)
+                         しなければ合成音へフォールバック、CLAUDE.md #68)。
+                         speak_test_time() は time_signal_loop() と同じ
+                         組み立て・チャイム条件で、壁時計の境界を待たずに
+                         今すぐ 1 回だけテスト再生する (CLAUDE.md #71)
 
 web/routes.py           全 HTTP / WebSocket エンドポイント。latest.jpg の
                          ように他プロセスが継続的に上書きするファイルは

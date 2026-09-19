@@ -226,10 +226,28 @@ def resolve_eq_bands(track_name: str | None) -> list[float]:
     return out
 
 
+_card_missing_warned = False
+
+
 def _apply_audio_mixing(enabled: bool, bands: list[float] | None) -> tuple[bool, bool]:
+    global _card_missing_warned
     card = _card_index()
     if card is None:
+        # 起動直後、ALSA/USB がまだ列挙を終えていない場合に起こりうる
+        # (aplay -l がまだ何も返さない)。ここで諦めても実害は無い —
+        # loop() の周期的な再確認 (CLAUDE.md #67) が _eq_sync_failed_at
+        # のクールダウンを毎回強制的に解除してから再試行するため、次の
+        # サイクルでカードが見えていれば自然に直る。ただし理由が一切
+        # ログに残らないと「asound.conf を書き直したのに何も起きない」
+        # ように見えて切り分けに時間がかかるため (CLAUDE.md #42/#45 の
+        # 教訓)、ここだけは重複を避けつつ警告を残す。
+        if not _card_missing_warned:
+            _card_missing_warned = True
+            log.warning("音声ミキシング: 出力カードがまだ見つからないため設定を保留します (起動直後は正常)")
         return False, False
+    if _card_missing_warned:
+        _card_missing_warned = False
+        log.info("音声ミキシング: 出力カードを検出しました (card %s)", card)
     script = config.APP_ROOT.parent / "scripts" / "sentinel-setup-audio-mixing.sh"
     args = ["sudo", "-n", str(script), str(card), "on" if enabled else "off"]
     if enabled:
@@ -1074,8 +1092,16 @@ async def loop() -> None:
             await asyncio.to_thread(PLAYER.play, PLAYER.position)
 
     last_scan = time.time()
-    last_mix_recheck = time.time()
-    _mix_recheck_backoff = 300
+    # Base/reset interval matches sentinel-fix-audio-output.sh's own
+    # _AUDIO_RETRY_BASE_SEC (CLAUDE.md #57) rather than an unrelated value -
+    # both are backing off/retrying the same underlying asound.conf repair,
+    # so there is no reason for this side to wait longer before its first
+    # attempt. Starting the clock in the past (not time.time()) means the
+    # very first check can fire close to this base interval after boot
+    # instead of waiting a full extra cycle on top of it.
+    _MIX_RECHECK_BASE = 120
+    last_mix_recheck = time.time() - _MIX_RECHECK_BASE
+    _mix_recheck_backoff = _MIX_RECHECK_BASE
     while True:
         await asyncio.sleep(5)
         # mpg123 が落ちていたら復帰させる (通常モードかつ退避中でないとき)
@@ -1108,22 +1134,42 @@ async def loop() -> None:
         # いた。**この再確認の前に mpg123 を実際に止めてデバイスを手放さ
         # ないと、テストは一生失敗し続けます** — 生かしたまま
         # `_mixing_ready()` を呼ぶだけの実装に戻さないでください。
+        #
+        # mpg123 を止めるだけでは、まだ不十分な場合があると実機で判明
+        # しました。/etc/asound.conf が (起動直後の ALSA 未初期化などで)
+        # そもそもまだ一度も正しく作られていない機体では、_sync_eq() の
+        # 「前回と同じ設定なら何もしない」判定 (CLAUDE.md #32) と、
+        # _apply_audio_mixing() 自身の 60 秒クールダウン
+        # (_EQ_RETRY_COOLDOWN_SEC、CLAUDE.md #35) の両方が、この再確認の
+        # 瞬間に実際の再構成を試みることを妨げてしまい、Guardian 側の
+        # 独立した周期がたまたま同じ瞬間に重ならない限り asound.conf が
+        # 誰にも作り直されないまま stop()/play() を繰り返すだけになって
+        # いました。ここで `_eq_sync_failed_at` のクールダウンだけを明示的
+        # に解除し、mpg123 が hw を手放した直後の _sync_eq() に確実に
+        # 一回だけ再構成を試みさせます — Guardian の次の周期を待つ
+        # 「祈り」に頼らず、この再確認自身が直せる機会を毎回きちんと使う
+        # ためです。**このクールダウン解除を外さないでください** — 同じ
+        # 「mpg123 は止まるが asound.conf は誰も作り直さず、5 分おき無限に
+        # フォールバックへ戻り続ける」膠着状態に戻ります。
+        #
         # `_mix_recheck_backoff` は camera.py の再接続バックオフ
         # (CLAUDE.md #19) と同じ考え方の指数バックオフです。本当に直って
-        # いない環境で毎回 restart_playback() を呼ぶと、5 分おき無期限に
-        # 再生が瞬断し続けるだけになるため、失敗のたびに次回までの間隔を
-        # 倍々に伸ばし (上限 1 時間)、実際に dmix へ切り替われた瞬間に
-        # 短い間隔へ戻します。
+        # いない環境で毎回 restart_playback() を呼ぶと、無期限に再生が
+        # 瞬断し続けるだけになるため、失敗のたびに次回までの間隔を倍々に
+        # 伸ばし (上限 1 時間)、実際に dmix へ切り替われた瞬間に短い間隔
+        # (sentinel-fix-audio-output.sh と同じ基準間隔) へ戻します。
         if (time.time() - last_mix_recheck >= _mix_recheck_backoff
                 and config.get("audio_mixing_enabled")
                 and not str(config.get("alsa_device") or "").strip()
                 and PLAYER.active_device.startswith("plughw:")
                 and PLAYER.proc is not None and PLAYER.proc.poll() is None):
             last_mix_recheck = time.time()
+            global _eq_sync_failed_at
+            _eq_sync_failed_at = 0.0
             await asyncio.to_thread(restart_playback)
             if PLAYER.active_device == "sentinel_music":
                 log.info("dmix (sentinel_music) が復旧したため、直接出力から切り替えました")
-                _mix_recheck_backoff = 300
+                _mix_recheck_backoff = _MIX_RECHECK_BASE
             else:
                 _mix_recheck_backoff = min(_mix_recheck_backoff * 2, 3600)
 
