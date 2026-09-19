@@ -227,18 +227,43 @@ def _sound_card() -> int | None:
 
 _CHIME_PATH = config.RUNTIME / "voice-chime.wav"
 
+# 直近に警告した voice_chime_path の値。同じ壊れたパスを設定したまま毎回
+# 時報が鳴るたびにログを埋めないための、_mix_warned と同じパターン。
+_chime_path_warned: str = ""
 
-def _chime_path() -> "Path":
-    """時報と重ねて鳴らす短い効果音の実ファイル。初回だけ標準ライブラリの
-    wave/math で合成してキャッシュする — バイナリ音源を同梱しない
-    (CLAUDE.md「依存を増やさない」と同じ判断)。生成先は config.RUNTIME
-    (tmpfs) — 高頻度書き込みではなく初回の 1 回きりだが、他の実行時生成物
-    (motion_debug.jsonl など) と同じ置き場所に揃えている (CLAUDE.md #3)。"""
+
+def _chime_path() -> tuple["Path", bool]:
+    """時報と重ねて鳴らす効果音の実ファイルと、mp3 かどうかを返す。
+
+    `voice_chime_path` (設定タブ) に実在するファイルパスが入っていれば
+    それを使う — .wav ならそのまま aplay へ、.mp3 なら音楽ライブラリと
+    同じ mp3 前提 (CLAUDE.md #2) で mpg123 の単発再生に渡す。空文字・
+    存在しない・対応しない拡張子のいずれかであれば、標準ライブラリの
+    wave/math で合成した既定のチャイムへ静かにフォールバックする —
+    「時報自体は鳴らし続ける」という CLAUDE.md 全体の段階的劣化方針と
+    同じ考え方。合成音は初回だけ生成してキャッシュする — バイナリ音源を
+    同梱しない (CLAUDE.md「依存を増やさない」と同じ判断)。生成先は
+    config.RUNTIME (tmpfs) — 高頻度書き込みではなく初回の 1 回きりだが、
+    他の実行時生成物 (motion_debug.jsonl など) と同じ置き場所に揃えて
+    いる (CLAUDE.md #3)。"""
     from pathlib import Path
+
+    global _chime_path_warned
+    custom = str(config.get("voice_chime_path") or "").strip()
+    if custom:
+        p = Path(custom)
+        suffix = p.suffix.lower()
+        if suffix in (".wav", ".mp3") and p.is_file():
+            _chime_path_warned = ""
+            return p, suffix == ".mp3"
+        if custom != _chime_path_warned:
+            _chime_path_warned = custom
+            log.warning("voice_chime_path (%s) が見つからないか .wav/.mp3 以外のため、既定の効果音を使います", custom)
+
     path: Path = _CHIME_PATH
     if not path.exists() or path.stat().st_size <= 44:
         _synthesize_chime(path)
-    return path
+    return path, False
 
 
 def _synthesize_chime(path) -> None:
@@ -280,11 +305,18 @@ def _play_chime(device: str | None) -> "subprocess.Popen | None":
     (曲を完全に止める旧経路と衝突させても意味がないため、_speak_sync 側
     で mixing 中のみ呼ぶ)。"""
     try:
-        path = _chime_path()
+        path, is_mp3 = _chime_path()
     except Exception as exc:
         log.warning("効果音の生成に失敗しました: %s", exc)
         return None
-    cmd = ["aplay", "-q"] + (["-D", device] if device else []) + [str(path)]
+    if is_mp3:
+        # mpg123 の単発再生。常駐する music.Player とは別プロセスで、
+        # -a には sentinel_voice (dmix 経由) を渡すため、音楽ライブラリの
+        # 常駐 mpg123 (-a sentinel_music) とは別の PCM スロットに入り、
+        # 互いに干渉しない (CLAUDE.md #31)。
+        cmd = ["mpg123", "-q", "-o", "alsa"] + (["-a", device] if device else []) + [str(path)]
+    else:
+        cmd = ["aplay", "-q"] + (["-D", device] if device else []) + [str(path)]
     try:
         return subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     except Exception as exc:

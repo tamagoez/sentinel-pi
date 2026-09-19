@@ -258,6 +258,14 @@ DEFAULTS: dict[str, Any] = {
                                            # dmix でミキシングできる場合のみ有効
                                            # (曲を完全停止する経路では鳴らさない -
                                            # そちらは「同時に」を満たせないため)
+    "voice_chime_path": "",               # voice_chime_enabled が有効なとき、既定の
+                                           # 合成音 (A5->E6) の代わりに鳴らすファイル
+                                           # の実パス。空なら従来どおり合成音を使う。
+                                           # .wav はそのまま aplay、.mp3 は mpg123 で
+                                           # 単発再生する (音楽ライブラリと同じ mp3
+                                           # 前提、CLAUDE.md #2)。存在しない/対応しない
+                                           # 拡張子ならログに警告を残し合成音へ静かに
+                                           # フォールバックする (voice.py 参照)
     "voice_error_enabled": True,          # エラー通知 (定時処理の例外など) を喋る
     "voice_error_text": "{message}",                        # {message}
     "voice_camera_reboot_enabled": True,  # カメラ破損によるPi緊急再起動を喋る
