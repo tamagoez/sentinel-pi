@@ -126,16 +126,18 @@ ok "$SVC_USER added to video/audio/bluetooth/plugdev/systemd-journal"
 # changed at runtime from the Settings page, not just once via dietpi.txt
 # at image-prep time. Same argument-validation-is-the-boundary pattern.
 #
-# sentinel-setup-audio-mixing.sh: /etc/asound.conf is root-writable only.
-# modules/music.py calls it whenever the equalizer is toggled/changed so
-# music and voice announcements (modules/voice.py) can mix through ALSA's
-# dmix plugin with independent volumes instead of one fully stopping the
-# other (CLAUDE.md #31). Same argument-validation-is-the-boundary pattern.
+# There used to be a third entry here, sentinel-setup-audio-mixing.sh,
+# which wrote /etc/asound.conf so music and voice announcements could mix
+# through a hand-written ALSA dmix chain. That whole approach - and the
+# root-only file it needed - is gone: both now write to alsa-lib's own
+# per-card `sysdefault:CARD=<N>` route, which needs no configuration file
+# and therefore no root access at all. See CLAUDE.md's audio-mixing
+# redesign section for why.
 cat > /etc/sudoers.d/sentinel <<EOF
-$SVC_USER ALL=(root) NOPASSWD: /sbin/reboot, /sbin/shutdown, /usr/bin/systemctl reboot, $APP_DIR/scripts/sentinel-set-governor.sh *, $APP_DIR/scripts/sentinel-set-hotspot-ssid.sh *, $APP_DIR/scripts/sentinel-setup-audio-mixing.sh *
+$SVC_USER ALL=(root) NOPASSWD: /sbin/reboot, /sbin/shutdown, /usr/bin/systemctl reboot, $APP_DIR/scripts/sentinel-set-governor.sh *, $APP_DIR/scripts/sentinel-set-hotspot-ssid.sh *
 EOF
 chmod 440 /etc/sudoers.d/sentinel
-visudo -cf /etc/sudoers.d/sentinel >/dev/null && ok "sudoers: reboot + CPU governor switch + hotspot SSID + audio mixing"
+visudo -cf /etc/sudoers.d/sentinel >/dev/null && ok "sudoers: reboot + CPU governor switch + hotspot SSID"
 
 # ---------------------------------------------------------------- 3. Deploy
 c "STEP 3/10  Deploy application files"
@@ -160,8 +162,12 @@ if [[ ! -x "$APP_DIR/.venv/bin/python" ]]; then
   python3 -m venv --system-site-packages "$APP_DIR/.venv"
 fi
 "$APP_DIR/.venv/bin/pip" install --quiet --upgrade pip
+# dbus-next: pure-Python, zero-dependency, asyncio-native D-Bus client -
+# modules/bt_agent.py uses it to implement the BlueZ pairing agent
+# (org.bluez.Agent1) directly instead of scraping bluetoothctl's
+# interactive CLI output. Not packaged for Debian/DietPi, hence pip.
 "$APP_DIR/.venv/bin/pip" install --quiet \
-  "fastapi>=0.110" "uvicorn[standard]>=0.27" "websockets>=12"
+  "fastapi>=0.110" "uvicorn[standard]>=0.27" "websockets>=12" "dbus-next>=0.2"
 
 if command -v yt-dlp >/dev/null; then
   ok "yt-dlp: using system package ($(yt-dlp --version 2>/dev/null || echo '?'))"
@@ -306,7 +312,25 @@ if [[ -n "$BA" ]]; then
   install -m644 "$SRC/systemd/sentinel-bluealsa.service" /etc/systemd/system/
   sed -i "s|^ExecStart=.*|ExecStart=$BA -p a2dp-sink|" /etc/systemd/system/sentinel-bluealsa.service
   install -m644 "$SRC/systemd/sentinel-bluealsa-aplay.service" /etc/systemd/system/
-  ok "BlueALSA (A2DP sink) + playback bridge registered"
+  # The unit ships with a placeholder card index (0). Rewrite it with the
+  # analog output actually detected on this machine - sysdefault:CARD=<N>
+  # needs to name the right card explicitly, the same way music.py and
+  # voice.py do (core/audio.analog_device()), rather than depend on
+  # alsa-lib's own card selection picking analog over HDMI on multi-card
+  # Pis (CLAUDE.md #37). If detection fails here, sentinel-guardian.sh's
+  # periodic check_audio() (which calls sentinel-fix-audio-output.sh) will
+  # not fix this specific unit's argument on its own - this is a one-time
+  # install-time value, not something re-checked every cycle - so a
+  # missing card at this exact moment is logged and left for a re-run of
+  # this script (e.g. via update.sh) once the card is actually present.
+  if AUDIO_CARD=$("$SRC/scripts/sentinel-fix-audio-output.sh" --print-card 2>/dev/null); then
+    sed -i "s|--pcm=sysdefault:CARD=[0-9]*|--pcm=sysdefault:CARD=$AUDIO_CARD|" \
+      /etc/systemd/system/sentinel-bluealsa-aplay.service
+    ok "BlueALSA (A2DP sink) + playback bridge registered (card $AUDIO_CARD)"
+  else
+    w "no ALSA output card detected yet; sentinel-bluealsa-aplay.service keeps its placeholder card - re-run install.sh/update.sh once the card is present"
+    ok "BlueALSA (A2DP sink) + playback bridge registered"
+  fi
 else
   w "bluealsa not found; Bluetooth-speaker feature will be unavailable."
 fi
@@ -320,16 +344,15 @@ fi
 # Nothing in this project ever restores the shared hardware volume
 # (numid=1) once something leaves it at zero, which silences music with no
 # error anywhere - mpg123 still reports playing. Check the whole output
-# path (volume, routing, the card asound.conf actually mixes into) here
+# path (volume, routing, whether sysdefault:CARD=<N> actually opens) here
 # and every Guardian cycle (CLAUDE.md #41).
 "$SRC/scripts/sentinel-fix-audio-output.sh" || true
 
-if command -v bluetoothctl >/dev/null; then
-  install -m644 "$SRC/systemd/sentinel-bt-agent.service" /etc/systemd/system/
-  ok "Persistent pairing agent registered"
-else
-  w "bluetoothctl missing (apt install bluez); new pairings may fail."
-fi
+# The pairing agent (modules/bt_agent.py) now runs inside sentinel.service
+# itself via core/supervisor.py, not as a separate systemd unit - it needs
+# nothing installed here beyond bluetoothd and the dbus-next pip package
+# already pulled in above. See CLAUDE.md's Bluetooth pairing redesign
+# section for why the standalone sentinel-bt-agent.service was retired.
 
 # JustWorksRepairing defaults to "never" upstream - bluetoothd rejects a
 # peer-initiated Just-Works re-pair outright rather than silently accepting
@@ -402,9 +425,14 @@ sed -e "s|^User=.*|User=$SVC_USER|" \
     "$SRC/systemd/sentinel.service" > /etc/systemd/system/sentinel.service
 
 # sentinel-deploy-resume was the resume unit of the old deploy.sh; a run
-# interrupted back then can still leave it enabled.
+# interrupted back then can still leave it enabled. sentinel-bt-agent was
+# the standalone pairing-agent unit retired in favor of modules/bt_agent.py
+# running inside sentinel.service itself (CLAUDE.md's Bluetooth pairing
+# redesign section) - an upgrade from an older install can still have it
+# enabled, and leaving it running would fight the in-process agent for the
+# D-Bus default-agent slot.
 for stale in sentinel-firewall.service sentinel-bt-discoverable.service \
-             sentinel-deploy-resume.service; do
+             sentinel-deploy-resume.service sentinel-bt-agent.service; do
   if systemctl list-unit-files 2>/dev/null | grep -q "^$stale"; then
     systemctl disable --now "$stale" 2>/dev/null || true
     rm -f "/etc/systemd/system/$stale"
@@ -415,7 +443,6 @@ done
 systemctl daemon-reload
 UNITS=(sentinel.service sentinel-guardian.timer sentinel-autoupdate.timer)
 [[ -n "$BA" ]] && UNITS+=(sentinel-bluealsa.service sentinel-bluealsa-aplay.service)
-command -v bluetoothctl >/dev/null && UNITS+=(sentinel-bt-agent.service)
 systemctl enable "${UNITS[@]}" >/dev/null 2>&1
 ok "Enabled: ${UNITS[*]}"
 # Clear any "failed (start-limit-hit)" left over from before this script

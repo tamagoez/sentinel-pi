@@ -169,8 +169,8 @@ check_firewall() {
 
 # ------------------------------------------------------------------ 4. Audio
 # The whole analog-output path (shared hardware volume numid=1, routing
-# numid=3, and the card /etc/asound.conf actually mixes into) is checked
-# by sentinel-fix-audio-output.sh, which also owns the single bash copy of
+# numid=3, and whether sysdefault:CARD=<N> actually opens) is checked by
+# sentinel-fix-audio-output.sh, which also owns the single bash copy of
 # find_output_card(). Delegating rather than duplicating: the previous
 # version here only ever checked numid=3, so a hardware volume parked at
 # zero silenced music indefinitely with nothing reporting an error
@@ -232,7 +232,7 @@ check_bluetooth() {
 check_services() {
   local units=(sentinel.service bluetooth.service)
   { command -v bluealsad >/dev/null || command -v bluealsa >/dev/null; } && \
-    units+=(sentinel-bluealsa.service sentinel-bluealsa-aplay.service sentinel-bt-agent.service)
+    units+=(sentinel-bluealsa.service sentinel-bluealsa-aplay.service)
   # hciuart.service (RPi's UART-attached Bluetooth chip) and hostapd.service
   # (WiFi Hotspot) both start very early at boot and can fail outright if
   # the underlying interface/UART isn't ready yet - the same class of race
@@ -365,8 +365,12 @@ check_bluealsa_freshness() {
   [[ -n "$bt_start" && "$bt_start" != "n/a" ]] || return 0
   bt_epoch=$(date -d "$bt_start" +%s 2>/dev/null) || return 0
 
+  # The pairing agent (modules/bt_agent.py) is not in this list - it runs
+  # inside sentinel.service and detects a stale D-Bus connection itself via
+  # bus.wait_for_disconnect(), reconnecting and re-registering on its own
+  # rather than needing Guardian to restart a whole separate unit for it.
   local u u_start u_epoch
-  for u in sentinel-bluealsa.service sentinel-bluealsa-aplay.service sentinel-bt-agent.service; do
+  for u in sentinel-bluealsa.service sentinel-bluealsa-aplay.service; do
     systemctl list-unit-files "$u" &>/dev/null || continue
     systemctl is-active --quiet "$u" || continue     # check_services() 側で扱う
     u_start=$(systemctl show -p ActiveEnterTimestamp --value "$u" 2>/dev/null)

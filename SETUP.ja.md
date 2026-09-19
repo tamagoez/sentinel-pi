@@ -281,7 +281,7 @@ git リモートを確認し、新しいコミットがあれば自分で `updat
 | カメラが見えない | `ls /dev/v4l/by-id/`、`dmesg \| tail -30` |
 | 音が途切れる | 素の再生を試す: `mpg123 <file>`。設定の mpg123 バッファを上げる。PulseAudio が動いていれば止める |
 | 音が全く出ない | `aplay -l`。`/boot/dietpi/func/dietpi-set_hardware soundcard rpi-bcm2835-3.5mm` を再実行して再起動 |
-| Bluetooth がペアリングできない | `systemctl status sentinel-bt-agent`。`bluetoothctl show` で `Discoverable: yes` になっているか |
+| Bluetooth がペアリングできない | ペアリングエージェントは `sentinel.service` の中で動いています (`journalctl -u sentinel -n 50 \| grep -i agent`)。`bluetoothctl show` で `Discoverable: yes` になっているか |
 | `sentinel-bluealsa*` が `failed (start-limit-hit)` になっている | `sudo systemctl reset-failed sentinel-bluealsa.service sentinel-bluealsa-aplay.service && sudo systemctl restart sentinel-bluealsa.service sentinel-bluealsa-aplay.service` (Guardian も 2 分以内に自動で同じことをします) |
 | 8083 がまだ外から開ける | `systemctl start sentinel-guardian`。`journalctl -t sentinel-guardian -n 20` |
 | ネットワークログが空 | 設定タブの AdGuard パスワードが違う、または AdGuard 側でクエリログが無効。Tailscale 接続の直後に空になった場合は `tailscale status` を確認 — `--accept-dns=false` を付けずに接続していないか |
@@ -291,7 +291,7 @@ git リモートを確認し、新しいコミットがあれば自分で `updat
 | ペアリングリンクを開くと「This link has expired or was already used」になる | ペアリング先の端末で Lockstep Sync プラグインを**リンクを開く前に**導入・有効化してください (このリンクはプラグインへ `obsidian://` 経由で引き継ぐ仕組みで、受け取るプラグインが無い状態で試すと、それだけでこの一度きりのリンクが消費されてしまいます)。新しく発行し直したリンクを、ペアリングしたい端末自身の実際のブラウザで開いてください — ターミナル上や別の端末で開いたもの、60分を過ぎたもの、一度試したものの使い回しは無効です (CLAUDE.md #63) |
 | 同じ LAN 上の別端末から Lockstep Sync に繋がらない | その端末が Pi の実際の LAN IP を使っているか確認し、`sudo ss -ltn 'sport = :8384'` で `0.0.0.0` で listen しているか確認 (CLAUDE.md #62) |
 | 外出先の端末から Lockstep Sync に繋がらない | その端末が同じ tailnet に Tailscale で接続しているか、かつ LAN のアドレスではなく Tailscale のアドレスでペアリングしたか確認 (`tailscale status`、CLAUDE.md #62) |
-| 音楽が「再生中」なのに無音 | `sudo sentinel-logs 2 full` の audio ブロックを見ます。`open sentinel_music` が FAILS なら Guardian が次の周期 (最大 2 分) で asound.conf を直します。急ぐときは `sudo /opt/sentinel/scripts/sentinel-fix-audio-output.sh`。切り分けとして設定タブの「音楽と音声アナウンスを同時に鳴らす」をオフにすると dmix を使わない経路になります |
+| 音楽が「再生中」なのに無音 | `sudo sentinel-logs 2 full` の audio ブロックを見ます。`open sysdefault:CARD=N` が FAILS なら Guardian が次の周期 (最大 2 分) でカードを直します。急ぐときは `sudo /opt/sentinel/scripts/sentinel-fix-audio-output.sh` |
 | Tailscale を後から設定したい | `sudo sentinel-tailscale up` — 表示されたログイン URL をスマホや PC のブラウザで開きます。状態は `sentinel-tailscale status` |
 | 状況をまとめて貼りたい | `sudo sentinel-logs` — いま問題になっている所だけを短く出します (`sentinel-logs 6 full` で範囲拡大 + 音声の実地テスト) |
 | それ以外 | `sentinel-diagnose` — システムとアプリの状態を 1 つのアーカイブにまとめます |

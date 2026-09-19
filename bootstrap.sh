@@ -151,11 +151,14 @@ fi
 
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -qq
-# bluez-alsa-utils: the A2DP sink itself. The persistent pairing agent
-# (scripts/sentinel-bt-agent.sh) drives bluetoothctl directly instead of
-# bluez-tools' bt-agent binary (which has a known NoInputNoOutput
-# regression on Bullseye+ that breaks iOS pairing - see
-# systemd/sentinel-bt-agent.service), so bluez-tools is not installed here.
+# bluez-alsa-utils: the A2DP sink itself, plus bluealsa-cli (used by
+# modules/bluetooth.py for per-device volume - CLAUDE.md's Bluetooth
+# redesign section). The pairing agent is modules/bt_agent.py, a D-Bus
+# Agent1 implementation running inside sentinel.service itself (via the
+# dbus-next pip package, installed by install.sh into the venv) - not
+# bluez-tools' bt-agent binary, which has a known NoInputNoOutput
+# regression on Bullseye+ that breaks iOS pairing, so bluez-tools is not
+# installed here.
 # exfatprogs/ntfs-3g: dietpi-drive_manager can mount exFAT/NTFS drives, but
 # without these packages that mount can fail outright. Even with them,
 # such drives have no real Unix ownership - install.sh and Guardian handle
@@ -172,12 +175,11 @@ apt-get update -qq
 # espeak-ng stays installed too as an always-available fallback
 # (modules/voice.py falls back to it automatically if Open JTalk's
 # packages are ever missing), so voice.py never goes silent outright.
-# swh-plugins: provides the mbeq LADSPA plugin (15-band graphic EQ) used
-# by the optional music equalizer (modules/music.py, CLAUDE.md #31/#32).
-# Only ever loaded when a user actually enables the EQ (default off) -
-# scripts/sentinel-setup-audio-mixing.sh searches for it at runtime and
-# falls back to no EQ if it's somehow missing, so this package failing to
-# install does not break basic playback.
+# There used to be a swh-plugins entry here for the mbeq LADSPA plugin the
+# music equalizer needed. The equalizer now uses mpg123's own built-in
+# real-time equalizer (its remote-control "E" command) instead of an ALSA
+# LADSPA stage, so no extra package is needed for it at all - see
+# CLAUDE.md's audio-mixing redesign section.
 # qrencode: prints the Lockstep Sync device-pairing link as a scannable QR
 # code in setup.sh H8 (CLAUDE.md #61) - the same tool upstream's own
 # install.sh uses for this, so no protocol/library work is needed here.
@@ -187,8 +189,8 @@ apt-get install -y --no-install-recommends \
   fonts-dejavu-core fonts-noto-cjk iptables \
   exfatprogs ntfs-3g espeak-ng \
   open-jtalk open-jtalk-mecab-naist-jdic hts-voice-nitech-jp-atr503-m001 \
-  swh-plugins qrencode >/dev/null 2>&1 \
-  && ok "Bluetooth-audio, camera, exFAT/NTFS, voice and EQ packages installed" \
+  qrencode >/dev/null 2>&1 \
+  && ok "Bluetooth-audio, camera, exFAT/NTFS and voice packages installed" \
   || w "Some packages failed to install."
 
 # ---------------------------------------------------------------- 6. Audio
@@ -214,25 +216,11 @@ if (( ! AUDIO_DONE )); then
   fi
 fi
 
-# Establish the dmix baseline (music + voice announcements able to mix
-# simultaneously with independent volumes, CLAUDE.md #31) so it's in place
-# before the app ever starts. EQ off here regardless of any saved setting -
-# config.json may not exist yet on a first install, and even when it does,
-# bootstrap.sh has no business reaching into it; modules/music.py re-asserts
-# the actual configured EQ state itself once the app starts. Skipped if the
-# card genuinely isn't ready yet (a reboot is still pending) - the next
-# bootstrap.sh run (setup.sh resuming after that reboot, or the next
-# update.sh) covers it, same as everything else in this script being safe
-# to re-run.
-CARD=$(aplay -l 2>/dev/null | grep -m1 -oE '^card [0-9]+' | awk '{print $2}')
-if [[ -n "$CARD" ]]; then
-  "$(dirname "${BASH_SOURCE[0]}")/scripts/sentinel-setup-audio-mixing.sh" "$CARD" off \
-    >/dev/null 2>&1 \
-    && ok "Audio mixing (music + voice, independent volumes) set up on card $CARD" \
-    || w "Audio mixing setup failed; music/voice announcements may not be able to play at once."
-else
-  w "No sound card detected yet; audio mixing setup will run on the next bootstrap.sh (after the pending reboot)."
-fi
+# Music and voice announcements mix automatically through alsa-lib's own
+# per-card sysdefault route (core/audio.analog_device()) - there is no
+# configuration file to establish here at all, unlike the hand-written
+# /etc/asound.conf this project used to generate at this exact point.
+# See CLAUDE.md's audio-mixing redesign section for why.
 
 # ---------------------------------------------------------------- 7. Resources
 c "STEP 7/9  Reduce resource usage"

@@ -16,7 +16,7 @@
 # closes the ALSA default device. The bcm2835 driver does not always
 # survive that ("failed to close VCHI service connection (status=-11)"),
 # and once it is wedged, dmix can no longer open hw:N,0 - so
-# `aplay -D sentinel_music` fails with "Invalid argument", mpg123 cannot
+# `aplay -D sysdefault:CARD=N` fails with "Invalid argument", mpg123 cannot
 # start either, and music stops working for a reason that looks nothing
 # like a Bluetooth problem.
 #

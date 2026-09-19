@@ -279,7 +279,7 @@ by hand on the box. `journalctl -t sentinel-autoupdate` shows its history.
 | No cameras | `ls /dev/v4l/by-id/`, `dmesg \| tail -30` |
 | Audio stutters | test raw: `mpg123 <file>`; raise `mpg123 buffer` in settings; stop PulseAudio if present |
 | No sound at all | `aplay -l`; re-run `/boot/dietpi/func/dietpi-set_hardware soundcard rpi-bcm2835-3.5mm` and reboot |
-| Can't pair Bluetooth | `systemctl status sentinel-bt-agent`; `bluetoothctl show` should say `Discoverable: yes` |
+| Can't pair Bluetooth | the pairing agent runs inside `sentinel.service` (`journalctl -u sentinel -n 50 \| grep -i agent`); `bluetoothctl show` should say `Discoverable: yes` |
 | A `sentinel-bluealsa*` unit shows `failed (start-limit-hit)` | `sudo systemctl reset-failed sentinel-bluealsa.service sentinel-bluealsa-aplay.service && sudo systemctl restart sentinel-bluealsa.service sentinel-bluealsa-aplay.service` (Guardian also does this automatically within 2 minutes) |
 | 8083 still reachable | `systemctl start sentinel-guardian`; `journalctl -t sentinel-guardian -n 20` |
 | Network log empty | AdGuard password wrong in the settings tab, or query logging off in AdGuard; also check `tailscale status` if it started right after connecting Tailscale — DNS must have been accepted with `--accept-dns=false` |
@@ -289,7 +289,7 @@ by hand on the box. `journalctl -t sentinel-autoupdate` shows its history.
 | Lockstep Sync pairing link says "This link has expired or was already used" | Install and enable the Lockstep Sync plugin in Obsidian on the target device **before** opening the link (the link hands off to the plugin via an `obsidian://` link — with nothing installed to receive it, the attempt still consumes the one-time link). Open a freshly-generated link, on that same device, in an actual browser — not in the terminal, not on a different device, not reused after 60 minutes or after a previous attempt (CLAUDE.md #63) |
 | Lockstep Sync unreachable from another device on the LAN | Confirm the device used the Pi's actual LAN IP, and check `sudo ss -ltn 'sport = :8384'` shows it listening on `0.0.0.0` (CLAUDE.md #62) |
 | Lockstep Sync unreachable from a device away from home | That device needs Tailscale connected to the same tailnet, and must have been paired with the Tailscale address, not the LAN one (`tailscale status`, CLAUDE.md #62) |
-| Music says "playing" but is silent | Read the audio block of `sudo sentinel-logs 2 full`. If `open sentinel_music` FAILS, Guardian rewrites asound.conf within 2 minutes; to do it now, run `sudo /opt/sentinel/scripts/sentinel-fix-audio-output.sh`. To rule mixing out entirely, turn off "play music and voice at the same time" in Settings |
+| Music says "playing" but is silent | Read the audio block of `sudo sentinel-logs 2 full`. If `open sysdefault:CARD=N` FAILS, Guardian repairs the card within 2 minutes; to do it now, run `sudo /opt/sentinel/scripts/sentinel-fix-audio-output.sh` |
 | Setting up Tailscale later | `sudo sentinel-tailscale up` — open the printed login URL in any browser. Check with `sentinel-tailscale status` |
 | Pasting the current state somewhere | `sudo sentinel-logs` — a short digest of just what is currently wrong (`sentinel-logs 6 full` widens it and adds real audio open tests) |
 | Anything else | `sentinel-diagnose` — bundles system + app state into one archive |

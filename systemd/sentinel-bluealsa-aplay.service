@@ -13,8 +13,17 @@ StartLimitIntervalSec=0
 [Service]
 Type=simple
 ExecStartPre=/bin/sleep 3
+# --pcm=sysdefault:CARD=N is rewritten by install.sh with the detected
+# analog output card (see CLAUDE.md's audio-mixing redesign section for
+# why: a plain "default" here used to be silently hijacked by this
+# project's own custom /etc/asound.conf, which no longer exists, but
+# leaving this as a bare "default" would depend on alsa-lib's own
+# card-selection picking the analog jack over HDMI on multi-card Pis -
+# the exact ambiguity CLAUDE.md #37 exists to avoid. Being explicit here
+# removes that dependency entirely, the same way music.py and voice.py
+# are explicit about their own output device.
 # 00:00:00:00:00:00 means "accept any paired device".
-ExecStart=/usr/bin/bluealsa-aplay --pcm=default 00:00:00:00:00:00
+ExecStart=/usr/bin/bluealsa-aplay --pcm=sysdefault:CARD=0 00:00:00:00:00:00
 Restart=always
 RestartSec=5
 Nice=-5
