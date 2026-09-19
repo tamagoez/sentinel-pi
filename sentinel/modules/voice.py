@@ -437,6 +437,39 @@ def speak_test(text: str) -> tuple[bool, str]:
     return True, f"再生しました ({STATE['engine']})"
 
 
+def speak_test_time() -> tuple[bool, str]:
+    """設定タブの「時報をテスト」用。voice_time_interval_minutes の境界を
+    待たず、今すぐ 1 回だけ time_signal_loop() と全く同じ組み立て
+    ({hour}/{minute}/{minute_part}、voice_time_text テンプレート、
+    voice_chime_enabled に従ったチャイム同時再生) で鳴らす。speak_test()
+    は利用者が入力した自由文をそのまま読むだけで、時報カテゴリ固有の
+    プレースホルダ組み立てやチャイム同時再生を経由しないため、時報の
+    文面・音量・効果音を実際に確認したいという要望には別関数が必要
+    だった。**speak_test() を time カテゴリで呼び出すだけの実装に
+    しないでください** — {hour}/{minute}/{minute_part} を渡さないため
+    テンプレートが `_fmt()` の例外経路 (既定文への静かなフォールバック)
+    を踏んでしまい、実際にカスタマイズした文面を確認できません。"""
+    now = time.localtime()
+    minute_part = f"{now.tm_min}分" if now.tm_min else ""
+    text = _fmt("voice_time_text", _CATEGORY_KEYS["time"][2],
+                {"message": "", "hour": now.tm_hour, "minute": now.tm_min,
+                 "minute_part": minute_part})
+    mixing = _mixing_ready()
+    stopped = music.duck_for_voice() if not mixing else False
+    ducked = music.duck_volume_for_voice() if mixing else False
+    chime = mixing and bool(config.get("voice_chime_enabled"))
+    try:
+        _speak_sync(text, "sentinel_voice" if mixing else _fallback_device(), chime)
+    finally:
+        if stopped:
+            music.resume_from_voice()
+        if ducked:
+            music.resume_volume_after_voice()
+    if STATE["last_error"]:
+        return False, STATE["last_error"]
+    return True, f"再生しました ({STATE['engine']}): {text}"
+
+
 async def loop() -> None:
     global _LOOP
     _LOOP = asyncio.get_running_loop()

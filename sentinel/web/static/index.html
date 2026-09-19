@@ -459,6 +459,7 @@ try{
       <button onclick="loadSettings()">再読込</button>
       <button onclick="testWebhook()">Discord にテスト送信</button>
       <button onclick="testVoice()">音声をテスト再生</button>
+      <button onclick="testVoiceTime()">時報をテスト再生</button>
       <a href="/api/config/export"><button>設定をエクスポート</button></a>
       <button onclick="$('#set-import-file').click()">設定をインポート</button>
       <input type="file" id="set-import-file" accept="application/json" style="display:none" onchange="importSettings(this.files[0])">
@@ -2314,6 +2315,17 @@ async function testVoice(){
   $("#set-msg").textContent = "再生中…";
   try{
     const r = await post("/api/voice/test", {text: "音声アナウンスのテストです"});
+    $("#set-msg").textContent = r.message;
+    toast(r.ok ? "再生しました" : `再生失敗: ${r.message}`, !r.ok);
+  }catch(e){ $("#set-msg").textContent = ""; toast(e.message, true); }
+}
+async function testVoiceTime(){
+  // 自由文の testVoice() とは別経路。実際の time_signal_loop() と同じ
+  // テンプレート組み立て・チャイム同時再生を経由するため、境界 (30分
+  // 刻みなど) を待たずに今の時報の文面・音量・効果音をそのまま確認できる。
+  $("#set-msg").textContent = "再生中…";
+  try{
+    const r = await post("/api/voice/test-time", {});
     $("#set-msg").textContent = r.message;
     toast(r.ok ? "再生しました" : `再生失敗: ${r.message}`, !r.ok);
   }catch(e){ $("#set-msg").textContent = ""; toast(e.message, true); }

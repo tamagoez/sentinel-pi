@@ -49,14 +49,59 @@
 # answering, leaving the Pi side silently stuck while the remote device's
 # own confirmation screen times out. The read loop below now answers any
 # "(yes/no)" prompt with "yes" unconditionally (CLAUDE.md #64).
+#
+# Even the "(yes/no)" auto-answer was not enough for every report: real
+# device logs showed "agent NoInputNoOutput" itself sometimes fails with
+# "Failed to register agent object" immediately after bluetoothctl is
+# spawned, followed by "default-agent" failing with "No agent is
+# registered" - because bluetoothctl's own D-Bus connection is not
+# guaranteed to be ready the instant the coproc starts. A pairing attempt
+# made while no agent (or the wrong capability) is registered can fail
+# with an HCI-level auth error before any confirmation prompt is even
+# reachable, which is a different failure than an unanswered prompt and
+# the "(yes/no)" fix above cannot help with it. register_agent() retries
+# "agent NoInputNoOutput" up to 10 times, waiting up to ~3s per attempt
+# for the literal "Agent registered" confirmation line before sending
+# "default-agent" - never trusting a single, unconfirmed registration
+# attempt. If registration still fails after all retries, this logs a
+# warning and continues (power on / discoverable / pairable / trust still
+# run) rather than exiting, matching this project's degrade-gracefully
+# convention. **Do not go back to firing "agent NoInputNoOutput" +
+# "default-agent" once with no confirmation check** - the race is real and
+# intermittent, so it will look fine in casual testing and then fail again
+# on a cold boot (CLAUDE.md #69).
 set -uo pipefail
 
 coproc BTCTL { bluetoothctl; }
 
 send() { printf '%s\n' "$1" >&"${BTCTL[1]}"; }
 
-send "agent NoInputNoOutput"
-send "default-agent"
+register_agent() {
+  local attempt line waited
+  for attempt in $(seq 1 10); do
+    send "agent NoInputNoOutput"
+    waited=0
+    while (( waited < 3 )); do
+      if IFS= read -r -t 1 line <&"${BTCTL[0]}"; then
+        echo "$line"
+        if [[ "$line" == *"Agent registered"* ]]; then
+          send "default-agent"
+          return 0
+        fi
+        if [[ "$line" == *"Failed to register agent"* ]]; then
+          break
+        fi
+      else
+        waited=$((waited + 1))
+      fi
+    done
+    sleep 0.5
+  done
+  echo "sentinel-bt-agent: WARNING: failed to register SSP agent after 10 attempts; pairing confirmation may not work" >&2
+  return 1
+}
+
+register_agent
 send "power on"
 send "discoverable on"
 send "pairable on"

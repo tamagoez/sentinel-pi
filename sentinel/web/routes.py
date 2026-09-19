@@ -578,6 +578,13 @@ async def voice_test(request: Request):
     return {"ok": ok, "message": message}
 
 
+@router.post("/api/voice/test-time")
+async def voice_test_time(request: Request):
+    require(request)
+    ok, message = await asyncio.to_thread(voice.speak_test_time)
+    return {"ok": ok, "message": message}
+
+
 # ---------------------------------------------------------------- Bluetooth
 
 # 固定パスのルートは、"/{action}" のような可変パスのルートより必ず先に
