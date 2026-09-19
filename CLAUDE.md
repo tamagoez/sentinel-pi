@@ -2650,6 +2650,49 @@ ALSA softvol コントロールを新規に持つ、実体の異なる PCM 定�
 実装に戻さないでください** — 同じ「音楽は鳴るのに読み上げとは重ならない」
 不具合に戻ります。
 
+### 66. `JustWorksRepairing` を `always` にする — 既知の端末の再ペアリングが無条件で確認画面に戻される
+
+#64 で「以前は別のプロジェクトで PIN 画面が出なかった」という比較報告が
+ありました。原因を1つに断定できる証拠はありませんが (利用者もその別
+プロジェクトの実装詳細は覚えていない、この節は「確度は中程度だが実害の
+無い、documented な改善」として追加しています)、bluetoothd の main.conf
+を実際に確認したところ、明確に疑わしい既定値が見つかりました。
+
+BlueZ の `main.conf` には `JustWorksRepairing` という設定があり、
+[アップストリームの設定ファイル](https://github.com/Vudentz/BlueZ/blob/master/src/main.conf)
+はこう説明しています。
+
+> "Specify the policy to the JUST-WORKS repairing initiated by peer.
+> Possible values: 'never', 'confirm', 'always'. Defaults to 'never'"
+
+既定 (`never`) は、**すでにペアリング済みの端末が Just Works で再接続
+しようとしても、bluetoothd がそれを無条件で拒否する**という意味です。
+拒否された端末は「新規ペアリング」からやり直すしかなく、これは確認画面
+(PIN/パスキー表示) が出る通常のフローを通ります。
+
+この Pi は Guardian の自己修復で `bluetooth.service` が再起動されうる
+構成です (CLAUDE.md #12/#45/#55)。`bluetoothd` が再起動されるたびに、
+**すでに一度ペアリング済みの端末**が再接続しようとした際にこの
+`JustWorksRepairing=never` の壁に当たり、毎回「新規ペアリングと同じ確認
+画面」を見せられていた可能性があります。「以前は出なかった PIN が今回は
+出る」という体感とも矛盾しません — この Pi は他のどのプロジェクトより
+bluetoothd の再起動頻度が高い設計だからです。
+
+`install.sh` の main.conf 書き換えループに `JustWorksRepairing=always`
+を追加しました。これにより、一度ペアリング済みの端末は
+bluetoothd が再起動されたあとでも確認画面なしで静かに再接続できるように
+なります。**この設定を外さないでください** — 同じ「既知の端末なのに
+毎回確認画面が出る」不具合に戻ります。
+
+**ただし、これは「初回ペアリング」時の確認画面には効きません。**
+`JustWorksRepairing` は名前のとおり「再 (re-) ペアリング」だけが対象で、
+まだ一度もペアリングしたことのない端末の最初の確認画面 (#64 で対処した、
+Pi 側 agent への応答と、相手端末側で表示される確認自体) には無関係です。
+初回ペアリングの確認画面がなぜ出るか (SSP のネゴシエーションの問題か、
+単に相手端末 OS 自体の UX 仕様か) は、この節の時点でも断定できておらず、
+実機の `sentinel-logs`/`journalctl -u bluetooth` で実際のネゴシエーション
+ログを見ないと、これ以上の切り分けはできません。
+
 ## モジュール構成
 
 各モジュールは疎結合で、`core/state.py` の `MODE` を購読するだけです。
