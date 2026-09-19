@@ -287,6 +287,11 @@ class Player:
         self.suspended_by: str = ""        # "eco" | "bluetooth" | "" (退避理由)
         self.last_error: str = ""
         self.seed: int = 0
+        # _spawn() が実際に mpg123 へ渡した -a の値。dmix (sentinel_music)
+        # が使えず plughw:N,0 へフォールバックした状態を loop() が検知し、
+        # dmix が復旧していないか定期的に確認できるようにするため
+        # (CLAUDE.md #67)。
+        self.active_device: str = ""
 
         self._dirty = False
         self._last_persist = 0.0
@@ -373,6 +378,7 @@ class Player:
                     dev = f"plughw:{card},0"
         if dev:
             cmd += ["-a", dev]
+        self.active_device = dev
         try:
             self.proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                          stderr=subprocess.PIPE, text=True, bufsize=1)
@@ -1068,6 +1074,8 @@ async def loop() -> None:
             await asyncio.to_thread(PLAYER.play, PLAYER.position)
 
     last_scan = time.time()
+    last_mix_recheck = time.time()
+    _mix_recheck_backoff = 300
     while True:
         await asyncio.sleep(5)
         # mpg123 が落ちていたら復帰させる (通常モードかつ退避中でないとき)
@@ -1087,6 +1095,37 @@ async def loop() -> None:
             # 続ける復帰ループにはならない。
             audio.invalidate_pcm_cache()
             await asyncio.to_thread(PLAYER.play, PLAYER.position)
+
+        # mpg123 が生きたまま plughw:N,0 へフォールバックしている場合、
+        # 上の「落ちていたら」の分岐には一生入らないため、dmix
+        # (sentinel_music) が後から復旧しても誰も気付かなかった
+        # (CLAUDE.md #67)。さらに悪いことに、mpg123 が plughw:N,0 を
+        # 直接掴み続けている間は、その同じハードウェアデバイスを自分の
+        # スレーブとして開こうとする dmix 側が絶対に開けない — つまり
+        # sentinel-fix-audio-output.sh がどれだけ asound.conf を直しても、
+        # mpg123 が直接出力を掴んだままである限り検証テスト自体が失敗し
+        # 続ける「片方が生きている限りもう片方が直せない」膠着状態になって
+        # いた。**この再確認の前に mpg123 を実際に止めてデバイスを手放さ
+        # ないと、テストは一生失敗し続けます** — 生かしたまま
+        # `_mixing_ready()` を呼ぶだけの実装に戻さないでください。
+        # `_mix_recheck_backoff` は camera.py の再接続バックオフ
+        # (CLAUDE.md #19) と同じ考え方の指数バックオフです。本当に直って
+        # いない環境で毎回 restart_playback() を呼ぶと、5 分おき無期限に
+        # 再生が瞬断し続けるだけになるため、失敗のたびに次回までの間隔を
+        # 倍々に伸ばし (上限 1 時間)、実際に dmix へ切り替われた瞬間に
+        # 短い間隔へ戻します。
+        if (time.time() - last_mix_recheck >= _mix_recheck_backoff
+                and config.get("audio_mixing_enabled")
+                and not str(config.get("alsa_device") or "").strip()
+                and PLAYER.active_device.startswith("plughw:")
+                and PLAYER.proc is not None and PLAYER.proc.poll() is None):
+            last_mix_recheck = time.time()
+            await asyncio.to_thread(restart_playback)
+            if PLAYER.active_device == "sentinel_music":
+                log.info("dmix (sentinel_music) が復旧したため、直接出力から切り替えました")
+                _mix_recheck_backoff = 300
+            else:
+                _mix_recheck_backoff = min(_mix_recheck_backoff * 2, 3600)
 
         PLAYER.persist()
 

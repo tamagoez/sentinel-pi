@@ -2693,6 +2693,78 @@ Pi 側 agent への応答と、相手端末側で表示される確認自体) �
 実機の `sentinel-logs`/`journalctl -u bluetooth` で実際のネゴシエーション
 ログを見ないと、これ以上の切り分けはできません。
 
+### 67. mpg123 が plughw フォールバックを掴み続けると、dmix は二度と復旧できない
+
+実機の `sentinel-logs` で、`sentinel_music`/`sentinel_voice` の実開テストが
+どちらも `aplay: pcm_write:2178: write error: Interrupted system call` で
+失敗し続けているのに、`hw:0,0` 単体は開ける、という報告がありました。この
+エラー文言自体は #19/#46 で見てきた `unable to open slave`/`Invalid
+argument` とは種類が違い、当初は原因不明でした。
+
+同じログの `mpg123` 行が手がかりでした — `mpg123 -o alsa -R --buffer 1024
+-a plughw:0,0`。**mpg123 が dmix (`sentinel_music`) ではなく
+`hw:0,0` を直接掴んでいました。** `music.py` の `_spawn()` は元々
+`_mixing_ready()` が偽なら `plughw:<card>,0` へフォールバックする設計
+(CLAUDE.md #37/#46) で、これ自体は正しい段階的劣化です。しかし ALSA の
+`hw` (`plughw` 経由でも実体は同じ) は排他デバイスで、**dmix は自分の
+スレーブとして同じ `hw:0,0` を掴もうとするため、mpg123 が直接それを
+開いている間は dmix 側が永久に開けません**。つまり一度何らかの理由で
+dmix が壊れて mpg123 がフォールバックへ落ちると、以後
+`sentinel-fix-audio-output.sh` がどれだけ `/etc/asound.conf` を書き直して
+検証テストを走らせても、**その検証テスト自身が mpg123 に阻まれて必ず
+失敗する**という自己再生産のループになっていました。実機で見えていた
+"Interrupted system call" は、この検証用 `aplay` が `hw:0,0` の空きを
+待って `open()` 内で長時間ブロックし、`timeout 6` が痺れを切らして
+SIGTERM を送った結果です。
+
+`music.py` の `loop()` (mpg123 復帰の自己修復ループ) は、これまで
+「mpg123 プロセスが実際に落ちたとき」しか `sentinel_music` を再評価
+しませんでした。フォールバックで**生きたまま**鳴り続けている限り、この
+再評価が一生発火しないため、dmix 側がどれだけ直っても mpg123 は気付けず
+に直接出力を握り続けていました。5 分おきに「`audio_mixing_enabled` が
+有効・`alsa_device` の明示指定なし・現在 `plughw:` へフォールバック中・
+mpg123 生存中」の場合だけ、実際に `restart_playback()` (mpg123 を止めて
+`hw` を手放してから再度 `play()` する、既存の関数) を呼んで dmix が
+使えるようになっていないか試すようにしました。**mpg123 を止めずに
+`_mixing_ready()` だけ呼ぶ実装には絶対に戻さないでください** —
+`hw:0,0` を握ったままではテスト自体が同じ理由で失敗し続けます。復旧に
+毎回失敗する環境で 5 分おき無期限に再生が瞬断するのを避けるため、
+失敗のたびに次回までの間隔を倍々に伸ばす指数バックオフ (上限 1 時間、
+camera.py の `_CORRUPT_RECONNECT_MAX_BACKOFF` と同じ考え方、CLAUDE.md
+#19) を掛け、実際に dmix へ切り替われた瞬間に短い間隔へ戻します。
+
+`sentinel-logs` にも、`mpg123` の実際のコマンドラインに `-a plughw:` が
+含まれる場合はその旨を明示する行を追加しました。今回この一致に気付くまで
+時間がかかったので、次に同じ症状が来たら `sentinel_music`/`sentinel_voice`
+の開テストが失敗している行の直前に、まずこの `mpg123 output` 行を見て
+ください。**このヒントを外さないでください** — 同じ「エラーの種類だけ
+見て原因不明のまま `.broken` へ退避し続ける」切り分けの遠回りに戻ります。
+
+### 68. 時報の効果音は `voice_chime_path` で任意のファイルを指定できる
+
+これまで時報 (CLAUDE.md #58) と同時に鳴らす効果音は、標準ライブラリの
+`wave`/`math` で毎回同じ波形を合成する固定音 (A5→E6 の2音) だけでした。
+「音楽ファイルを指定したいが、できない」という報告を受け、`voice_chime_path`
+(設定タブ、既定 "") を追加しました。Pi 上の実ファイルパスをそのまま
+文字列で受け取ります — ファイル選択 UI は用意せず、既存の `alsa_device`
+と同じ「空欄ならこの機能自体が既定動作、値があればそれを直接使う」という
+テキスト入力パターンに揃えています。
+
+- **`.wav`** はこれまでどおり `aplay` へ、**`.mp3`** は `mpg123` の
+  単発起動 (`mpg123 -o alsa -a sentinel_voice <path>`) へ渡します。
+  `aplay` は mp3 をデコードできないため、`voice_chime_path` に音楽
+  ライブラリの曲 (yt-dlp の取得物は全て mp3、CLAUDE.md #2) を指定したい
+  という自然な使い方に応えるには mpg123 経由が必須でした。この単発
+  mpg123 は常駐する `music.Player` (`-a sentinel_music`) とは別プロセス
+  で `-a sentinel_voice` を使うため、dmix 上の別スロットに入り、鳴って
+  いる曲と競合しません (CLAUDE.md #31)。
+- **存在しない・.wav/.mp3 以外の拡張子なら、警告ログを残して既定の合成音
+  へ静かにフォールバックします。** 「時報自体は鳴らし続ける」という
+  このプロジェクト全体の段階的劣化方針 (#27 の Open JTalk→espeak-ng
+  フォールバックなどと同じ) を踏襲しています。**この
+  フォールバックを外して「ファイルが無ければ無音」にしないでください**
+  — 設定ミス 1 つで時報の効果音機能全体が沈黙します。
+
 ## モジュール構成
 
 各モジュールは疎結合で、`core/state.py` の `MODE` を購読するだけです。
@@ -2725,7 +2797,12 @@ scripts/sentinel-logs.sh
                     同じ文を何十回も出すため、これだけで実用的な長さに
                     なる)。冒頭にサービス・ストレージ・音声・ポートの状態
                     ブロックを置き、数字に文脈を与える。tar.gz を作る
-                    sentinel-diagnose とは用途が別 (CLAUDE.md #42)
+                    sentinel-diagnose とは用途が別 (CLAUDE.md #42)。
+                    mpg123 が plughw:N,0 (dmix を経由しない直接出力) を
+                    掴んでいる場合はその旨を明示し (CLAUDE.md #67)、
+                    sentinel-bt-agent のペアリング生ログ (Confirm
+                    passkey・trust 等) を直近 40 行そのまま出す
+                    (CLAUDE.md #64/#67 の切り分け用)
 scripts/sentinel-adguard-8083.sh
                     AdGuard Home の :8083 への直接アクセスを一時的に
                     有効化 / 恒久的に無効化する (人が手動で実行する)
@@ -2844,7 +2921,13 @@ modules/music.py        mpg123 制御、位置復帰、yt-dlp キュー。alsa_d
                          直下のサブフォルダそのもの。music_category_filter
                          で再生対象を絞り込み、move_track()/
                          find_track_path() で曲名からカテゴリーをまたいで
-                         実ファイルを扱う (CLAUDE.md #56)
+                         実ファイルを扱う (CLAUDE.md #56)。loop() は
+                         plughw:N,0 フォールバックで生きたまま鳴り続けて
+                         いる間、5 分おき (指数バックオフ付き) に
+                         restart_playback() で dmix (sentinel_music) へ
+                         戻れないか試す — mpg123 が hw を直接掴んだままだと
+                         dmix 側が永久に開けないため、mpg123 を実際に止め
+                         ないと再評価そのものが成立しない (CLAUDE.md #67)
 modules/thermal.py      温度と CPU -> MODE.report_temperature()
 modules/bluetooth.py    A2DP 接続検知 -> 音楽の退避と復帰。この Pi 自身の
                          表示名 (set_local_name、bluetoothctl system-alias)
@@ -2894,7 +2977,10 @@ modules/voice.py        Open JTalk 優先/espeak-ng フォールバックの音�
                          dmix でミキシングできる場合、時報カテゴリだけ
                          _play_chime() が TTS と並行して短い効果音を鳴らす
                          (Popen で開始し、finally で回収 - 待ってから
-                         喋り始めない、CLAUDE.md #58)
+                         喋り始めない、CLAUDE.md #58)。voice_chime_path
+                         で内蔵の合成音の代わりに任意の .wav/.mp3 を指定
+                         できる (.mp3 は単発 mpg123、.wav は aplay、存在
+                         しなければ合成音へフォールバック、CLAUDE.md #68)
 
 web/routes.py           全 HTTP / WebSocket エンドポイント。latest.jpg の
                          ように他プロセスが継続的に上書きするファイルは
