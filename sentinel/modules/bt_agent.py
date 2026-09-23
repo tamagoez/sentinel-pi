@@ -9,9 +9,17 @@
 は削除せずに残してあるので、原因を特定できたら `main.py` の import と
 `SUPERVISOR.spawn("bt-agent", bt_agent.loop)` を戻すだけで復活できる。
 
+**機能停止後、別のバグも見つかっている** (`Agent` クラスの `@method()`
+デコレータ付きメソッドに `-> None` という戻り値注釈を書いていたため、
+dbus-next 側が `ValueError: service annotations must be a string
+constant (got None)` で毎回例外落ちしていた — 修正済み、戻り値注釈を
+省略すれば直る)。機能停止中は無害だが、次に再有効化を試すときは
+このバグ自体は解消済みであることを踏まえたうえで、まず登録レースが
+本当に直ったかを見ること。
+
 **ペアリングは今は端末タブから手動で行う。** `bluetoothctl` を対話的に
 起動すると、ツール自身が自分を agent として登録し (NoInputNoOutput 相当
-の既定动作、確認プロンプトへは `yes` と答えるだけ)、これは本来このモジュ
+の既定動作、確認プロンプトへは `yes` と答えるだけ)、これは本来このモジュ
 ールが目指していたことと同じで、しかも実機で安定して動く。Web UI の
 端末タブ (`modules/terminal.py`) から `sudo bluetoothctl` を開き、
 `scan on` → `pair <MAC>` → `trust <MAC>` → `connect <MAC>` の手順で
@@ -111,8 +119,18 @@ async def loop() -> None:
         def __init__(self) -> None:
             super().__init__("org.bluez.Agent1")
 
+        # dbus-next の @method() は関数の型注釈をそのまま D-Bus シグネチャ
+        # として解釈する ("o"/"s"/"u"/"q" などの文字列リテラルを使う、
+        # dbus-next 自身の慣習)。**戻り値なしのメソッドに `-> None` を
+        # 書かないこと** — dbus-next は戻り値注釈を「文字列定数のはず」
+        # として処理するため、Python の None 型 (文字列ではない) を渡すと
+        # `ValueError: service annotations must be a string constant
+        # (got None)` でエージェント登録そのものが例外落ちする (実機の
+        # supervisor ログで確認済み)。戻り値注釈を丸ごと省略すれば
+        # 「出力引数なし」を意味し、この問題を避けられる。
+
         @method()
-        def Release(self) -> None:
+        def Release(self):
             pass
 
         @method()
@@ -120,7 +138,7 @@ async def loop() -> None:
             return "0000"
 
         @method()
-        def DisplayPinCode(self, device: "o", pincode: "s") -> None:  # noqa: F821
+        def DisplayPinCode(self, device: "o", pincode: "s"):  # noqa: F821
             pass
 
         @method()
@@ -128,23 +146,23 @@ async def loop() -> None:
             return 0
 
         @method()
-        def DisplayPasskey(self, device: "o", passkey: "u", entered: "q") -> None:  # noqa: F821
+        def DisplayPasskey(self, device: "o", passkey: "u", entered: "q"):  # noqa: F821
             pass
 
         @method()
-        def RequestConfirmation(self, device: "o", passkey: "u") -> None:  # noqa: F821
+        def RequestConfirmation(self, device: "o", passkey: "u"):  # noqa: F821
             pass
 
         @method()
-        def RequestAuthorization(self, device: "o") -> None:  # noqa: F821
+        def RequestAuthorization(self, device: "o"):  # noqa: F821
             pass
 
         @method()
-        def AuthorizeService(self, device: "o", uuid: "s") -> None:  # noqa: F821
+        def AuthorizeService(self, device: "o", uuid: "s"):  # noqa: F821
             pass
 
         @method()
-        def Cancel(self) -> None:
+        def Cancel(self):
             pass
 
     backoff = _RETRY_MIN

@@ -786,8 +786,11 @@ function renderBluetooth(){
         <button onclick="btAction('pairable_off')">ペアリングを禁止</button>
       </div>
       <div class="faint" style="font-size:10.5px;margin-top:8px">
-        新しい端末との初回ペアリングは、端末タブで <code>bluetoothctl</code>
-        を実行して行ってください (<code>scan on</code> → <code>pair &lt;MAC&gt;</code>
+        既定では discoverable/pairable はオフです (謎の端末が勝手にペアリング
+        されるのを防ぐため)。「ペアリングを許可」を押すと 3 分間だけ開き、
+        自動で閉じます。新しい端末との初回ペアリングは、開いている間に
+        端末タブで <code>bluetoothctl</code> を実行して行ってください
+        (<code>scan on</code> → <code>pair &lt;MAC&gt;</code>
         → <code>trust &lt;MAC&gt;</code>)。ここのボタンは discoverable/pairable の
         切り替えのみです。
       </div>`;
