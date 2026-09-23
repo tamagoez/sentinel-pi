@@ -3130,6 +3130,166 @@ bash の `coproc` として動かし、その標準出力をパースして「�
 すべてこの節で置き換えられた設計です。**これらの節の記述を信じて
 古い実装へ戻さないでください。**
 
+### 73. Bluetooth ペアリングエージェントを機能停止し、代わりに BGM の Bluetooth 出力を追加。動体検知の破損検出にタイル化けパターンを追加
+
+#72 で dbus-next ベースに刷新した `modules/bt_agent.py` (BlueZ Agent1 の
+D-Bus 直接実装) は、それでも実機で "Failed to register agent object" の
+再登録ループが収まらないという報告があった。「小手先の変更では無理」
+という判断のもと、**この機能自体をいったん停止する**ことにした —
+`main.py` はもう `bt_agent.loop()` を spawn しない (import もしない)。
+`modules/bt_agent.py` 自体は削除せず、冒頭に機能停止中である旨と復活の
+手順を明記して残してある。**この判断は「直せなかったから諦める」では
+なく「この用途 (ペアリング要求への自動応答) は代替手段がある」という
+判断**である — `bluetoothctl` を対話的に起動すると、ツール自身が自分を
+agent として登録し (確認プロンプトには `yes` と答えるだけ)、これは
+実機で安定して動く。Web UI の端末タブから `bluetoothctl` を開いて
+`scan on` → `pair <MAC>` → `trust <MAC>` で一度ペアリングすれば、
+以後の接続・再接続は `modules/bluetooth.py` が (エージェント無しで)
+自動的に行う — エージェントは初回ペアリングの確認応答にしか関与しない
+ため、機能停止の影響はそこに限られる。**`main.py` の import/spawn を
+安易に復活させないでください** — 復活させるなら、まず実機で登録
+レースが本当に解消したことを確認してからにすること。
+
+**BGM を Bluetooth のヘッドホン/スピーカーへ流す新機能を追加した。**
+これまでの Bluetooth 連携は「電話がこの Pi へ接続し、Pi のスピーカーで
+再生する」(Pi が A2DP **シンク**) の一方向だけだった。今回追加したのは
+逆方向 — **この Pi が A2DP **ソース**としてヘッドホン/スピーカーへ
+能動的に接続し、BGM (音楽ライブラリ) と時報をそこへ流す**機能である。
+「昔 bluealsa-aplay を使っていた頃は PIN 無しで普通に運用できた」という
+利用者の証言 (#72 の抜本的刷新の発端) とも合致する、bluealsa 自体が
+最初から持っている能力を使うだけの実装にしている。
+
+- **`systemd/sentinel-bluealsa.service` の `ExecStart` に `-p
+  a2dp-source` を追加した** (`-p a2dp-sink -p a2dp-source`、
+  `install.sh` の sed も同様)。同じ bluealsad プロセスが両方の役割を
+  同時に持てる — 受信 (電話→Pi) と送信 (Pi→ヘッドホン) は BlueZ の
+  プロファイルとしては別物だが、bluealsa 側でデーモンを分ける必要はない。
+- **`bootstrap.sh` に `libasound2-plugin-bluez` を追加した** (best-effort
+  の別ステップ、失敗しても他のパッケージを巻き込まない)。これが
+  `libasound_module_pcm_bluealsa.so` という ALSA I/O プラグイン本体を
+  提供する — `bluez-alsa-utils` (bluealsa-cli/bluealsa-aplay) とは
+  **別の Debian パッケージ**であることを見落とすと、`bluealsa:DEV=...`
+  という拡張デバイス名を mpg123/aplay が一切解決できず、原因不明の
+  "unknown pcm" エラーで沈黙する。
+- **出力先の指定は `bluealsa:DEV=<MAC>,PROFILE=a2dp` という ALSA の拡張
+  デバイス名構文**で、`/etc/asound.conf` への登録は一切不要 (`aplay -D`
+  と全く同じ書式)。`core/audio.py` の設計判断 (#72、`sysdefault:CARD=<N>`
+  も設定ファイル不要) と同じ精神 — 新しい設定ファイルを増やさない。
+  `music.py` の `Player._spawn()` は `self.bt_output_addr` が立っていれば
+  この文字列を、無ければ従来どおり `sysdefault:CARD=<N>` を `mpg123 -a`
+  に渡す。
+- **`modules/bluetooth.py` に `output_loop()` を新設**し、`bt_enabled` の
+  下で `main.py` から独立に spawn する (`SUPERVISOR.spawn("bluetooth-output",
+  bluetooth.output_loop)`)。`bt_output_device` (設定 = 音楽タブの「BGM
+  出力先」セレクタ) に MAC アドレスが入っている間、**解除されるまで
+  自動で接続を試み続ける** — 受信側 (`loop()`) は電話が繋ぎに来るのを
+  待つだけでよいが、送信側は Pi が能動的に `bluetoothctl connect` を
+  送らないと繋がらない。接続の実際の確立は `bluetoothctl` の
+  "Connected: yes" だけでは判断せず、`bluealsa-cli list-pcms` の出力に
+  `.../a2dpsrc` パスが現れているかで確認する
+  (`_output_pcm_ready()`) — ACL 接続は繋がっていても A2DP のプロファイル
+  ネゴシエーションがまだ済んでいないことがあり、これは受信側の音量制御
+  (`.../a2dpsnk`、#72) が同じ理由で D-Bus 経由の確認を使っているのと
+  同じ考え方。接続に失敗し続ける場合は camera.py の破損フレーム再接続
+  (#19) と同じ指数バックオフ (10 秒 → 上限 120 秒) をかけ、電源が
+  入っていない/範囲外の端末に無意味な `connect` を送り続けない。
+  設定を解除 (`bt_output_device` を空文字に) した瞬間には、今まさに
+  繋がっている端末があれば明示的に `bluetoothctl disconnect` する —
+  「再接続を試みるのをやめる」だけでは端末側は繋がったままバッテリーを
+  消費し続けるため。
+
+**出力先ごとに音量・EQ を独立させた** (`bt_output_profiles`: MAC ->
+  {volume, eq_enabled, eq_bands})。「デバイスを変えると音量が異常に
+  大きくなったりしないように」という要望への直接の対応で、AUX 用の
+  `music_volume`/`music_eq_*` とは完全に別領域に保存する
+  (`music.py` の `_active_output_profile()` が今の実効出力先を見てどちら
+  を使うか判断する唯一の窓口)。`Player._spawn()`/`Player._apply_eq()`/
+  `Player.set_volume()` はすべてここを経由するため、AUX で 90% にして
+  いたところへ、まだ 30% しか設定していない新しいヘッドホンを繋いでも
+  いきなり 90% で鳴り始めることはない — そのヘッドホン自身のプロファイル
+  (未設定なら既定 60%) が使われる。曲ごとの EQ 上書き
+  (`music_eq_track_overrides`) だけは出力先に関わらず共通のまま
+  (`resolve_eq_bands()` の `base_bands` 引数) — 「この曲は低音が強すぎる」
+  といった補正は曲自体の性質であって、どのスピーカーで聞くかには依存
+  しないと判断した。**この分離をやめて出力先を跨いで音量/EQ を共有する
+  実装に戻さないでください** — 同じ「デバイスを変えると音量が急に変わる」
+  不具合に戻ります。音楽タブの「イコライザー」カードのスコープ選択に、
+  ペアリング済み端末が動的に追加される (`bt:<MAC>` という内部値) ことで、
+  AUX の全体設定・曲ごとの上書き・Bluetooth 出力機器ごとの設定を同じ UI
+  から切り替えられるようにしている。
+
+**Bluetooth 出力中の音声アナウンスは「重ねる」のではなく「一時停止」に
+した。** AUX (`sysdefault:CARD=<N>`) は alsa-lib の dmix が複数ストリーム
+を構造的に受け付けるため、音楽とアナウンスを重ねて鳴らせる (#72) が、
+**bluealsa の A2DP ソース PCM にはそのような多重化層が無く、同時に開ける
+クライアントは 1 つだけ**— 音声アナウンス側が同じデバイスを開こうとする
+と "device busy" で失敗する。`music.py` に `pause_for_voice()`/
+`resume_after_voice()` (mpg123 の `P` コマンドで一時停止/解除するだけ、
+プロセス自体は落とさないので `_gen` 世代カウンタ (#50) は無関係) を
+追加し、`begin_voice_interrupt()`/`end_voice_interrupt()` という共通の
+窓口で出力先に応じてどちらを使うか (AUX なら `duck_volume_for_voice()`
+で音量だけ下げる、Bluetooth なら `pause_for_voice()` で一時停止する) を
+自動選択する。`voice.py` の `loop()`/`speak_test()`/`speak_test_time()`
+はすべてこの窓口だけを呼ぶ — 出力先の判定を複数箇所に重複させると、
+どこか 1 箇所だけ更新し忘れて Bluetooth 出力中に音量制御 (何も効かない)
+を呼んでしまう、といった不整合が起きやすいため。`voice.py` の `_device()`
+自体も `music.current_output_device()` を呼ぶだけになり、音楽と時報は
+常に同じ出力先 (AUX か、選択中の Bluetooth 機器) から聞こえる。
+
+**時報の効果音 (チャイム) が声を「かき消す」報告への対応として、
+`voice_chime_volume` を新設し `voice_volume` (読み上げ本体) と分離した。**
+これまではどちらも同じ `voice_volume` を共有しており、チャイムが声より
+大きく聞こえる場合に両方を一緒に下げるしかなかった。`_speak_sync()` は
+チャイムに `voice_chime_volume`、TTS 本体に `voice_volume` を別々に渡す。
+**この 2 つを再び同じ設定値にまとめないでください** — 同じ「声が効果音に
+負ける」報告に戻ります。
+
+**音声テンプレートのプレースホルダを増やし、文面をより柔軟に組み立て
+られるようにした。** `voice.py` に `_time_values()` を新設し (
+`time_signal_loop()`/`speak_test_time()` の両方がこれを使う — 片方だけに
+新しいプレースホルダを足して食い違う事故を防ぐ)、時報のテンプレートで
+`{hour}`/`{minute}`/`{minute_part}` に加えて `{weekday}` (月〜日)・
+`{hour12}`・`{ampm}` (午前/午後)・`{month}`・`{day}` が使えるようになった。
+さらに `_fmt()` 自身が `{time}` (現在時刻 HH:MM) をどのカテゴリでも
+共通して補うようにしたため、`voice_error_text`/`voice_camera_reboot_text`/
+`voice_other_text` のような `{message}` だけのテンプレートでも「いつ
+起きたか」を文面に含められる。
+
+**動体検知の破損フレーム検出に、単色ブロック化とは別のパターン
+(タイル化け/モザイク化) を追加した。** 利用者から「何も無いときに検知
+し、逆に人が居るときに検知が外れる」という報告があり、添付されたカメラ
+ごとの破損の実例を見ると、片方のカメラは既存の検出器が対象としていた
+「一部が単色で埋まる」パターンだったが、もう片方は**同じ小さな画像が
+タイル状に何度も繰り返し出現する**、全く別の壊れ方をしていた —
+MJPEG のフレーム内で再同期がずれ、デコーダが同じマクロブロックデータを
+複数タイル分にわたって読み違える、と考えられる。この壊れ方は #19/#28
+のフラット判定 (セルごとの標準偏差が低いか) をすり抜ける — タイル自体は
+本物の映像の断片なので内部にちゃんと分散があり、「平坦」には該当しない
+ため。すり抜けた結果、この破損フレームが `latest.jpg`・動体判定・`prev`
+(次フレームとの比較用基準) にそのまま使われ、「何も無いのに検知する」
+(隣接フレーム間でタイルの現れ方が変わるたびに大きな差分が出る) と
+「人が居ても検知が外れる」(破損フレームが基準になると、次の正常な
+フレームとの差分が破損由来のノイズに埋もれる/`motion_area_max_ratio` の
+上限で弾かれる) の両方の原因になっていたと考えられる。
+
+`camera.py` の `_frame_corruption_ratio()` に、各セルをさらに 4x4 へ
+縮小し輝度を粗く 8 段階へ量子化した signature を作り、最も多く出現する
+signature の面積比が閾値 (`corrupt_tile_repeat_ratio`、既定 0.35、
+カメラごとに上書き可能) を超えたら「タイル化けの疑いあり」とする検出を
+追加した。平坦セル自身が同じ signature に量子化されて一致するのは当然
+なので、それだけでは二重計上しない — 平坦「ではない」セルが同じ
+signature で大量に繰り返している場合だけをこの経路で扱う。既存の
+`known_ok_patterns` 学習の仕組み (#19、同じ位置・同じ柄が何フレームも
+連続したらカメラ本来の絵として許容する) はそのまま両方の検出経路で
+共有している — セル単位の「平坦か」と「支配的 signature と一致するか」
+の 2 つの真偽値をペアにしたものをパターンのキーとして使うだけで、学習の
+ロジック自体には変更が要らなかった。処理コストは 48 セル分の 4x4 への
+縮小と Counter 集計だけで、既存のフラット判定と同じ頻度 (`motion_interval`
+ごと、カメラごとに 1 回) で回しても Pi 3B+ で無視できる範囲に収まる。
+**このタイル化け検出を外して単色ブロック化の判定だけに戻さないで
+ください** — 同じ「破損の種類によっては検知をすり抜ける」不具合に
+戻ります。
+
 ## モジュール構成
 
 各モジュールは疎結合で、`core/state.py` の `MODE` を購読するだけです。
@@ -3166,9 +3326,10 @@ scripts/sentinel-logs.sh
                     ブロックを置き、数字に文脈を与える。tar.gz を作る
                     sentinel-diagnose とは用途が別 (CLAUDE.md #42)。
                     Bluetooth ペアリングエージェント (modules/bt_agent.py)
-                    は sentinel.service の中で動くため、専用の journal
-                    抽出は無く「sentinel (app)」の digest にそのまま
-                    含まれる (CLAUDE.md #72)
+                    は現在 spawn されていない (機能停止中、CLAUDE.md #73)
+                    ため、専用の journal 抽出は元から無い。動いていた頃も
+                    sentinel.service の中で動くため「sentinel (app)」の
+                    digest にそのまま含まれる設計だった
 scripts/sentinel-adguard-8083.sh
                     AdGuard Home の :8083 への直接アクセスを一時的に
                     有効化 / 恒久的に無効化する (人が手動で実行する)
@@ -3207,7 +3368,7 @@ scripts/sentinel-autoupdate.sh
 core/config.py      設定の唯一の保管場所。型と範囲を強制する
 core/state.py       モード状態機械。「今どのモードか」の唯一の決定者
 core/supervisor.py  タスク監督。例外で落ちても指数バックオフで再起動する
-core/audio.py       ALSA のアナログ出力カード (3.5mm) を特定する
+core/audio.py       ALSA のアナログ出力カード (3.5mm、AUX) を特定する
                     find_output_card()。aplay -l の最初のカードを無条件
                     で使うと機体によって HDMI を掴むため、"Headphones"
                     優先 → "bcm2835" → 最初のカードの順で探す。
@@ -3216,7 +3377,11 @@ core/audio.py       ALSA のアナログ出力カード (3.5mm) を特定する
                     不要) を組み立てる — music.py/bluetooth.py/voice.py
                     が共通で使う (CLAUDE.md #37/#72)。pcm_opens() は
                     ALSA デバイス名が実際に開けるかを /dev/zero の 1 秒
-                    再生で試す (CLAUDE.md #46)
+                    再生で試す (CLAUDE.md #46)。BGM の Bluetooth 出力先
+                    (bluealsa:DEV=<MAC>,PROFILE=a2dp) はこのモジュールを
+                    経由しない — こちらは AUX 専用、Bluetooth 出力の
+                    デバイス文字列組み立ては music.current_output_device()
+                    が担う (CLAUDE.md #73)
 
 modules/camera.py       カメラ (別プロセス)。動体検知 -> MODE.report_motion()
                          個別カメラの上書き設定は config の camera_overrides
@@ -3227,8 +3392,9 @@ modules/camera.py       カメラ (別プロセス)。動体検知 -> MODE.repor
                          全体が一度に変化するケースを上限で除外)・
                          motion_warmup_seconds (開いた直後は判定を休止) を持つ。
                          USB 帯域不足による破損フレーム (単色ブロック化/フレーム
-                         混在) は _frame_corruption_ratio() で検出し、latest.jpg
-                         への公開・動体判定・保存の前に捨てる (CLAUDE.md #19)。
+                         混在、およびタイル状に同じ柄が繰り返し出現するモザイク化)
+                         は _frame_corruption_ratio() で検出し、latest.jpg
+                         への公開・動体判定・保存の前に捨てる (CLAUDE.md #19/#73)。
                          動体判定自体もヒステリシスを持つ — motion_confirm_checks
                          回連続で閾値超えが続いて初めて「開始」、
                          motion_release_checks 回連続で閾値割れが続いて初めて
@@ -3242,47 +3408,77 @@ modules/camera.py       カメラ (別プロセス)。動体検知 -> MODE.repor
                          ON_CORRUPT_REBOOT フック経由で Pi 再起動を要求する
                          (実際の再起動は maintenance.emergency_reboot() に
                          委譲、CLAUDE.md #22/#60)
-modules/music.py        mpg123 制御、位置復帰、yt-dlp キュー。alsa_device が
-                         空なら core/audio.analog_device() (sysdefault:
-                         CARD=<N>) を使う (CLAUDE.md #72)。イコライザー
-                         (music_eq_enabled/music_eq_bands/
-                         music_eq_track_overrides) は mpg123 自身のリモート
-                         EQ コマンド (`E <ch> <band> <gain>`、32 サブバンド)
-                         を Player._apply_eq() が直接送る — 再生中に即座に
-                         反映され、mpg123 の再起動も外部設定ファイルも
-                         不要 (CLAUDE.md #72、旧 #32/#35 の LADSPA 実装を
-                         置き換え)。mpg123 プロセスを意図して落とす
-                         (eco/Bluetooth/voice の退避、stop()) 前には必ず
-                         _gen を進める。_read_loop() は自分が読んでいる
-                         プロセスの世代を固定引数で持ち、@P 0 などを処理
-                         する前に現在の _gen と一致するか確認してからで
-                         ないと _advance_and_play() を呼ばない — 世代が
+modules/music.py        mpg123 制御、位置復帰、yt-dlp キュー。出力先は
+                         Player.bt_output_addr が立っていれば
+                         bluealsa:DEV=<MAC>,PROFILE=a2dp (Bluetooth 出力、
+                         bluetooth.output_loop() が set_bt_output() 経由で
+                         のみ書き換える)、無ければ alsa_device/
+                         core/audio.analog_device() (sysdefault:CARD=<N>、
+                         AUX) を使う (CLAUDE.md #72/#73)。音量・EQ は
+                         _active_output_profile() が現在の出力先ごとに
+                         別領域 (AUX = music_volume/music_eq_*、Bluetooth
+                         出力機器 = bt_output_profiles[addr]) から読む —
+                         出力先を切り替えても前の出力先の音量を引き継がない
+                         (CLAUDE.md #73)。current_output_device() が
+                         voice.py 向けに今の実効出力デバイス文字列を返す。
+                         イコライザー (enabled/bands は出力先ごとに別、
+                         music_eq_track_overrides だけ共通) は mpg123
+                         自身のリモート EQ コマンド (`E <ch> <band>
+                         <gain>`、32 サブバンド) を Player._apply_eq() が
+                         直接送る — 再生中に即座に反映され、mpg123 の
+                         再起動も外部設定ファイルも不要 (CLAUDE.md #72、
+                         旧 #32/#35 の LADSPA 実装を置き換え)。mpg123
+                         プロセスを意図して落とす (eco/Bluetooth 受信/
+                         voice の退避、出力先切り替え、stop()) 前には
+                         必ず _gen を進める。_read_loop() は自分が読んで
+                         いるプロセスの世代を固定引数で持ち、@P 0 などを
+                         処理する前に現在の _gen と一致するか確認してから
+                         でないと _advance_and_play() を呼ばない — 世代が
                          古ければ suspended_by の値に関わらず無視する
                          (CLAUDE.md #50)。yt-dlp はプレイリスト URL を
                          そのまま取得でき (--no-playlist を付けない)、
                          --progress-template の機械可読な進捗行を都度
                          DOWNLOADS の該当 entry (percent/eta/item_index/
                          item_count/message) へ反映する (CLAUDE.md #52)。
-                         duck_volume_for_voice()/resume_volume_after_voice()
-                         は曲を止めずに音量だけ voice_duck_percent の割合
-                         まで一時的に下げる (CLAUDE.md #54/#72)。
+                         begin_voice_interrupt()/end_voice_interrupt() が
+                         voice.py の唯一の窓口 — AUX 出力中は
+                         duck_volume_for_voice() で音量だけ一時的に下げ、
+                         Bluetooth 出力中は pause_for_voice() で一時停止
+                         する (bluealsa の A2DP ソース PCM は同時に開ける
+                         クライアントが 1 つだけのため、CLAUDE.md #73)。
                          カテゴリー (「勉強用」「休憩用」) は MUSIC_DIR
                          直下のサブフォルダそのもの。music_category_filter
                          で再生対象を絞り込み、move_track()/
                          find_track_path() で曲名からカテゴリーをまたいで
                          実ファイルを扱う (CLAUDE.md #56)
 modules/thermal.py      温度と CPU -> MODE.report_temperature()
-modules/bluetooth.py    A2DP 接続検知 -> 音楽の退避と復帰。この Pi 自身の
-                         表示名 (set_local_name、bluetoothctl system-alias)
-                         と相手端末のエイリアス (set_alias、D-Bus 直叩き) は
-                         別物なので混同しないこと。端末ごとの音量は
+modules/bluetooth.py    受信 (電話 -> Pi、A2DP シンク) と送信 (Pi -> ヘッド
+                         ホン、A2DP ソース) の両方を扱う。受信は loop() が
+                         接続検知 -> 音楽の退避と復帰 (STATE)。送信は
+                         output_loop() が bt_output_device (設定タブ/
+                         音楽タブで選んだ MAC) への接続を解除するまで自動で
+                         維持し (OUTPUT_STATE)、状態が変わるたびに
+                         music.set_bt_output() で伝える。接続確立の確認は
+                         どちらも bluetoothctl の "Connected: yes" だけに
+                         頼らず、bluealsa-cli list-pcms の D-Bus パス
+                         (受信 = .../a2dpsnk、送信 = .../a2dpsrc) で行う
+                         (CLAUDE.md #73)。この Pi 自身の表示名
+                         (set_local_name、bluetoothctl system-alias) と
+                         相手端末のエイリアス (set_alias、D-Bus 直叩き) は
+                         別物なので混同しないこと。受信端末ごとの音量は
                          bluealsa-cli (soft-volume を on にしてから
                          volume を書く、0-127) を使う — numid=1 (共有
                          ハードウェアレジスタ) はもう触らない (CLAUDE.md
-                         #72)。ペアリングエージェントは modules/bt_agent.py
-                         が別途担当する
+                         #72)。送信 (BGM 出力) 側の音量/EQ は music.py の
+                         bt_output_profiles が持つ (CLAUDE.md #73)
 modules/bt_agent.py     Bluetooth ペアリングエージェント (org.bluez.Agent1
                          を D-Bus に直接エクスポート、dbus-next 使用)。
+                         **main.py から現在 spawn されていない (機能停止中、
+                         CLAUDE.md #73)** — この実装でも実機で D-Bus
+                         登録レースが解消しなかったため。新しい端末との
+                         ペアリングは端末タブの bluetoothctl を対話的に
+                         実行して行う (ツール自身が自分を agent として
+                         登録する)。以下は実装の設計メモ:
                          bluetoothctl のテキストスクレイピングに依存せず、
                          RegisterAgent()/RequestDefaultAgent() の成否を
                          同期呼び出しの例外の有無でそのまま判定する。
@@ -3322,18 +3518,28 @@ modules/maintenance.py  4 時の定時処理と再起動。emergency_reboot() �
 modules/voice.py        Open JTalk 優先/espeak-ng フォールバックの音声
                          アナウンス (時報・エラー・カメラ再起動・その他
                          システムイベント)。mpg123 の音楽ライブラリとは
-                         別経路、core/audio.analog_device() (music.py と
-                         同じ sysdefault:CARD=<N>) を使い曲を止めずに
-                         重ねて鳴らす (CLAUDE.md #72)。重ねる間は
-                         voice_duck_percent の設定に従って
-                         music.duck_volume_for_voice() が音楽の音量だけ
-                         一時的に下げる (CLAUDE.md #54)。音量は
+                         別経路、_device() は music.current_output_device()
+                         をそのまま使う — 音楽と時報は常に同じ出力先
+                         (AUX か、選択中の Bluetooth 出力機器) から聞こえる
+                         (CLAUDE.md #73)。アナウンス中に音楽をどう扱うかは
+                         music.begin_voice_interrupt()/end_voice_interrupt()
+                         に一任する — AUX 中は voice_duck_percent の設定に
+                         従って音量だけ一時的に下げ、Bluetooth 出力中は
+                         一時停止する (bluealsa の A2DP ソース PCM は同時に
+                         開けるクライアントが 1 つだけのため、CLAUDE.md
+                         #73、旧 #54 の全面 AUX 前提から変更)。音量は
                          _scale_wav() が TTS/効果音の WAV サンプルを
                          Python 側で直接スケールする — ALSA のミキサー/
-                         softvol は一切経由しない (CLAUDE.md #72)。
-                         時報は voice_time_interval_minutes (既定 30 分、
-                         60 の約数を推奨) の壁時計境界で鳴る (CLAUDE.md #53)。
-                         時報の文面は既定で {minute_part} を使い、0 分の
+                         softvol は一切経由しない (CLAUDE.md #72)。効果音
+                         (チャイム) 自体の音量は voice_chime_volume で
+                         voice_volume (読み上げ本体) と独立している
+                         (CLAUDE.md #73)。時報は voice_time_interval_minutes
+                         (既定 30 分、60 の約数を推奨) の壁時計境界で鳴る
+                         (CLAUDE.md #53)。時報の文面は _time_values()
+                         ({hour}/{minute}/{minute_part}/{weekday}/
+                         {hour12}/{ampm}/{month}/{day}、CLAUDE.md #73) と
+                         _fmt() が全カテゴリ共通で補う {time} を使って
+                         組み立てる。既定文は {minute_part} を使い、0 分の
                          ときは「〜時です」(「〜時0分です」にならない、
                          CLAUDE.md #58)。voice_chime_enabled が有効なら
                          時報カテゴリだけ _play_chime() が TTS と並行して
@@ -3344,8 +3550,9 @@ modules/voice.py        Open JTalk 優先/espeak-ng フォールバックの音�
                          (音量は -f スケール)、.wav は aplay、存在しなけ
                          れば合成音へフォールバック、CLAUDE.md #68/#72)。
                          speak_test_time() は time_signal_loop() と同じ
-                         組み立て・チャイム条件で、壁時計の境界を待たずに
-                         今すぐ 1 回だけテスト再生する (CLAUDE.md #71)
+                         _time_values()・チャイム条件で、壁時計の境界を
+                         待たずに今すぐ 1 回だけテスト再生する
+                         (CLAUDE.md #71/#73)
 
 web/routes.py           全 HTTP / WebSocket エンドポイント。latest.jpg の
                          ように他プロセスが継続的に上書きするファイルは
@@ -3358,7 +3565,12 @@ web/routes.py           全 HTTP / WebSocket エンドポイント。latest.jpg 
                          する — レスポンスを返した直後にスタックフレームが
                          消える HTTP ハンドラでは、参照を保持しないと GC に
                          タスクを回収され、定時処理が「実行中」のまま永久に
-                         固まる (CLAUDE.md #59)
+                         固まる (CLAUDE.md #59)。/api/bluetooth/output
+                         (GET/POST) は BGM の出力先候補・状態の取得と
+                         選択/解除、/api/music/eq/bt/{addr} は Bluetooth
+                         出力機器ごとの EQ — どちらも固定パスなので
+                         /api/bluetooth/{action} より前に登録すること
+                         (このファイル冒頭のコメント参照、CLAUDE.md #73)
 web/static/index.html   単一ファイル SPA。イベントページのタイムライン表示
                          (renderEventsRecall() 以下) が既定表示。URL アクセス
                          トラックは buildNetSpans()/packNetRows() で「点」
@@ -3372,7 +3584,13 @@ web/static/index.html   単一ファイル SPA。イベントページのタイ�
                          可視化する (メインスクリプトの読み込みを待つと、
                          Tailscale 越しなど往復が伸びる経路で「一瞬
                          ダッシュボードが見えてから遷移先が見える」症状に
-                         なる、CLAUDE.md #49)
+                         なる、CLAUDE.md #49)。音楽タブの「BGM 出力先」
+                         カードが Bluetooth 出力機器の選択/解除、イコラ
+                         イザーカードの #eq-scope は "global"/"track" に
+                         加えペアリング済み端末ごとの "bt:<MAC>" を動的に
+                         追加する — AUX 全体設定・曲ごとの上書き・
+                         Bluetooth 出力機器ごとの設定を同じ UI で切り替える
+                         (CLAUDE.md #73)
 ```
 
 ### モジュールを追加するとき

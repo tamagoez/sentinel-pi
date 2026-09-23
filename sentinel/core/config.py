@@ -118,6 +118,13 @@ DEFAULTS: dict[str, Any] = {
                                            # みなす、平坦なセルの面積比の下限。
                                            # 低くすると小さな破損も拾いやすくなる
                                            # 代わりに誤検知が増える (CLAUDE.md #19)
+    "corrupt_tile_repeat_ratio": 0.35,    # 「同じ小さな柄が何度も繰り返し出現して
+                                           # いる」破損 (MJPEG の再同期ずれでタイル状
+                                           # に同じデータが複製されるパターン、単色
+                                           # ブロック化とは別の壊れ方) とみなす、
+                                           # 最多出現 signature の面積比の下限。
+                                           # 平坦セルと違って中身に分散があるため
+                                           # corrupt_min_area_ratio では拾えない
     "corrupt_reboot_threshold": 4,        # 強制再接続してもこの回数だけ破損が
                                            # 解消しなければ、まずカメラを完全に
                                            # 切断する中間段階へ進み、それでも
@@ -169,9 +176,28 @@ DEFAULTS: dict[str, Any] = {
                                            # 指定が無い曲は music_eq_bands を使う
 
     # --- Bluetooth ---
-    "bt_enabled": True,
+    "bt_enabled": True,                   # 受信 (電話 -> Pi) / 送信 (Pi -> ヘッド
+                                           # ホン、bt_output_device) の両方の
+                                           # 元栓 (modules/bluetooth.py の loop()/
+                                           # output_loop() が共通で見る)
     "bt_poll_seconds": 3.0,
-    "bt_device_volumes": {},              # MAC アドレス -> 音量(%) (接続時に自動適用)
+    "bt_device_volumes": {},              # MAC アドレス -> 音量(%) (接続時に自動適用、
+                                           # 受信側=電話からの音声の音量)
+    "bt_output_device": "",               # BGM の送信先 (Pi -> ヘッドホン/スピーカー)
+                                           # の MAC アドレス。空なら AUX
+                                           # (alsa_device/sysdefault:CARD=<N>) へ出力
+                                           # する。設定すると解除するまで
+                                           # output_loop() が自動で接続を試み続ける。
+                                           # ペアリングは端末タブの bluetoothctl で
+                                           # 事前に済ませておく必要がある
+                                           # (modules/bt_agent.py 参照)
+    "bt_output_profiles": {},             # MAC アドレス -> {"volume": 0-100,
+                                           # "eq_enabled": bool, "eq_bands": {...}}。
+                                           # 出力先ごとに音量・EQ を独立して覚える —
+                                           # AUX 用の music_volume/music_eq_* とは
+                                           # 別領域なので、出力先を切り替えても
+                                           # 音量が急に変わらない (music.py の
+                                           # _active_output_profile() 参照)
 
     # --- 通知 ---
     "discord_webhook": "",
@@ -245,15 +271,22 @@ DEFAULTS: dict[str, Any] = {
                                            # 揃わない半端な時刻に鳴る。既定の 30
                                            # なら毎時 :00 と :30 に鳴る
     "voice_time_text": "{hour}時{minute_part}です",         # {hour} {minute} {minute_part}
+                                           # {weekday} {hour12} {ampm} {month} {day}
+                                           # {time} も使える (voice.py 参照)。
                                            # {minute_part} は 0 分のとき空文字になる
                                            # ({minute} は常に数値のまま渡る) -
                                            # 既定文で「12時0分です」ではなく
                                            # 「12時です」と言うための専用
-                                           # プレースホルダ (voice.py 参照)
+                                           # プレースホルダ。他の voice_*_text も
+                                           # 含め、すべてのカテゴリで共通して
+                                           # {time} (現在時刻 HH:MM) が使える
     "voice_chime_enabled": False,         # 時報と同時に短い効果音を重ねて鳴らす。
-                                           # dmix でミキシングできる場合のみ有効
-                                           # (曲を完全停止する経路では鳴らさない -
-                                           # そちらは「同時に」を満たせないため)
+                                           # Bluetooth 出力中は音楽を一時停止してから、
+                                           # AUX (sysdefault) 出力中は重ねたまま鳴らす
+    "voice_chime_volume": 50,             # 効果音 (チャイム) 自体の音量 (0-100)。
+                                           # voice_volume (読み上げ本体) とは独立 -
+                                           # 「時報の声が効果音に負けて聞き取れない」
+                                           # 場合はこちらを下げる
     "voice_chime_path": "",               # voice_chime_enabled が有効なとき、既定の
                                            # 合成音 (A5->E6) の代わりに鳴らすファイル
                                            # の実パス。空なら従来どおり合成音を使う。
@@ -351,6 +384,7 @@ _RANGES: dict[str, tuple[float, float]] = {
     "motion_release_checks": (1, 10),
     "save_cooldown": (1.0, 300.0),
     "corrupt_min_area_ratio": (0.02, 0.9),
+    "corrupt_tile_repeat_ratio": (0.1, 0.9),
     "corrupt_reboot_threshold": (1, 20),
     "corrupt_disconnect_seconds": (30, 1800),
     "retention_days": (1, 3650),
@@ -366,6 +400,7 @@ _RANGES: dict[str, tuple[float, float]] = {
     "timelapse_tile_width": (160, 1280),
     "session_hours": (1, 8760),
     "voice_volume": (0, 100),
+    "voice_chime_volume": (0, 100),
     "voice_duck_percent": (0, 100),
     "voice_rate": (0.5, 2.0),
     "voice_time_interval_minutes": (1, 720),

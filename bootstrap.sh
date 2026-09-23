@@ -151,14 +151,20 @@ fi
 
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -qq
-# bluez-alsa-utils: the A2DP sink itself, plus bluealsa-cli (used by
-# modules/bluetooth.py for per-device volume - CLAUDE.md's Bluetooth
-# redesign section). The pairing agent is modules/bt_agent.py, a D-Bus
-# Agent1 implementation running inside sentinel.service itself (via the
-# dbus-next pip package, installed by install.sh into the venv) - not
-# bluez-tools' bt-agent binary, which has a known NoInputNoOutput
-# regression on Bullseye+ that breaks iOS pairing, so bluez-tools is not
-# installed here.
+# bluez-alsa-utils: bluealsad itself (run in both -p a2dp-sink, receiving
+# from a phone, and -p a2dp-source, sending BGM out to a headphone/speaker -
+# see install.sh's STEP 7 and CLAUDE.md's Bluetooth-output section), plus
+# bluealsa-cli (used by modules/bluetooth.py for per-device volume and by
+# modules/bluetooth.py's output_loop() to check whether the A2DP-source PCM
+# for the selected output device is actually up). modules/bt_agent.py (a
+# D-Bus Agent1 implementation, via the dbus-next pip package installed by
+# install.sh) exists for pairing automation but is not currently spawned by
+# main.py (see that module's docstring) - bluez-tools' bt-agent binary is
+# not installed here either way, since it has a known NoInputNoOutput
+# regression on Bullseye+ that breaks iOS pairing. Pairing a new device
+# (either direction - a phone streaming to this Pi, or this Pi streaming to
+# a headphone) is done manually with `bluetoothctl` from the web UI's
+# terminal tab, which registers its own reliable agent.
 # exfatprogs/ntfs-3g: dietpi-drive_manager can mount exFAT/NTFS drives, but
 # without these packages that mount can fail outright. Even with them,
 # such drives have no real Unix ownership - install.sh and Guardian handle
@@ -192,6 +198,20 @@ apt-get install -y --no-install-recommends \
   qrencode >/dev/null 2>&1 \
   && ok "Bluetooth-audio, camera, exFAT/NTFS and voice packages installed" \
   || w "Some packages failed to install."
+
+# libasound2-plugin-bluez: the ALSA I/O plugin (libasound_module_pcm_bluealsa.so)
+# that lets any ALSA client - mpg123, aplay, this project's own
+# core/audio.pcm_opens() probe - open a device string like
+# "bluealsa:DEV=<mac>,PROFILE=a2dp" directly, with no /etc/asound.conf entry
+# needed for it. It is a separate binary package from bluez-alsa-utils (which
+# only ships bluealsa-cli/bluealsa-aplay, not the plugin itself), so it is
+# installed in its own best-effort step: an apt-get line fails as a whole if
+# any one package name in it does not exist on a given release, and this
+# package is newer than the always-required ones above, so it must not be
+# able to take those down with it if it is ever missing from a repo.
+apt-get install -y --no-install-recommends libasound2-plugin-bluez >/dev/null 2>&1 \
+  && ok "BlueALSA ALSA plugin installed (needed for BGM-to-Bluetooth-speaker output)" \
+  || w "libasound2-plugin-bluez not available; BGM-to-Bluetooth-speaker output will not work (AUX playback is unaffected)."
 
 # ---------------------------------------------------------------- 6. Audio
 c "STEP 6/9  Route audio to the 3.5mm jack (AUX)"

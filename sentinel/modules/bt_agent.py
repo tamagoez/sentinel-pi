@@ -1,5 +1,27 @@
 """Bluetooth ペアリングエージェント (BlueZ Agent1, D-Bus 直接実装).
 
+**現在 main.py から spawn していません (機能停止中)。** dbus-next への
+移行 (このファイル、CLAUDE.md の Bluetooth ペアリング刷新の節) を経ても
+実機で "Failed to register agent object" の再登録ループが収まらず、
+`sentinel.service` の journal がこのループのログで埋まり続ける状態が
+改善しなかった。当面この用途 (自動でのペアリング応答) 自体の必要性が
+薄れたこともあり、直しきるより先に機能を止める判断をした — このファイル
+は削除せずに残してあるので、原因を特定できたら `main.py` の import と
+`SUPERVISOR.spawn("bt-agent", bt_agent.loop)` を戻すだけで復活できる。
+
+**ペアリングは今は端末タブから手動で行う。** `bluetoothctl` を対話的に
+起動すると、ツール自身が自分を agent として登録し (NoInputNoOutput 相当
+の既定动作、確認プロンプトへは `yes` と答えるだけ)、これは本来このモジュ
+ールが目指していたことと同じで、しかも実機で安定して動く。Web UI の
+端末タブ (`modules/terminal.py`) から `sudo bluetoothctl` を開き、
+`scan on` → `pair <MAC>` → `trust <MAC>` → `connect <MAC>` の手順で
+一度ペアリングすれば、以後は (このモジュールが動いていなくても)
+`modules/bluetooth.py` の接続検知・自動再接続 (`output_loop()` 含む)
+がそのまま機能する — エージェントは初回ペアリングの確認応答にしか
+関与しないため。
+
+以下は dbus-next 実装そのものの設計メモ (機能停止中でも参考のため残す):
+
 これは `scripts/sentinel-bt-agent.sh` (bluetoothctl の対話セッションを
 bash の coproc でテキストスクレイピングする実装) の置き換えです。
 

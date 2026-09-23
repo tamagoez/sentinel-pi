@@ -80,7 +80,7 @@ import subprocess
 import time
 import uuid
 
-from ..core import audio, config
+from ..core import config
 from . import music
 
 log = logging.getLogger("sentinel.voice")
@@ -103,7 +103,13 @@ _CATEGORY_KEYS = {
 def _fmt(key: str, default: str, values: dict) -> str:
     """設定タブのテンプレート文字列を安全に .format() する
     (notify.py の _fmt() と同じ方式)。知らない {プレースホルダ} や壊れた
-    書式が来ても例外で読み上げ全体を落とさず、既定文へ静かに戻す。"""
+    書式が来ても例外で読み上げ全体を落とさず、既定文へ静かに戻す。
+    `{time}` (現在時刻 HH:MM) はどのカテゴリでも共通して使えるよう、
+    呼び出し元が明示的に渡していなければここで補う — voice_error_text/
+    voice_other_text/voice_camera_reboot_text のような {message} だけの
+    テンプレートでも「いつ起きたか」を文面に含められるようにするため
+    (時報カテゴリは hour/minute など専用のプレースホルダを別途渡す)。"""
+    values = {"time": time.strftime("%H:%M"), **values}
     template = str(config.get(key) or default)
     try:
         return template.format(**values)
@@ -178,11 +184,12 @@ def _has_open_jtalk() -> bool:
 
 
 def _device() -> str | None:
-    """aplay/mpg123 へ渡す出力デバイス。music.py・bluetooth.py と同じ
-    core/audio.analog_device() (`sysdefault:CARD=<N>`) を使う — alsa-lib
-    自身の per-card dmix ルートなので、音楽・Bluetooth と自動的に重なって
-    鳴る (CLAUDE.md の音声ミキシング刷新の節)。"""
-    return audio.analog_device()
+    """aplay/mpg123 へ渡す出力デバイス。music.current_output_device() を
+    そのまま使う — BGM が Bluetooth 出力機器 (bt_output_device) へ流れて
+    いるときはそちらへ、そうでなければ AUX (core/audio.analog_device()、
+    `sysdefault:CARD=<N>`) へ、常に音楽と同じ場所から音声アナウンスが
+    聞こえるようにする。"""
+    return music.current_output_device()
 
 
 _CHIME_PATH = config.RUNTIME / "voice-chime.wav"
@@ -378,10 +385,15 @@ def _speak_espeak(text: str, rate: float, device: str | None, percent: int) -> b
 
 def _speak_sync(text: str, device: str | None, chime: bool = False) -> None:
     percent = max(0, min(100, int(config.get("voice_volume"))))
+    # チャイム自体の音量は voice_volume (読み上げ本体) とは独立した
+    # voice_chime_volume を使う。同じ値を共有していると、チャイムが声を
+    # かき消して聞き取れない場合にどちらも一緒に下げるしかなかった
+    # (実際に報告された不具合)。
+    chime_percent = max(0, min(100, int(config.get("voice_chime_volume"))))
     # チャイムは TTS の合成 (open_jtalk/espeak-ng) を待たずに鳴らし始める。
     # 合成には短い時間がかかるが、鳴らし終わりは finally で必ず回収する
     # (回収しないと aplay の短命プロセスがゾンビのまま残り続ける)。
-    chime_proc = _play_chime(device, percent) if chime else None
+    chime_proc = _play_chime(device, chime_percent) if chime else None
     try:
         rate = float(config.get("voice_rate"))
         ok = False
@@ -411,43 +423,65 @@ def _speak_sync(text: str, device: str | None, chime: bool = False) -> None:
 
 
 def speak_test(text: str) -> tuple[bool, str]:
-    """設定タブの「テスト再生」用。キューを経由せず即座に鳴らす。曲を
-    止めず、voice_duck_percent の設定に従って音量だけ一時的に下げる。"""
-    ducked = music.duck_volume_for_voice()
+    """設定タブの「テスト再生」用。キューを経由せず即座に鳴らす。AUX 出力
+    中は voice_duck_percent の設定に従って音量だけ一時的に下げ、
+    Bluetooth 出力中は曲を一時停止する (music.begin_voice_interrupt() が
+    出力先に応じてどちらか選ぶ)。"""
+    interrupt = music.begin_voice_interrupt()
     try:
         _speak_sync(text, _device())
     finally:
-        if ducked:
-            music.resume_volume_after_voice()
+        if interrupt:
+            music.end_voice_interrupt(interrupt)
     if STATE["last_error"]:
         return False, STATE["last_error"]
     return True, f"再生しました ({STATE['engine']})"
 
 
+_WEEKDAY_JA = ["月", "火", "水", "木", "金", "土", "日"]
+
+
+def _time_values(now: "time.struct_time") -> dict:
+    """時報テンプレート用のプレースホルダをまとめて組み立てる。
+    time_signal_loop() と speak_test_time() の両方がこれを使う — 片方だけ
+    に新しいプレースホルダを足して食い違う、という事故を避けるため。
+
+    {hour}/{minute}: 生の数値。{minute_part}: 0 分のとき空文字 ({minute}分
+    ではなく「〜時です」と言うための既定文専用、CLAUDE.md 参照)。
+    {weekday}: 「月」〜「日」(曜日の 1 文字、「{weekday}曜日」のように
+    テンプレート側で組み立てる)。{hour12}/{ampm}: 12時間表記が読み上げに
+    向く場合向け。{month}/{day}: 日付を読み上げたいテンプレート向け。"""
+    minute_part = f"{now.tm_min}分" if now.tm_min else ""
+    hour12 = now.tm_hour % 12 or 12
+    return {
+        "hour": now.tm_hour, "minute": now.tm_min, "minute_part": minute_part,
+        "weekday": _WEEKDAY_JA[now.tm_wday], "hour12": hour12,
+        "ampm": "午前" if now.tm_hour < 12 else "午後",
+        "month": now.tm_mon, "day": now.tm_mday,
+    }
+
+
 def speak_test_time() -> tuple[bool, str]:
     """設定タブの「時報をテスト」用。voice_time_interval_minutes の境界を
     待たず、今すぐ 1 回だけ time_signal_loop() と全く同じ組み立て
-    ({hour}/{minute}/{minute_part}、voice_time_text テンプレート、
-    voice_chime_enabled に従ったチャイム同時再生) で鳴らす。speak_test()
-    は利用者が入力した自由文をそのまま読むだけで、時報カテゴリ固有の
-    プレースホルダ組み立てやチャイム同時再生を経由しないため、時報の
-    文面・音量・効果音を実際に確認したいという要望には別関数が必要
-    だった。**speak_test() を time カテゴリで呼び出すだけの実装に
-    しないでください** — {hour}/{minute}/{minute_part} を渡さないため
-    テンプレートが `_fmt()` の例外経路 (既定文への静かなフォールバック)
-    を踏んでしまい、実際にカスタマイズした文面を確認できません。"""
-    now = time.localtime()
-    minute_part = f"{now.tm_min}分" if now.tm_min else ""
+    (_time_values()、voice_time_text テンプレート、voice_chime_enabled に
+    従ったチャイム同時再生) で鳴らす。speak_test() は利用者が入力した
+    自由文をそのまま読むだけで、時報カテゴリ固有のプレースホルダ組み立て
+    やチャイム同時再生を経由しないため、時報の文面・音量・効果音を実際に
+    確認したいという要望には別関数が必要だった。**speak_test() を time
+    カテゴリで呼び出すだけの実装にしないでください** — {hour}/{minute}
+    などを渡さないためテンプレートが `_fmt()` の例外経路 (既定文への
+    静かなフォールバック) を踏んでしまい、実際にカスタマイズした文面を
+    確認できません。"""
     text = _fmt("voice_time_text", _CATEGORY_KEYS["time"][2],
-                {"message": "", "hour": now.tm_hour, "minute": now.tm_min,
-                 "minute_part": minute_part})
-    ducked = music.duck_volume_for_voice()
+                {"message": "", **_time_values(time.localtime())})
+    interrupt = music.begin_voice_interrupt()
     chime = bool(config.get("voice_chime_enabled"))
     try:
         _speak_sync(text, _device(), chime)
     finally:
-        if ducked:
-            music.resume_volume_after_voice()
+        if interrupt:
+            music.end_voice_interrupt(interrupt)
     if STATE["last_error"]:
         return False, STATE["last_error"]
     return True, f"再生しました ({STATE['engine']}): {text}"
@@ -465,15 +499,16 @@ async def loop() -> None:
         if _bt.STATE.get("connected"):
             STATE["skipped"] += 1
             continue
-        # 曲を止めず、voice_duck_percent の設定に従って音楽の音量だけ
-        # 一時的に下げる (duck_volume_for_voice())。話し終えたら元に戻す。
-        ducked = await asyncio.to_thread(music.duck_volume_for_voice)
+        # AUX 出力中は音楽の音量だけ一時的に下げ (voice_duck_percent)、
+        # Bluetooth 出力中は曲を一時停止する — begin_voice_interrupt() が
+        # 現在の出力先を見てどちらか選ぶ。話し終えたら元に戻す。
+        interrupt = await asyncio.to_thread(music.begin_voice_interrupt)
         chime = category == "time" and bool(config.get("voice_chime_enabled"))
         try:
             await asyncio.to_thread(_speak_sync, text, _device(), chime)
         finally:
-            if ducked:
-                await asyncio.to_thread(music.resume_volume_after_voice)
+            if interrupt:
+                await asyncio.to_thread(music.end_voice_interrupt, interrupt)
 
 
 async def time_signal_loop() -> None:
@@ -492,9 +527,7 @@ async def time_signal_loop() -> None:
         if bucket == last_bucket:
             continue
         last_bucket = bucket
-        # ちょうど 0 分のときに「12時0分です」と言うと不自然なので、その
-        # 場合だけ {minute_part} を空文字にする ({minute} は生の数値のまま
-        # 残すので、自前のテンプレートで "{minute}分" を使い続けたい場合も
-        # 壊れない)。
-        minute_part = f"{now.tm_min}分" if now.tm_min else ""
-        announce("", "time", hour=now.tm_hour, minute=now.tm_min, minute_part=minute_part)
+        # _time_values() が hour/minute/minute_part に加え weekday/hour12/
+        # ampm/month/day も渡す — speak_test_time() と全く同じプレース
+        # ホルダ集合 (CLAUDE.md 参照)。
+        announce("", "time", **_time_values(now))

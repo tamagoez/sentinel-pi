@@ -121,6 +121,7 @@ def _overview() -> dict:
         "cameras": camera.status(),
         "music": music.PLAYER.status(),
         "bluetooth": bluetooth.status(),
+        "bluetooth_output": bluetooth.output_status(),
         "netlog": {"state": netlog.STATE, "summary": netlog.today_summary()[:10]},
         "notify": notify.STATE,
         "voice": voice.STATE,
@@ -461,6 +462,37 @@ async def music_eq_set_track(name: str, request: Request):
     return {"ok": True, "bands": cur}
 
 
+@router.get("/api/music/eq/bt/{addr}")
+async def music_eq_get_bt(addr: str, request: Request):
+    """Bluetooth 出力機器ごとの EQ。AUX の /api/music/eq とは別領域 —
+    出力先を切り替えても他方の設定に影響しない (music.py の
+    _active_output_profile() 参照)。"""
+    require(request)
+    addr = addr.upper()
+    profiles = config.get("bt_output_profiles") or {}
+    p = profiles.get(addr) or {}
+    return {
+        "bands_hz": music.EQ_BAND_HZ,
+        "enabled": bool(p.get("eq_enabled", False)),
+        "bands": p.get("eq_bands") or {},
+        "volume": int(p.get("volume", 60)),
+    }
+
+
+@router.put("/api/music/eq/bt/{addr}")
+async def music_eq_set_bt(addr: str, request: Request):
+    require(request)
+    body = await request.json()
+    bands = body.get("bands")
+    enabled = body.get("enabled")
+    if bands is not None and not isinstance(bands, dict):
+        raise HTTPException(400, "バンドの指定が不正です")
+    cur = await asyncio.to_thread(
+        music.set_bt_output_eq, addr.upper(),
+        enabled=(bool(enabled) if enabled is not None else None), bands=bands)
+    return {"ok": True, "profile": cur}
+
+
 @router.post("/api/music/{action}")
 async def music_action(action: str, request: Request):
     require(request)
@@ -640,6 +672,28 @@ async def bluetooth_set_local_name(request: Request):
     name = str(body.get("name") or "")
     ok, message = await asyncio.to_thread(bluetooth.set_local_name, name)
     return {"ok": ok, "message": message}
+
+
+@router.get("/api/bluetooth/output")
+async def bluetooth_output_get(request: Request):
+    """BGM の出力先 (Pi -> ヘッドホン/スピーカー) の候補一覧と現在の状態。
+    受信側の /api/bluetooth/devices とは別の向き — ペアリング済み端末の
+    一覧を候補として使い回しているだけで、対象・状態は完全に独立。"""
+    require(request)
+    candidates = await asyncio.to_thread(bluetooth.output_candidates)
+    return {"status": bluetooth.output_status(), "candidates": candidates,
+            "selected": str(config.get("bt_output_device") or "")}
+
+
+@router.post("/api/bluetooth/output")
+async def bluetooth_output_set(request: Request):
+    """出力先を設定/解除する。addr="" で解除 (AUX へ戻る)。設定すると
+    bluetooth.output_loop() が解除されるまで自動で接続を試み続ける。"""
+    require(request)
+    body = await request.json()
+    addr = str(body.get("addr") or "")
+    ok, message = await asyncio.to_thread(bluetooth.set_output_device, addr)
+    return {"ok": ok, "message": message, "status": bluetooth.output_status()}
 
 
 @router.post("/api/bluetooth/{action}")

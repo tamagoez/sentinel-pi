@@ -279,7 +279,8 @@ by hand on the box. `journalctl -t sentinel-autoupdate` shows its history.
 | No cameras | `ls /dev/v4l/by-id/`, `dmesg \| tail -30` |
 | Audio stutters | test raw: `mpg123 <file>`; raise `mpg123 buffer` in settings; stop PulseAudio if present |
 | No sound at all | `aplay -l`; re-run `/boot/dietpi/func/dietpi-set_hardware soundcard rpi-bcm2835-3.5mm` and reboot |
-| Can't pair Bluetooth | the pairing agent runs inside `sentinel.service` (`journalctl -u sentinel -n 50 \| grep -i agent`); `bluetoothctl show` should say `Discoverable: yes` |
+| Can't pair Bluetooth | the automatic pairing agent (`modules/bt_agent.py`) is currently disabled (it kept losing its D-Bus registration race on real hardware) - pair manually from the web UI's terminal tab instead: `sudo bluetoothctl`, then `scan on` → `pair <MAC>` → `trust <MAC>` → `connect <MAC>`; `bluetoothctl show` should say `Discoverable: yes` first (or toggle it from the Bluetooth card in Settings) |
+| BGM won't play over a Bluetooth speaker/headphone | pair it first as above, then pick it under "BGM 出力先" on the Music tab; `bluealsa-cli -q list-pcms` should show a `.../a2dpsrc` path for it once connected; if not, check that `libasound2-plugin-bluez` installed (`sudo dpkg -l libasound2-plugin-bluez`) |
 | A `sentinel-bluealsa*` unit shows `failed (start-limit-hit)` | `sudo systemctl reset-failed sentinel-bluealsa.service sentinel-bluealsa-aplay.service && sudo systemctl restart sentinel-bluealsa.service sentinel-bluealsa-aplay.service` (Guardian also does this automatically within 2 minutes) |
 | 8083 still reachable | `systemctl start sentinel-guardian`; `journalctl -t sentinel-guardian -n 20` |
 | Network log empty | AdGuard password wrong in the settings tab, or query logging off in AdGuard; also check `tailscale status` if it started right after connecting Tailscale — DNS must have been accepted with `--accept-dns=false` |

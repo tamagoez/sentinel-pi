@@ -149,21 +149,54 @@ def _eq_band_index(hz: float) -> int:
     return max(0, min(_EQ_SUBBANDS - 1, idx))
 
 
-def resolve_eq_bands(track_name: str | None) -> list[float]:
+def resolve_eq_bands(track_name: str | None, base_bands: dict | None = None) -> list[float]:
     """曲名 (track_path.name) に対して実際に使うべき 15 バンドのゲイン
     (dB) を返す。曲ごとの上書き (music_eq_track_overrides) があればそれを
-    優先し、無ければ全体設定 (music_eq_bands)、それも無ければ 0dB (フラット)。"""
-    global_bands = config.get("music_eq_bands") or {}
+    優先し、無ければ base_bands (省略時は AUX の全体設定 music_eq_bands)、
+    それも無ければ 0dB (フラット)。base_bands は Bluetooth 出力機器ごとの
+    全体設定 (bt_output_profiles[addr]["eq_bands"]) を渡すためのもの —
+    曲ごとの上書きだけは出力先に関わらず共通 (「この曲は低音が強すぎる」
+    といった補正は、どのスピーカーで聞くかに依存しないため)。"""
+    if base_bands is None:
+        base_bands = config.get("music_eq_bands") or {}
     overrides = (config.get("music_eq_track_overrides") or {}).get(track_name or "") or {}
     out = []
     for hz in EQ_BAND_HZ:
         if hz in overrides:
             out.append(float(overrides[hz]))
-        elif hz in global_bands:
-            out.append(float(global_bands[hz]))
+        elif hz in base_bands:
+            out.append(float(base_bands[hz]))
         else:
             out.append(0.0)
     return out
+
+
+def _active_output_profile() -> dict:
+    """現在の実効出力 (AUX か、選択中の Bluetooth 出力機器) に対応する
+    音量/EQ 設定を返す。`PLAYER.bt_output_addr` が立っていれば
+    `bt_output_profiles[addr]` を、無ければ従来どおり AUX 用の
+    `music_volume`/`music_eq_enabled`/`music_eq_bands` を使う。出力先ごと
+    に独立させているのは、出力先を切り替えた瞬間に前の出力先の音量が
+    そのまま引き継がれて「音量が急に変わる」ことを防ぐため — 例えば
+    AUX で 90% にしていたところへ、まだ 30% しか設定していない新しい
+    Bluetooth ヘッドホンを繋いだ場合に、いきなり 90% で鳴り始めては
+    ヘッドホンでは耳に痛いほど大きすぎる、といった事故を避けられる。
+    曲ごとの EQ 上書き (music_eq_track_overrides) はここには含めない —
+    出力先に関わらず共通の補正として resolve_eq_bands() 側で重ねる。"""
+    addr = PLAYER.bt_output_addr
+    if not addr:
+        return {
+            "volume": int(config.get("music_volume")),
+            "eq_enabled": bool(config.get("music_eq_enabled")),
+            "eq_bands": dict(config.get("music_eq_bands") or {}),
+        }
+    profiles = config.get("bt_output_profiles") or {}
+    p = profiles.get(addr) or {}
+    return {
+        "volume": int(p.get("volume", 60)),
+        "eq_enabled": bool(p.get("eq_enabled", False)),
+        "eq_bands": dict(p.get("eq_bands") or {}),
+    }
 
 
 def _eq_subband_gains(enabled: bool, bands_db: list[float] | None) -> tuple[float, ...]:
@@ -213,6 +246,15 @@ class Player:
         self.seed: int = 0
         # _spawn() が実際に mpg123 へ渡した -a の値。状態表示・診断用。
         self.active_device: str = ""
+        # 現在の BGM 出力先。None (既定) なら AUX
+        # (alsa_device/core.audio.analog_device())、MAC アドレスなら
+        # Bluetooth (bluealsa:DEV=<addr>,PROFILE=a2dp)。
+        # bluetooth.output_loop() が set_bt_output() 経由でのみ書き換える —
+        # ここを直接いじらないこと (_spawn()/_apply_eq()/set_volume() は
+        # すべてこの値を見て AUX/Bluetooth のどちらの音量・EQ プロファイル
+        # を使うか判断する、_active_output_profile() 参照)。
+        self.bt_output_addr: str | None = None
+        self.bt_output_name: str = ""
         # 直近に mpg123 へ送った EQ ゲイン (32 サブバンド)。変化が無ければ
         # 再送を省く軽いメモ — 送らなくても実害は無いが、曲が切り替わる
         # たびに 32 行を無条件で送るのは無駄なので memo する。
@@ -286,11 +328,18 @@ class Player:
         # 本当の ALSA のエラーがログから消えます。
         cmd = ["mpg123", "-o", "alsa", "-R",
                "--buffer", str(int(config.get("mpg123_buffer_kb")))]
-        # 空なら core/audio.analog_device() が返す sysdefault:CARD=<N> を
-        # 使う — alsa-lib 自身が用意する per-card dmix ルートで、設定
-        # ファイル無しに音声アナウンス (voice.py) や bluealsa-aplay と
-        # 自動的に重なって鳴る (CLAUDE.md の音声ミキシング刷新の節)。
-        dev = str(config.get("alsa_device") or "").strip() or audio.analog_device() or ""
+        if self.bt_output_addr:
+            # Bluetooth 出力機器が選択・接続中ならそちらへ直接送る。bluealsa
+            # の ALSA I/O プラグイン (libasound2-plugin-bluez) が提供する
+            # 拡張デバイス名構文で、/etc/asound.conf への登録は不要
+            # (aplay -D と全く同じ書式)。
+            dev = f"bluealsa:DEV={self.bt_output_addr},PROFILE=a2dp"
+        else:
+            # 空なら core/audio.analog_device() が返す sysdefault:CARD=<N> を
+            # 使う — alsa-lib 自身が用意する per-card dmix ルートで、設定
+            # ファイル無しに音声アナウンス (voice.py) や bluealsa-aplay と
+            # 自動的に重なって鳴る (CLAUDE.md の音声ミキシング刷新の節)。
+            dev = str(config.get("alsa_device") or "").strip() or audio.analog_device() or ""
         if dev:
             cmd += ["-a", dev]
         self.active_device = dev
@@ -315,7 +364,11 @@ class Player:
         self._err_tail = collections.deque(maxlen=5)
         threading.Thread(target=self._read_err_loop, args=(self.proc,),
                          daemon=True, name="mpg123-stderr").start()
-        self._send(f"V {int(config.get('music_volume'))}")
+        # 出力先 (AUX か選択中の Bluetooth 機器) ごとに独立して覚えている
+        # 音量を送る — 前の出力先の音量をそのまま引き継ぐと、切り替えた
+        # 瞬間に耳に痛いほど大きく/小さく鳴ることがある
+        # (_active_output_profile() 参照)。
+        self._send(f"V {_active_output_profile()['volume']}")
         return True
 
     def _read_err_loop(self, p: subprocess.Popen) -> None:
@@ -422,8 +475,9 @@ class Player:
         必ず一度送り直される。"""
         if self.proc is None or self.proc.poll() is not None:
             return
-        enabled = bool(config.get("music_eq_enabled"))
-        bands_db = resolve_eq_bands(track_name) if enabled else None
+        profile = _active_output_profile()
+        enabled = profile["eq_enabled"]
+        bands_db = resolve_eq_bands(track_name, profile["eq_bands"]) if enabled else None
         gains = _eq_subband_gains(enabled, bands_db)
         if gains == self._last_sent_eq:
             return
@@ -525,7 +579,12 @@ class Player:
 
     def set_volume(self, percent: int) -> None:
         percent = max(0, min(100, int(percent)))
-        config.update({"music_volume": percent})
+        # 出力先ごとに別の場所へ保存する — Bluetooth 出力中に音量を
+        # 動かしても AUX 側の music_volume には触れない (逆も同様)。
+        if self.bt_output_addr:
+            set_bt_output_volume(self.bt_output_addr, percent)
+        else:
+            config.update({"music_volume": percent})
         self._send(f"V {percent}")
 
     # -------------------------------------------------- 永続化
@@ -572,6 +631,7 @@ class Player:
     def status(self) -> dict:
         with self._lock:
             path = self.current_path()
+            profile = _active_output_profile()
             return {
                 "playing": self.playing,
                 "suspended_by": self.suspended_by,
@@ -582,7 +642,10 @@ class Player:
                 "duration": round(self.duration, 1),
                 "index": self.cursor,
                 "total": len(self.order),
-                "volume": int(config.get("music_volume")),
+                # 現在の実効出力の音量 (AUX なら music_volume、Bluetooth
+                # 出力中ならその機器のプロファイル) — UI のスライダーは
+                # 常にこれを表示・操作する。
+                "volume": profile["volume"],
                 "shuffle": bool(config.get("music_shuffle")),
                 "repeat": str(config.get("music_repeat")),
                 "seed": self.seed,
@@ -590,6 +653,10 @@ class Player:
                 "alive": self.proc is not None and self.proc.poll() is None,
                 "category_filter": str(config.get("music_category_filter") or ""),
                 "categories": list_categories(),
+                "output_target": "bluetooth" if self.bt_output_addr else "aux",
+                "output_bt_addr": self.bt_output_addr or "",
+                "output_bt_name": self.bt_output_name,
+                "output_device": self.active_device,
             }
 
     def playlist(self) -> list[dict]:
@@ -714,15 +781,22 @@ _pre_duck_volume: int | None = None
 
 
 def duck_volume_for_voice() -> bool:
-    """voice.py が音声アナウンスを再生する直前に呼ぶ。曲を止めずに
-    voice_duck_percent の設定に従って一時的に音量だけ下げる。
+    """voice.py が音声アナウンスを再生する直前に呼ぶ、**AUX 出力専用**の
+    経路。曲を止めずに voice_duck_percent の設定に従って一時的に音量だけ
+    下げる。呼び出しは必ず begin_voice_interrupt() 経由にすること —
+    出力先が Bluetooth のときは pause_for_voice() (一時停止) を使う別経路
+    になる (下記)。
 
-    音楽 (mpg123)・音声アナウンス・Bluetooth (bluealsa-aplay) はどれも
-    core/audio.analog_device() の同じ sysdefault:CARD=<N> へ書き込んで
-    おり、alsa-lib の dmix が構造的に重ねて鳴らす (設定ファイルもフラグ
-    も要らない) ため、以前あった「重ねられないなら曲を完全に止める」旧
-    経路 (duck_for_voice()/resume_from_voice()) は不要になった — 曲を
-    止める必要がある場面はもう無い。
+    AUX 出力時、音楽 (mpg123)・音声アナウンス・Bluetooth 受信側
+    (bluealsa-aplay) はどれも core/audio.analog_device() の同じ
+    sysdefault:CARD=<N> へ書き込んでおり、alsa-lib の dmix が構造的に
+    重ねて鳴らす (設定ファイルもフラグも要らない) ため、以前あった
+    「重ねられないなら曲を完全に止める」旧経路 (duck_for_voice()/
+    resume_from_voice()) は不要になった — AUX ではもう曲を止める必要が
+    無い。**Bluetooth 出力 (bt_output_device) は事情が違う** — bluealsa の
+    A2DP ソース PCM は sysdefault の dmix のような多重ストリーム受付を
+    持たず、同時に開けるクライアントは 1 つだけなので、この関数は使えず
+    pause_for_voice() で曲自体を一時停止する。
 
     mpg123 の `V <percent>` は再生中に送っても即座に反映されるリモート
     コマンドなので、sudo も外部設定ファイルの書き換えも一切経由しない、
@@ -759,6 +833,121 @@ def resume_volume_after_voice() -> None:
     if PLAYER.proc is not None:
         PLAYER._send(f"V {_pre_duck_volume}")
     _pre_duck_volume = None
+
+
+def pause_for_voice() -> bool:
+    """Bluetooth 出力専用の、duck_volume_for_voice() に相当する経路。
+    bluealsa の A2DP ソース PCM は同時に開けるクライアントが 1 つだけ
+    (sysdefault の dmix のような多重ストリーム受付を持たない) ため、
+    音声アナウンス側が同じデバイスを開こうとすると "device busy" で
+    失敗する。音量を下げて重ねるのではなく、曲自体を一時停止してから
+    アナウンスを鳴らす。mpg123 の "P" は一時停止/解除のトグルだが、
+    ここでは「再生中のときだけ」呼ぶので常に一時停止の意味になる
+    (`stop()` と違って mpg123 プロセス自体は終了しないため、CLAUDE.md
+    #50 の世代カウンタ (_gen) は関係ない — "@P 0" ではなく "@P 1" が
+    返るだけで、_read_loop() の「曲が終わった」判定には入らない)。
+    戻り値は実際に一時停止したかどうか。"""
+    if PLAYER.proc is None or not PLAYER.playing:
+        return False
+    PLAYER._send("P")
+    return True
+
+
+def resume_after_voice() -> None:
+    """pause_for_voice() が True を返したときだけ呼ぶこと。"""
+    if PLAYER.proc is not None:
+        PLAYER._send("P")
+
+
+def begin_voice_interrupt() -> str:
+    """voice.py がアナウンスを再生する直前に呼ぶ唯一の入口。現在の実効
+    出力先に応じて「音量だけ下げる」(AUX) か「一時停止する」(Bluetooth)
+    かを自動で選び、戻り値をそのまま end_voice_interrupt() に渡せば
+    元に戻せる。voice.py 側に出力先ごとの分岐を持たせないための共通
+    窓口 — この判定を呼び出し側に複製すると、どこか 1 箇所だけ更新し
+    忘れて Bluetooth 出力中に音量制御 (何も効かない) を呼んでしまう、
+    といった不整合が起きやすい。"""
+    if PLAYER.bt_output_addr:
+        return "pause" if pause_for_voice() else ""
+    return "duck" if duck_volume_for_voice() else ""
+
+
+def end_voice_interrupt(kind: str) -> None:
+    if kind == "pause":
+        resume_after_voice()
+    elif kind == "duck":
+        resume_volume_after_voice()
+
+
+# ------------------------------------------------------- Bluetooth 出力先
+
+def current_output_device() -> str | None:
+    """現在の実効出力デバイス文字列。voice.py が時報/アナウンスを音楽と
+    同じ出力へ流すために使う (Bluetooth 出力中はそちらへ、そうでなければ
+    AUX へ)。"""
+    if PLAYER.bt_output_addr:
+        return f"bluealsa:DEV={PLAYER.bt_output_addr},PROFILE=a2dp"
+    return str(config.get("alsa_device") or "").strip() or audio.analog_device() or ""
+
+
+def set_bt_output(addr: str | None, name: str = "") -> None:
+    """bluetooth.py の output_loop() が接続状態の変化を伝えるために呼ぶ
+    唯一の入口。実効出力デバイスが実際に変わるときだけ mpg123 を作り
+    直す — 同じ状態への呼び出し (ポーリングのたびに繰り返し呼ばれる)
+    を無視することで、無駄な再生断が起きないようにする。"""
+    addr = addr or None
+    with PLAYER._lock:
+        if PLAYER.bt_output_addr == addr:
+            return
+        PLAYER.bt_output_addr = addr
+        PLAYER.bt_output_name = name if addr else ""
+        running = PLAYER.proc is not None and PLAYER.proc.poll() is None
+        pos = PLAYER.position
+    log.info("音楽の出力先を切り替えます: %s", name or addr or "AUX")
+    audio.invalidate_pcm_cache()
+    if running:
+        # mpg123 の出力デバイスは起動引数でしか決まらないため、実際に
+        # 鳴っている場合だけ作り直す (alsa_device 切り替え時の
+        # restart_playback() と同じ理由)。鳴っていなければ、次の play()
+        # 呼び出しが _spawn() の中で新しい出力先を自然に使うので、ここで
+        # 無理に再生を始めない (eco モード中の切り替えなどを想定)。
+        PLAYER.stop(terminate=True, reason="")
+        PLAYER.play(pos)
+
+
+def set_bt_output_volume(addr: str, pct: int) -> None:
+    pct = max(0, min(100, int(pct)))
+    profiles = dict(config.get("bt_output_profiles") or {})
+    p = dict(profiles.get(addr) or {})
+    p["volume"] = pct
+    profiles[addr] = p
+    config.update({"bt_output_profiles": profiles})
+
+
+def set_bt_output_eq(addr: str, *, enabled: bool | None = None,
+                     bands: dict | None = None) -> dict:
+    """Bluetooth 出力機器ごとの EQ を部分更新する。set_eq_bands() の
+    AUX 版と同じパターンで、bands の値が None のキーは削除
+    (0dB=フラットへ戻す)。"""
+    profiles = dict(config.get("bt_output_profiles") or {})
+    p = dict(profiles.get(addr) or {})
+    if enabled is not None:
+        p["eq_enabled"] = bool(enabled)
+    if bands is not None:
+        cur = dict(p.get("eq_bands") or {})
+        for hz, v in bands.items():
+            if hz not in EQ_BAND_HZ:
+                continue
+            if v is None:
+                cur.pop(hz, None)
+            else:
+                cur[hz] = max(-_EQ_DB_RANGE, min(_EQ_DB_RANGE, float(v)))
+        p["eq_bands"] = cur
+    profiles[addr] = p
+    config.update({"bt_output_profiles": profiles})
+    if PLAYER.bt_output_addr == addr:
+        refresh_eq()
+    return p
 
 
 # ---------------------------------------------------------------- yt-dlp

@@ -19,7 +19,7 @@ import os
 import re
 import subprocess
 import time
-from collections import deque
+from collections import Counter, deque
 from datetime import datetime, timedelta
 from multiprocessing import Event, Process
 from pathlib import Path
@@ -42,7 +42,8 @@ CAMERA_OVERRIDE_KEYS = (
     "motion_interval", "motion_warmup_seconds", "cam_autofocus",
     "motion_confirm_checks", "motion_release_checks",
     "save_cooldown", "reconnect_seconds",
-    "corrupt_min_area_ratio", "corrupt_reboot_threshold", "corrupt_disconnect_seconds",
+    "corrupt_min_area_ratio", "corrupt_tile_repeat_ratio",
+    "corrupt_reboot_threshold", "corrupt_disconnect_seconds",
 )
 
 
@@ -263,6 +264,32 @@ _CORRUPT_FLAT_STD = 3.0
 # 面積」を測れるため、より小さな破損領域でも過検知にならずに拾える。
 _CORRUPT_MIN_AREA_RATIO = 0.12
 _CORRUPT_CONTRAST_MULT = 4.0  # 平坦セルと非平坦セルの標準偏差の比
+
+# --------------------------------------------------- 「同じ柄の繰り返し」検出
+# 実機の報告で、単色ブロック化 (上のフラット判定) とは別の壊れ方が見つかった
+# — 画面全体が、同じ小さな画像が何度もタイル状に繰り返し出現する形で崩れる
+# パターン (MJPEG のフレーム内で再同期がずれ、デコーダが同じマクロブロック
+# データを複数タイル分にわたって読み違える、と考えられる)。この壊れ方は
+# フラット判定をすり抜ける — タイル自体は本物の映像の一部なので内部に
+# ちゃんと分散があり、「平坦」には該当しない。すり抜けた結果、この
+# 破損フレームが latest.jpg・動体判定・prev (次フレームとの比較用基準) の
+# すべてにそのまま使われてしまい、「何も無いのに検知する」(隣接フレーム間
+# でタイルの現れ方が変わるたびに大きな差分が出る) と「人が居ても検知が
+# 外れる」(破損フレームが基準 (prev) になると、次の正常なフレームとの差分が
+# 破損由来のノイズに埋もれる/上限 motion_area_max_ratio で弾かれる) の
+# 両方の原因になっていた。
+#
+# 検出方法: 各セルをさらに 4x4 へ縮小し、輝度を粗く 8 段階に量子化した
+# signature (16 要素のタプル) を作る。本物の 1 フレームの中で、離れた
+# 位置にある複数のセルがこの signature までビット単位で一致することは
+# 通常まず起こらない (完全に均一な壁などは上のフラット判定で別途処理
+# されるため、ここでの対象は「内部に分散はあるが、複数箇所で丸ごと
+# 複製されている」パターンに絞られる)。最も多く出現する signature の
+# 面積比が閾値を超えたら「タイル化けの疑いあり」とする。軽量な処理
+# (4x4 への縮小と 48 要素の Counter 集計だけ) なので、フラット判定と
+# 同じ頻度 (motion_interval ごと、カメラごとに 1 回) で回しても負荷は
+# 無視できる。
+_CORRUPT_TILE_REPEAT_RATIO = 0.35
 _CORRUPT_HIST_LEN = 20
 _CORRUPT_RATE_THRESHOLD = 0.5
 _CORRUPT_RECONNECT_COOLDOWN = 20.0
@@ -301,26 +328,35 @@ _CORRUPT_DISCONNECT_SECONDS = 180.0
 
 
 def _frame_corruption_ratio(
-        frame, min_area_ratio: float = _CORRUPT_MIN_AREA_RATIO) -> tuple[float, tuple[bool, ...]] | None:
-    """粗い 2 次元グリッド (_CORRUPT_GRID_COLS x _CORRUPT_GRID_ROWS) の
-    セルごとの標準偏差から、フレームの一部だけが不自然に単色で埋まって
-    いないかを調べる。破損していなければ None、破損の疑いがあれば
-    (平坦なセルの面積比, セルごとの平坦フラグのタプル) を返す。後者は
-    _worker() 側で「同じ位置が毎回引っかかっていないか」(= レター
-    ボックスやビネットなどカメラ本来の絵である可能性) を追跡するために
-    使う。64x48 に正規化してから判定するため、解像度が変わってもセル
-    位置 (画面のどのあたりか) の意味は変わらない。
+        frame, min_area_ratio: float = _CORRUPT_MIN_AREA_RATIO,
+        tile_repeat_ratio: float = _CORRUPT_TILE_REPEAT_RATIO,
+) -> tuple[float, tuple] | None:
+    """粗い 2 次元グリッド (_CORRUPT_GRID_COLS x _CORRUPT_GRID_ROWS) から、
+    2 種類の破損パターンを検出する。破損していなければ None、疑いが
+    あれば (面積比, セルごとの特徴のタプル) を返す。後者は _worker() 側
+    で「同じ位置・同じ柄が毎回引っかかっていないか」(= レターボックスや
+    ビネットなどカメラ本来の絵である可能性) を追跡する known_ok_patterns
+    学習で使う — 検出経路が違っても同じ学習の仕組みを共有する。
+
+    1. **単色ブロック化**: セルごとの標準偏差が不自然に低い (平坦)。
+       USB 帯域不足で MJPEG のデコードが一部だけ完了しなかったとき、
+       未デコード部分が単色や直前フレームのデータで埋まるパターン。
+    2. **タイル化け (モザイク化)**: 各セルをさらに 4x4 へ縮小し粗く
+       量子化した signature が、離れた複数のセルで一致する。単色ブロック
+       化と違ってセル内部には (本物の映像の断片なので) ちゃんと分散が
+       あるため、1. のフラット判定はすり抜ける — 実機で報告された
+       「約 70% とは違う、同じ小さな柄が画面全体に繰り返し出現する」
+       破損はこちらでないと検出できない (上のコメント参照)。
 
     行 (横バンド) 単位ではなく 2 次元グリッドで判定しているのは、破損が
     画面の左右どちらかに偏る場合 (縦方向の帯として出る場合) を確実に
     拾うため — 行全体の標準偏差で見ると、その行に破損部分と正常部分が
     両方含まれるだけで正常部分の分散に引きずられ「平坦」と判定されず、
-    検出をすり抜けてしまう (上のコメント参照)。
+    検出をすり抜けてしまう。
 
-    min_area_ratio は corrupt_min_area_ratio (カメラごとに上書き可能、
-    CAMERA_OVERRIDE_KEYS) をそのまま渡す想定。カメラによって USB 帯域の
-    逼迫具合や許容できる誤検知率が違うため、既定の 0.12 では感度が合わない
-    場合に調整できるようにしている。"""
+    min_area_ratio/tile_repeat_ratio は corrupt_min_area_ratio/
+    corrupt_tile_repeat_ratio (カメラごとに上書き可能、
+    CAMERA_OVERRIDE_KEYS) をそのまま渡す想定。"""
     import cv2
     try:
         small = cv2.resize(frame, (64, 48), interpolation=cv2.INTER_AREA)
@@ -332,19 +368,47 @@ def _frame_corruption_ratio(
     cell_w = w // _CORRUPT_GRID_COLS
     if cell_h < 1 or cell_w < 1:
         return None
+
+    gray_u8 = gray.astype("uint8")
     stds: list[float] = []
+    sigs: list[tuple[int, ...]] = []
     for r in range(_CORRUPT_GRID_ROWS):
         for c in range(_CORRUPT_GRID_COLS):
-            cell = gray[r * cell_h:(r + 1) * cell_h, c * cell_w:(c + 1) * cell_w]
-            stds.append(float(cell.std()))
-    flat = [s < _CORRUPT_FLAT_STD for s in stds]
+            y0, y1 = r * cell_h, (r + 1) * cell_h
+            x0, x1 = c * cell_w, (c + 1) * cell_w
+            stds.append(float(gray[y0:y1, x0:x1].std()))
+            # 4x4 へ縮小し、輝度を 8 段階 (0-255 を 32 刻み) へ粗く量子化
+            # した signature。この粗さのおかげで、圧縮ノイズ程度のわずかな
+            # 違いは同じ signature へ丸められる一方、本物の映像が偶然
+            # 何度も丸ごと一致することはまず無い。
+            thumb = cv2.resize(gray_u8[y0:y1, x0:x1], (4, 4), interpolation=cv2.INTER_AREA)
+            sigs.append(tuple(int(v) // 32 for v in thumb.flatten()))
+
+    flat = tuple(s < _CORRUPT_FLAT_STD for s in stds)
     flat_ratio = sum(flat) / len(flat)
-    if flat_ratio < min_area_ratio:
+    non_flat_stds = [s for s, f in zip(stds, flat) if not f]
+    # 画面全体が単に平坦なだけ (正常な暗いシーンなど) は対象外 — 平坦
+    # セルと非平坦セルの分散に十分な差があるときだけ「一部だけ壊れて
+    # いる」と判定する。
+    flat_suspect = (flat_ratio >= min_area_ratio and non_flat_stds
+                    and max(non_flat_stds) >= _CORRUPT_FLAT_STD * _CORRUPT_CONTRAST_MULT)
+
+    sig_counts = Counter(sigs)
+    dup_sig, dup_count = sig_counts.most_common(1)[0]
+    dup_mask = tuple(s == dup_sig for s in sigs)
+    # 平坦セルはどれも似たような signature (真っ黒/単色) に量子化されて
+    # 一致しやすいのが当然なので、それだけで「タイル化け」と二重計上
+    # しない。平坦「ではない」セルが同じ signature で大量に繰り返して
+    # いる場合だけ、単色ブロック化とは別の症状として扱う。
+    non_flat_dup_ratio = sum(1 for f, d in zip(flat, dup_mask) if d and not f) / len(sigs)
+    tile_suspect = non_flat_dup_ratio >= tile_repeat_ratio * 0.5 and (dup_count / len(sigs)) >= tile_repeat_ratio
+
+    if not flat_suspect and not tile_suspect:
         return None
-    non_flat = [s for s, f in zip(stds, flat) if not f]
-    if not non_flat or max(non_flat) < _CORRUPT_FLAT_STD * _CORRUPT_CONTRAST_MULT:
-        return None  # 画面全体が単に平坦なだけ (正常なシーン) は対象外
-    return flat_ratio, tuple(flat)
+    pattern = tuple(zip(flat, dup_mask))
+    ratio = max(flat_ratio if flat_suspect else 0.0,
+               (dup_count / len(sigs)) if tile_suspect else 0.0)
+    return ratio, pattern
 
 
 # ---------------------------------------------------------------- ワーカー
@@ -583,7 +647,8 @@ def _worker(cid: str, device: str, stop: "Event", cfg: dict) -> None:
             frames += 1
 
             corrupt_result = _frame_corruption_ratio(
-                frame, float(cfg.get("corrupt_min_area_ratio", _CORRUPT_MIN_AREA_RATIO)))
+                frame, float(cfg.get("corrupt_min_area_ratio", _CORRUPT_MIN_AREA_RATIO)),
+                float(cfg.get("corrupt_tile_repeat_ratio", _CORRUPT_TILE_REPEAT_RATIO)))
             if corrupt_result is not None:
                 _, corrupt_pattern = corrupt_result
                 # 同じ位置のバンドだけが何度も引っかかる場合は、破損では
@@ -601,9 +666,10 @@ def _worker(cid: str, device: str, stop: "Event", cfg: dict) -> None:
                         and corrupt_pattern not in known_ok_patterns):
                     known_ok_patterns.add(corrupt_pattern)
                     log.warning(
-                        "カメラ %s: 同じ位置が %d フレーム連続で平坦だったため、"
-                        "破損ではなくカメラ本来の絵 (レターボックス/ビネット等) と判断し、"
-                        "以後はこのパターンを破損として扱いません。",
+                        "カメラ %s: 同じ位置・同じ柄が %d フレーム連続で検出条件に"
+                        "一致したため、破損ではなくカメラ本来の絵 (レターボックス/"
+                        "ビネット/繰り返し模様等) と判断し、以後はこのパターンを"
+                        "破損として扱いません。",
                         cid, corrupt_pattern_streak)
                 if corrupt_pattern in known_ok_patterns:
                     corrupt_tolerated += 1

@@ -1,5 +1,5 @@
 [Unit]
-Description=BlueALSA - A2DP sink (receive Bluetooth audio)
+Description=BlueALSA - A2DP sink + source (Bluetooth audio both ways)
 Requires=bluetooth.service
 After=bluetooth.service
 # Without this, a burst of restarts (e.g. install.sh re-run without a
@@ -10,8 +10,13 @@ StartLimitIntervalSec=0
 
 [Service]
 Type=simple
-# a2dp-sink only. source/hfp are not used, saving CPU and RAM on the 3B+.
-ExecStart=/usr/bin/bluealsad -p a2dp-sink
+# a2dp-sink: a phone/laptop connects TO this Pi and plays through its
+# speaker (modules/bluetooth.py's STATE tracking + music.suspend_for_bluetooth()).
+# a2dp-source: this Pi connects OUT to a headphone/speaker and plays BGM
+# there (modules/bluetooth.py's output_loop() + music.py's per-device
+# volume/EQ profiles) - added so the same daemon can send audio out, not
+# just receive it. hfp/hsp are still left out, saving CPU/RAM on the 3B+.
+ExecStart=/usr/bin/bluealsad -p a2dp-sink -p a2dp-source
 Restart=always
 RestartSec=5
 
