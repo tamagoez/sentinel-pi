@@ -144,6 +144,38 @@ def set_local_name(name: str) -> tuple[bool, str]:
     return True, "変更しました"
 
 
+def remove_device(addr: str) -> tuple[bool, str]:
+    """ペアリング済み端末を削除する (`bluetoothctl remove`)。承認ゲート
+    (modules/bt_agent.py) で誤って許可してしまった端末や、もう使わない
+    端末を Web UI から取り消せるようにするためのもの — CLAUDE.md #74 の
+    時点では「手動で bluetoothctl remove してください」という案内しか
+    無かった。削除後は `bt_device_volumes`/`bt_output_profiles`
+    (音量・EQ の保存設定) からもその MAC を取り除く — 再ペアリングした
+    ときに前回の値が亡霊のように残らないようにするため。今の BGM 出力先
+    がこの端末なら解除する (再ペアリングされるまで存在しない端末へ
+    接続を試み続けさせないため、set_output_device("") と同じ後始末)。"""
+    addr = addr.strip().upper()
+    if not re.fullmatch(r"[0-9A-F:]{17}", addr):
+        return False, "MAC アドレスが不正です"
+    r = _run(["bluetoothctl", "remove", addr], timeout=8.0)
+    ok = "removed" in r.lower() or "not available" in r.lower()
+    if not ok:
+        tail = r.strip().splitlines()
+        return False, tail[-1] if tail else "削除に失敗しました"
+
+    vols = dict(config.get("bt_device_volumes") or {})
+    if vols.pop(addr, None) is not None:
+        config.update({"bt_device_volumes": vols})
+    music.forget_bt_output_profile(addr)
+
+    if STATE.get("device_addr") == addr:
+        STATE.update(connected=False, device_addr="", device_name="", since=0.0)
+    if str(config.get("bt_output_device") or "").upper() == addr:
+        set_output_device("")
+
+    return True, "削除しました"
+
+
 def paired_devices() -> list[dict]:
     """ペアリング済み端末の一覧 (接続中かどうかは問わない)。エイリアス /
     音量の設定 UI に、今つながっていない端末も出せるようにするため。"""

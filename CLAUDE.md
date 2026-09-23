@@ -3373,6 +3373,130 @@ discoverable/pairable の force-on を書き戻すと、main.conf 側をいく�
 セレクタ (#73) はペアリング済み端末をそのまま候補として出すため、
 覚えのない端末が紛れ込んでいると選択肢が汚染される。
 
+### 75. discoverable/pairable の時限窓だけでは不十分。Web UI での逐一承認と、ペアリング済み端末の削除 UI を追加した
+
+#74 は discoverable/pairable を既定オフ・3 分の時限にしたが、これは
+「誰でもペアリングできる時間を短くする」だけで、「誰がペアリングできる
+か」は一切制御していなかった。利用者から「今は本質的な対策はできて
+いません」という明確な指摘があった — その 3 分の窓が開いている間は
+結局、近くのどんな端末でも Just Works (NoInputNoOutput 同士の SSP は
+双方が確認なしで自動承認する) で確認なしにペアリングできてしまう
+ことに変わりはない。加えて「接続機器を消去できるようにしてほしい」
+「もっと直感的に」という要望もあった。
+
+**この節が対処するのは discoverable/pairable の窓の長さではなく、窓が
+開いている間に実際に「誰の」ペアリングを許すかという、その次の層の
+問題である。**
+
+#### 過去の機能停止判断の再検証
+
+`modules/bt_agent.py` (BlueZ Agent1 を D-Bus に直接エクスポートする
+実装、#72) は #73/#74 の時点で「実機で "Failed to register agent
+object" の再登録ループが収まらない」として機能停止していた。しかし
+#74 で見つけた実際のバグ (`Agent` クラスの `@method()` メソッドに
+`-> None` という戻り値注釈を書いていたことによる `ValueError: service
+annotations must be a string constant (got None)`) を踏まえて読み直すと、
+この例外は `bus.export()` の**エージェント登録より前**、クラス定義の
+デコレータ処理の時点で毎回確実に発生していた。つまり以前観測されていた
+「ループ」は、登録がときどき失敗するレースではなく、**登録そのものが
+100% 失敗し続けていた**ことを意味する — `loop()` の `except Exception`
+が指数バックオフで再試行するたび、毎回同じ場所で即座に例外落ちして
+いただけである。#74 でこのバグ自体は修正済みだったが、その時点では
+まだ「機能停止のまま」という判断を変えていなかった。今回、この誤診断
+(実際には「レース」ではなく「100% 再現するバグ」だった) を踏まえて
+再度有効化した。`main.py` の import と
+`SUPERVISOR.spawn("bt-agent", bt_agent.loop)` を戻している。
+**もし実機で再度登録に失敗する場合は、まず `modules/bt_agent.py` の
+docstring とこの節を読み、本当に別の原因かを疑うこと** — 過去 2 回、
+この種の Bluetooth 不具合は「原因を推測で決めつけて別の対策を打つ」
+ことで長引いた (CLAUDE.md #45 の教訓と同種)。
+
+#### Web UI での逐一承認 (新設)
+
+`modules/bt_agent.py` の `Agent` クラスのうち `RequestConfirmation`
+(SSP のペアリング確認)・`RequestAuthorization` (レガシーの承認要求)・
+`AuthorizeService` (信頼前のサービス利用許可要求) の 3 つを、即座に
+承認するのをやめ、`PENDING` という module-level の辞書へ一旦積んで
+Web UI の判断を待つように変更した。
+
+```python
+async def _await_approval(bus, device_path, kind, passkey=None) -> bool:
+    ...
+    fut = asyncio.get_running_loop().create_future()
+    PENDING[req_id] = {"addr": mac, "name": name, "kind": kind,
+                        "passkey": passkey, "future": fut, "at": time.time()}
+    try:
+        return await asyncio.wait_for(fut, timeout=_APPROVAL_TIMEOUT)
+    except asyncio.TimeoutError:
+        return False
+    ...
+```
+
+`_APPROVAL_TIMEOUT` (既定 20 秒、bluetoothd 自身の SSP タイムアウトより
+確実に短くする) 以内に Web UI から応答が無ければ**拒否**として扱う —
+放置された要求を「時間切れだから許可」にしてしまうと、無人運用の機体
+では承認ゲート自体が実質無効化されてしまうため、安全側 (ブロック) へ
+倒すのが唯一の妥当な既定動作である。これにより、discoverable/pairable
+の窓が開いていても、**Web UI で「許可」を押した接続だけ**が実際に
+ペアリングされる。窓の中でたまたま Just Works の確認を要求してきた
+無関係な端末は、人間が何もしなければ 20 秒後に自動的に拒否される。
+
+`bt_agent.list_pending()`/`bt_agent.decide(id, allow)` を Web UI 側の
+唯一の窓口として公開した。この 2 つは dbus-next に依存しない (素の
+`dict`/`asyncio.Future` だけを扱う) ため、dbus-next が入っていない環境
+でも `web/routes.py` から安全に呼べる (常に空/no-op として振る舞う)。
+`bt_agent.loop() の Agent クラスは `PENDING` の `asyncio.Future` を
+`web/routes.py` のリクエストハンドラと直接共有している — uvicorn +
+`core.supervisor.SUPERVISOR` は単一の asyncio イベントループ上で動く
+ため (このプロジェクト全体の設計、#72 参照)、スレッド間同期やロックは
+一切不要である。**RequestPinCode/RequestPasskey はこのゲートの対象外の
+まま**にしている — レガシー PIN ペアリング向けで NoInputNoOutput 宣言
+では基本的に呼ばれず、呼ばれたとしても承認/拒否の二択では意味を成さない
+(実際に人間がその場で入力すべき値を要求されている) ため。
+
+Web UI 側は `GET /api/bluetooth/pending`・
+`POST /api/bluetooth/pending/decide` (`{"id":..., "allow": bool}`) を
+新設し、`web/routes.py._overview()` にも `bluetooth_pending` として
+含めた。これにより既存の WebSocket 定期送信にそのまま乗り、**どのタブを
+開いていても**承認待ちが 1 件でもあれば次の定期送信 (数秒以内) でモーダル
+が表示される — 追加のポーリングを新設する必要が無い。`index.html` は
+`#bt-pending-modal` として、要求ごとに端末名・MAC・種別・(あれば)
+パスキー・残り秒数の目安・「許可」「拒否」ボタンを表示する。
+
+**この承認ゲートは「discoverable/pairable の時限窓 (#74)」を置き換える
+ものではなく、その内側に重ねる追加の層である。** 窓を閉じておけば
+そもそも要求自体が来ない (防御の第一層)。窓が開いていても、Web UI で
+明示的に許可しない限りペアリングは完了しない (防御の第二層)。**この
+承認ゲートを外して #74 の時限窓だけに戻さないでください** — 同じ
+「窓が開いている間は誰でもペアリングできる」という、利用者が明確に
+指摘した不十分な状態に戻ります。
+
+#### ペアリング済み端末の削除 UI (新設)
+
+`modules/bluetooth.py` に `remove_device(addr)` (`bluetoothctl remove`)
+を新設した。#74 の時点では「覚えのない端末があれば手動で
+`bluetoothctl remove <MAC>` してください」という CLI 頼みの案内しか
+無かった。削除時には `bt_device_volumes` (受信側の端末ごとの音量、#15)
+と `bt_output_profiles` (送信側の端末ごとの音量/EQ、#73) からもその
+MAC を取り除く (`music.forget_bt_output_profile()`) — 消さずに残すと、
+同じ MAC の端末を再ペアリングしたときに前回の値が亡霊のように復活する。
+今の BGM 出力先がその端末なら `set_output_device("")` と同じ後始末で
+解除する。`web/routes.py` に `POST /api/bluetooth/remove` を新設し、
+Web UI の Bluetooth カードに「ペアリング済み端末」一覧 (端末名・MAC・
+接続中かどうかのドット・削除ボタン) を追加した — 承認ゲートを誤って
+「許可」してしまった端末や、もう使わない端末を Web UI だけで取り消せる。
+
+#### UI の分かりやすさ
+
+Bluetooth カードの案内文を、以前の「discoverable/pairable の切り替え
+ボタンの説明」から、「① 許可ボタンを押す → ② 相手端末からペアリングを
+開始する → ③ この画面に出る要求を確認して許可する」という 3 ステップの
+手順として書き直した。**この 3 ステップの文言を、単に discoverable/
+pairable の切り替えだけを説明する文言に戻さないでください** — 承認
+ゲートという新しい (かつ本質的な) 手順が抜け落ち、利用者が「ペアリング
+を許可」を押しただけで完了すると誤解する、同じ「本質的な対策になって
+いない」体験に戻ります。
+
 ## モジュール構成
 
 各モジュールは疎結合で、`core/state.py` の `MODE` を購読するだけです。
@@ -3409,10 +3533,10 @@ scripts/sentinel-logs.sh
                     ブロックを置き、数字に文脈を与える。tar.gz を作る
                     sentinel-diagnose とは用途が別 (CLAUDE.md #42)。
                     Bluetooth ペアリングエージェント (modules/bt_agent.py)
-                    は現在 spawn されていない (機能停止中、CLAUDE.md #73)
-                    ため、専用の journal 抽出は元から無い。動いていた頃も
-                    sentinel.service の中で動くため「sentinel (app)」の
-                    digest にそのまま含まれる設計だった
+                    は sentinel.service のプロセス内で動く (専用の
+                    systemd ユニットを持たない) ため、専用の journal
+                    抽出は無く「sentinel (app)」の digest にそのまま
+                    含まれる (CLAUDE.md #75 で再度 spawn するようにした)
 scripts/sentinel-adguard-8083.sh
                     AdGuard Home の :8083 への直接アクセスを一時的に
                     有効化 / 恒久的に無効化する (人が手動で実行する)
@@ -3553,26 +3677,35 @@ modules/bluetooth.py    受信 (電話 -> Pi、A2DP シンク) と送信 (Pi -> 
                          volume を書く、0-127) を使う — numid=1 (共有
                          ハードウェアレジスタ) はもう触らない (CLAUDE.md
                          #72)。送信 (BGM 出力) 側の音量/EQ は music.py の
-                         bt_output_profiles が持つ (CLAUDE.md #73)
+                         bt_output_profiles が持つ (CLAUDE.md #73)。
+                         remove_device() がペアリング済み端末を削除する
+                         (bluetoothctl remove、Web UI の削除ボタンから
+                         呼ばれる) — bt_device_volumes/bt_output_profiles
+                         のその MAC 分もあわせて消す (CLAUDE.md #75)
 modules/bt_agent.py     Bluetooth ペアリングエージェント (org.bluez.Agent1
                          を D-Bus に直接エクスポート、dbus-next 使用)。
-                         **main.py から現在 spawn されていない (機能停止中、
-                         CLAUDE.md #73)** — この実装でも実機で D-Bus
-                         登録レースが解消しなかったため。新しい端末との
-                         ペアリングは端末タブの bluetoothctl を対話的に
-                         実行して行う (ツール自身が自分を agent として
-                         登録する)。以下は実装の設計メモ:
-                         bluetoothctl のテキストスクレイピングに依存せず、
-                         RegisterAgent()/RequestDefaultAgent() の成否を
-                         同期呼び出しの例外の有無でそのまま判定する。
-                         NoInputNoOutput capability で全メソッドが例外を
-                         投げず正常終了 = 常に承認。InterfacesAdded
-                         シグナルを購読して新規端末を即座に trust し、
-                         起動時には既知端末も一括で trust する。
-                         bus.wait_for_disconnect() でバス切断 (bluetoothd
-                         再起動など) を検知し、外側のループが指数バック
-                         オフで再接続・再登録する。dbus-next が無ければ
-                         警告して何もしない段階的劣化 (CLAUDE.md #72)
+                         **main.py から spawn されている** (CLAUDE.md #75
+                         で再有効化 — 以前の機能停止は登録レースではなく
+                         dbus-next の戻り値注釈バグが原因と判明、修正済み)。
+                         RequestConfirmation/RequestAuthorization/
+                         AuthorizeService は即座に承認せず、`PENDING` へ
+                         積んで Web UI の承認 (`list_pending()`/
+                         `decide()`、`/api/bluetooth/pending*`) を待つ —
+                         20 秒以内に応答が無ければ拒否 (安全側)。
+                         discoverable/pairable の時限窓 (#74) の内側に
+                         重ねる追加の防御層で、窓が開いていても Web UI で
+                         明示的に許可した接続だけがペアリングされる
+                         (CLAUDE.md #75)。RegisterAgent()/
+                         RequestDefaultAgent() の成否は同期呼び出しの
+                         例外の有無でそのまま判定する (bluetoothctl の
+                         テキストスクレイピングには依存しない)。
+                         InterfacesAdded シグナルを購読して新規端末を
+                         即座に trust し、起動時には既知端末も一括で
+                         trust する。bus.wait_for_disconnect() でバス
+                         切断 (bluetoothd 再起動など) を検知し、外側の
+                         ループが指数バックオフで再接続・再登録する。
+                         dbus-next が無ければ警告して何もしない段階的
+                         劣化 (CLAUDE.md #72)
 modules/hotspot.py       WiFi ホットスポット SSID の表示・変更
                          (sentinel-set-hotspot-ssid.sh を sudo 経由で呼ぶ)
 modules/terminal.py     pty over WebSocket

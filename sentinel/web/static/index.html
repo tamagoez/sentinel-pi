@@ -584,6 +584,12 @@ try{
     <div class="body" id="cam-set-body"></div>
   </div>
 </div>
+<div id="bt-pending-modal" class="overlay-panel" style="z-index:65">
+  <div class="card" style="width:min(420px,92vw)">
+    <h3>Bluetooth 接続要求</h3>
+    <div class="body" id="bt-pending-body"></div>
+  </div>
+</div>
 <div id="toast"></div>
 
 <!-- defer: Terminal は端末タブを開いたとき (2235行目付近) にしか
@@ -749,6 +755,7 @@ function render(){
 
   renderCams();
   renderBluetooth();
+  renderBtPending();
   if(CUR === "music") renderMusic();
   if(CUR === "dash") drawChart();
 }
@@ -782,17 +789,17 @@ function renderBluetooth(){
   }else{
     html = `<span class="faint">未接続です</span>
       <div class="row" style="margin-top:8px">
-        <button onclick="btAction('pairable_on')">ペアリングを許可</button>
-        <button onclick="btAction('pairable_off')">ペアリングを禁止</button>
+        <button onclick="btAction('pairable_on')">ペアリングを許可 (3分間)</button>
+        <button onclick="btAction('pairable_off')">今すぐ禁止</button>
       </div>
       <div class="faint" style="font-size:10.5px;margin-top:8px">
-        既定では discoverable/pairable はオフです (謎の端末が勝手にペアリング
-        されるのを防ぐため)。「ペアリングを許可」を押すと 3 分間だけ開き、
-        自動で閉じます。新しい端末との初回ペアリングは、開いている間に
-        端末タブで <code>bluetoothctl</code> を実行して行ってください
-        (<code>scan on</code> → <code>pair &lt;MAC&gt;</code>
-        → <code>trust &lt;MAC&gt;</code>)。ここのボタンは discoverable/pairable の
-        切り替えのみです。
+        1. 「ペアリングを許可」を押す (discoverable/pairable が 3 分間だけ開く)。<br>
+        2. スマホ/PC 側の Bluetooth 設定からこの Pi を選んでペアリングを開始する。<br>
+        3. この画面 (どのタブを開いていても構いません) に接続要求が表示されたら、
+        端末名・パスキーを確認して「許可」を押す — <b>これが実際にペアリングを
+        完了させる最後の一手です</b>。放置すると約20秒で自動的に拒否されます。<br>
+        窓が開いている間でも、あなたが「許可」を押した端末だけがペアリングされます
+        (謎の端末が「許可」を押さずに勝手にペアリングされることはありません)。
       </div>`;
   }
   const localHtml = b.available ? `
@@ -801,11 +808,21 @@ function renderBluetooth(){
       <button onclick="btSetLocalName()">変更</button>
     </div>
     <div class="faint" style="font-size:10.5px;margin-bottom:10px">相手端末から見える、この Pi 自身の Bluetooth 名です (接続相手の表示名とは別)。</div>` : "";
-  card.innerHTML = localHtml + html;
+  const devicesHtml = b.available ? `
+    <div style="margin-top:14px;padding-top:10px;border-top:1px solid var(--line)">
+      <div style="font-size:13px;margin-bottom:6px">ペアリング済み端末</div>
+      <div id="bt-devices-list"><span class="faint">読み込み中…</span></div>
+    </div>` : "";
+  card.innerHTML = localHtml + html + devicesHtml;
   if(b.available && !BT_LOCAL_NAME_LOADED){
     BT_LOCAL_NAME_LOADED = true;
     loadBtLocalName();
   }
+  // 新しくペアリングされた端末を一覧へ反映したいので定期的に再取得するが、
+  // 毎回の websocket 更新 (数秒おき) のたびに叩くのは無駄なので間引く。
+  // 削除直後は btRemoveDevice() 側が BT_DEVICES を直接更新して
+  // renderBtDevices() するので、ここでの再取得を待つ必要はない。
+  if(b.available && (Date.now() - BT_DEVICES_LOADED_AT > 5000)) loadBtDevices();
   if(b.connected && BT_VOL_ADDR !== b.device_addr){
     BT_VOL_ADDR = b.device_addr;
     fetchBtVolume(b.device_addr);
@@ -862,6 +879,84 @@ async function btSetVolume(v){
   if(!addr) return;
   try{ await post("/api/bluetooth/volume", {addr, volume: +v}); }
   catch(e){ toast(e.message, true); }
+}
+
+/* ---------------- bluetooth 接続の承認 (bt_agent.py の PENDING) ---------------- */
+// _APPROVAL_TIMEOUT (modules/bt_agent.py) と同じ値。サーバー側が最終的な
+// 判定者で、これは残り時間の目安表示にしか使わない — ズレてもタイムアウト
+// の実際の挙動には影響しない。
+const BT_PENDING_TIMEOUT = 20;
+const BT_PENDING_KIND_LABEL = {
+  confirm: "ペアリング確認", authorize: "接続の許可要求", service: "サービス利用の許可要求",
+};
+let BT_PENDING_SEEN = new Set();
+function renderBtPending(){
+  const modal = $("#bt-pending-modal");
+  const body = $("#bt-pending-body");
+  if(!modal || !body) return;
+  const list = DATA.bluetooth_pending || [];
+  if(list.length === 0){
+    modal.classList.remove("on");
+    BT_PENDING_SEEN.clear();
+    return;
+  }
+  modal.classList.add("on");
+  body.innerHTML = list.map(p => {
+    const remain = Math.max(0, Math.round(BT_PENDING_TIMEOUT - p.age));
+    const kind = BT_PENDING_KIND_LABEL[p.kind] || p.kind;
+    const passkeyHtml = (p.passkey != null) ? `<div class="faint" style="margin:4px 0">相手側にもパスキー <b>${esc(String(p.passkey))}</b> が表示されているはずです。一致するか確認してください。</div>` : "";
+    return `<div class="card" style="margin-bottom:10px;border-color:var(--warn)">
+      <div style="font-size:15px;margin-bottom:2px"><b>${esc(p.name || p.addr)}</b> <span class="faint">(${esc(p.addr)})</span></div>
+      <div class="faint" style="margin-bottom:4px">${esc(kind)}</div>
+      ${passkeyHtml}
+      <div class="faint" style="font-size:11px;margin-bottom:8px">あと約 ${remain} 秒で自動的に拒否されます</div>
+      <div class="row">
+        <button onclick="btPendingDecide('${esc(p.id)}', true)" style="flex:1">許可</button>
+        <button onclick="btPendingDecide('${esc(p.id)}', false)" style="flex:1">拒否</button>
+      </div>
+    </div>`;
+  }).join("");
+}
+async function btPendingDecide(id, allow){
+  try{
+    await post("/api/bluetooth/pending/decide", {id, allow});
+    toast(allow ? "許可しました" : "拒否しました");
+  }catch(e){ toast(e.message, true); }
+}
+
+/* ---------------- ペアリング済み端末の管理 (削除) ---------------- */
+let BT_DEVICES = [];
+let BT_DEVICES_LOADED_AT = 0;
+async function loadBtDevices(){
+  BT_DEVICES_LOADED_AT = Date.now();
+  try{
+    const r = await api("/api/bluetooth/devices");
+    BT_DEVICES = r.devices || [];
+    renderBtDevices();
+  }catch(e){}
+}
+function renderBtDevices(){
+  const el = $("#bt-devices-list");
+  if(!el) return;
+  if(BT_DEVICES.length === 0){
+    el.innerHTML = `<span class="faint">ペアリング済み端末はありません</span>`;
+    return;
+  }
+  const curAddr = (DATA.bluetooth || {}).connected ? (DATA.bluetooth || {}).device_addr : "";
+  el.innerHTML = BT_DEVICES.map(d => `
+    <div class="row" style="margin-bottom:6px;align-items:center">
+      <i class="dot ${d.addr === curAddr ? "ok" : ""}" style="flex:0"></i>
+      <span style="flex:1">${esc(d.name || d.addr)} <span class="faint" style="font-size:11px">(${esc(d.addr)})</span></span>
+      <button onclick="btRemoveDevice('${esc(d.addr)}')">削除</button>
+    </div>`).join("");
+}
+async function btRemoveDevice(addr){
+  if(!confirm(`${addr} を削除しますか? (再度使うには承認からやり直しが必要です)`)) return;
+  try{
+    const r = await post("/api/bluetooth/remove", {addr});
+    toast(r.message, !r.ok);
+    if(r.ok){ BT_DEVICES = r.devices || []; renderBtDevices(); }
+  }catch(e){ toast(e.message, true); }
 }
 
 /* ---------------- wifi hotspot ---------------- */
