@@ -281,7 +281,8 @@ git リモートを確認し、新しいコミットがあれば自分で `updat
 | カメラが見えない | `ls /dev/v4l/by-id/`、`dmesg \| tail -30` |
 | 音が途切れる | 素の再生を試す: `mpg123 <file>`。設定の mpg123 バッファを上げる。PulseAudio が動いていれば止める |
 | 音が全く出ない | `aplay -l`。`/boot/dietpi/func/dietpi-set_hardware soundcard rpi-bcm2835-3.5mm` を再実行して再起動 |
-| Bluetooth がペアリングできない | ペアリングエージェントは `sentinel.service` の中で動いています (`journalctl -u sentinel -n 50 \| grep -i agent`)。`bluetoothctl show` で `Discoverable: yes` になっているか |
+| Bluetooth がペアリングできない | 自動ペアリングエージェント (`modules/bt_agent.py`) は現在機能停止中です (実機で D-Bus 登録レースが解消しなかったため)。代わりに Web UI の端末タブから手動でペアリングしてください: `sudo bluetoothctl` → `scan on` → `pair <MAC>` → `trust <MAC>` → `connect <MAC>`。先に `bluetoothctl show` で `Discoverable: yes` になっているか確認するか、設定タブの Bluetooth カードから切り替えてください |
+| Bluetooth スピーカー/ヘッドホンへ BGM が流れない | 上記の手順で先にペアリングし、音楽タブの「BGM 出力先」で選んでください。接続できていれば `bluealsa-cli -q list-pcms` の出力にその端末の `.../a2dpsrc` パスが出ます。出ない場合は `libasound2-plugin-bluez` が入っているか確認してください (`sudo dpkg -l libasound2-plugin-bluez`) |
 | `sentinel-bluealsa*` が `failed (start-limit-hit)` になっている | `sudo systemctl reset-failed sentinel-bluealsa.service sentinel-bluealsa-aplay.service && sudo systemctl restart sentinel-bluealsa.service sentinel-bluealsa-aplay.service` (Guardian も 2 分以内に自動で同じことをします) |
 | 8083 がまだ外から開ける | `systemctl start sentinel-guardian`。`journalctl -t sentinel-guardian -n 20` |
 | ネットワークログが空 | 設定タブの AdGuard パスワードが違う、または AdGuard 側でクエリログが無効。Tailscale 接続の直後に空になった場合は `tailscale status` を確認 — `--accept-dns=false` を付けずに接続していないか |

@@ -165,7 +165,11 @@ fi
 # dbus-next: pure-Python, zero-dependency, asyncio-native D-Bus client -
 # modules/bt_agent.py uses it to implement the BlueZ pairing agent
 # (org.bluez.Agent1) directly instead of scraping bluetoothctl's
-# interactive CLI output. Not packaged for Debian/DietPi, hence pip.
+# interactive CLI output. main.py no longer spawns bt_agent.loop() (see
+# that module's docstring - the agent kept losing its D-Bus registration
+# race on real hardware), but the module and this dependency are kept
+# installed so it can be re-enabled once fixed instead of requiring a
+# fresh venv rebuild.
 "$APP_DIR/.venv/bin/pip" install --quiet \
   "fastapi>=0.110" "uvicorn[standard]>=0.27" "websockets>=12" "dbus-next>=0.2"
 
@@ -310,7 +314,11 @@ c "STEP 7/10  Configure Bluetooth services"
 BA=$(command -v bluealsad || command -v bluealsa || true)
 if [[ -n "$BA" ]]; then
   install -m644 "$SRC/systemd/sentinel-bluealsa.service" /etc/systemd/system/
-  sed -i "s|^ExecStart=.*|ExecStart=$BA -p a2dp-sink|" /etc/systemd/system/sentinel-bluealsa.service
+  # -p a2dp-sink: a phone connects TO this Pi and plays through its speaker.
+  # -p a2dp-source: this Pi connects OUT to a headphone/speaker and plays
+  # BGM there (modules/bluetooth.py's output_loop()). Both are needed since
+  # either direction may be in use.
+  sed -i "s|^ExecStart=.*|ExecStart=$BA -p a2dp-sink -p a2dp-source|" /etc/systemd/system/sentinel-bluealsa.service
   install -m644 "$SRC/systemd/sentinel-bluealsa-aplay.service" /etc/systemd/system/
   # The unit ships with a placeholder card index (0). Rewrite it with the
   # analog output actually detected on this machine - sysdefault:CARD=<N>
@@ -326,10 +334,10 @@ if [[ -n "$BA" ]]; then
   if AUDIO_CARD=$("$SRC/scripts/sentinel-fix-audio-output.sh" --print-card 2>/dev/null); then
     sed -i "s|--pcm=sysdefault:CARD=[0-9]*|--pcm=sysdefault:CARD=$AUDIO_CARD|" \
       /etc/systemd/system/sentinel-bluealsa-aplay.service
-    ok "BlueALSA (A2DP sink) + playback bridge registered (card $AUDIO_CARD)"
+    ok "BlueALSA (A2DP sink+source) + playback bridge registered (card $AUDIO_CARD)"
   else
     w "no ALSA output card detected yet; sentinel-bluealsa-aplay.service keeps its placeholder card - re-run install.sh/update.sh once the card is present"
-    ok "BlueALSA (A2DP sink) + playback bridge registered"
+    ok "BlueALSA (A2DP sink+source) + playback bridge registered"
   fi
 else
   w "bluealsa not found; Bluetooth-speaker feature will be unavailable."
@@ -348,11 +356,12 @@ fi
 # and every Guardian cycle (CLAUDE.md #41).
 "$SRC/scripts/sentinel-fix-audio-output.sh" || true
 
-# The pairing agent (modules/bt_agent.py) now runs inside sentinel.service
-# itself via core/supervisor.py, not as a separate systemd unit - it needs
-# nothing installed here beyond bluetoothd and the dbus-next pip package
-# already pulled in above. See CLAUDE.md's Bluetooth pairing redesign
-# section for why the standalone sentinel-bt-agent.service was retired.
+# The pairing agent (modules/bt_agent.py) is no longer spawned by main.py
+# (it kept losing the D-Bus agent-registration race on real hardware and
+# never settled) - nothing to install or enable for it here. Pairing a new
+# device is now done manually with `bluetoothctl` from the web UI's
+# terminal tab, which registers its own agent reliably. See that module's
+# docstring and CLAUDE.md's Bluetooth section for the history.
 
 # JustWorksRepairing defaults to "never" upstream - bluetoothd rejects a
 # peer-initiated Just-Works re-pair outright rather than silently accepting

@@ -314,7 +314,7 @@ try{
           <button onclick="mus('stop')">■ 停止</button>
         </div>
         <div class="row" style="margin-top:12px">
-          <span class="faint" style="font-size:11px;width:44px">音量</span>
+          <span class="faint" id="m-vol-label" style="font-size:11px;width:auto;flex:none">音量</span>
           <input type="range" min="0" max="100" id="m-vol" style="flex:1;padding:0" onchange="mus('volume',{volume:+this.value})">
           <span id="m-volv" class="faint" style="width:34px;text-align:right">-</span>
         </div>
@@ -328,14 +328,29 @@ try{
         </div>
       </div></div>
 
+      <div class="card"><h3>BGM 出力先</h3><div class="body">
+        <div class="row">
+          <select id="bt-out-select" style="flex:1" onchange="btOutSet(this.value)"></select>
+        </div>
+        <div class="faint" id="bt-out-state" style="font-size:11px;margin-top:8px">-</div>
+        <div class="hint faint" style="font-size:11px;margin-top:6px">
+          Bluetooth のヘッドホン/スピーカーを選ぶと、繋がっている間はそちらへ
+          BGM と時報が流れます (未接続の間は自動で AUX (3.5mm) に戻ります)。
+          選ぶと解除するまで自動で接続を試み続けます。端末は先に端末タブの
+          <code>bluetoothctl</code> でペアリング・信頼設定を済ませておいてください
+          (<code>pair &lt;MAC&gt;</code> → <code>trust &lt;MAC&gt;</code>)。
+          音量・イコライザーは出力先ごとに別々に覚えます。
+        </div>
+      </div></div>
+
       <div class="card"><h3>イコライザー</h3><div class="body">
         <div class="row" style="margin-bottom:8px">
-          <select id="eq-enabled" style="width:auto" onchange="cfg({music_eq_enabled: this.value})">
+          <select id="eq-enabled" style="width:auto" onchange="eqSetEnabled(this.value)">
             <option value="false">オフ (負荷を抑える)</option>
             <option value="true">オン</option>
           </select>
-          <select id="eq-scope" style="width:auto" onchange="renderEq()">
-            <option value="global">全体設定</option>
+          <select id="eq-scope" style="width:auto" onchange="loadEq()">
+            <option value="global">全体設定 (AUX)</option>
             <option value="track">この曲だけ</option>
           </select>
           <button onclick="eqReset()">この範囲をリセット</button>
@@ -343,9 +358,10 @@ try{
         <div id="eq-bands" class="row" style="align-items:flex-end;gap:3px"></div>
         <div class="faint" id="eq-track-name" style="font-size:11px;margin-top:6px"></div>
         <div class="hint faint" style="font-size:11px;margin-top:4px">
-          オフの間は ALSA の EQ 段そのものを外すため、CPU 負荷は増えません。
-          設定を変えると (曲が変わるタイミングでない限り) その場で曲が一瞬
-          途切れて再構成されます。
+          オフの間は EQ 段そのものを外すため、CPU 負荷は増えません。
+          「全体設定」は AUX (3.5mm) 出力用です。Bluetooth 出力先を選んで
+          いる場合は、上の一覧にその機器専用の設定が別途出ます — 出力先を
+          切り替えても互いに影響しません。設定を変えると即座に反映されます。
         </div>
       </div></div>
 
@@ -768,6 +784,12 @@ function renderBluetooth(){
       <div class="row" style="margin-top:8px">
         <button onclick="btAction('pairable_on')">ペアリングを許可</button>
         <button onclick="btAction('pairable_off')">ペアリングを禁止</button>
+      </div>
+      <div class="faint" style="font-size:10.5px;margin-top:8px">
+        新しい端末との初回ペアリングは、端末タブで <code>bluetoothctl</code>
+        を実行して行ってください (<code>scan on</code> → <code>pair &lt;MAC&gt;</code>
+        → <code>trust &lt;MAC&gt;</code>)。ここのボタンは discoverable/pairable の
+        切り替えのみです。
       </div>`;
   }
   const localHtml = b.available ? `
@@ -970,6 +992,7 @@ const CAM_SETTING_LABELS = {
   cam_autofocus:"オートフォーカス",
   save_cooldown:"保存の間隔 (秒)", reconnect_seconds:"再接続間隔 (秒)",
   corrupt_min_area_ratio:"破損とみなす平坦面積の下限比率 (0-1)",
+  corrupt_tile_repeat_ratio:"破損 (モザイク化) とみなす最多重複面積の下限比率 (0-1)",
   corrupt_reboot_threshold:"再接続を何回試したら完全切断/緊急再起動に進むか",
   corrupt_disconnect_seconds:"緊急再起動前にカメラを完全切断しておく秒数",
 };
@@ -1129,30 +1152,100 @@ async function setMode(m){
 let MUSIC = {};
 async function loadMusic(){
   try{ MUSIC = await api("/api/music"); renderMusic(true); }catch(e){}
+  loadBtOutput();
   loadEq();
 }
 
+/* ---------------- BGM 出力先 (Bluetooth) ---------------- */
+let BT_OUT = null;
+async function loadBtOutput(){
+  try{ BT_OUT = await api("/api/bluetooth/output"); renderBtOutput(); updateEqScopeOptions(); }
+  catch(e){}
+}
+function renderBtOutput(){
+  const sel = $("#bt-out-select");
+  if(!BT_OUT || !sel) return;
+  if(document.activeElement !== sel){
+    const opts = [`<option value="">AUX (3.5mm)</option>`].concat(
+      (BT_OUT.candidates || []).map(d =>
+        `<option value="${esc(d.addr)}" ${d.addr === BT_OUT.selected ? "selected" : ""}>${esc(d.name || d.addr)}</option>`));
+    sel.innerHTML = opts.join("");
+  }
+  const st = BT_OUT.status || {};
+  let html;
+  if(!BT_OUT.selected) html = "AUX (3.5mm) で再生しています";
+  else if(st.connected) html = `<i class="dot ok"></i>${esc(st.device_name)} に接続中`;
+  else if(st.connecting) html = `<i class="dot warn"></i>接続を試みています…`;
+  else html = `<i class="dot warn"></i>未接続です (自動で再試行中、それまでは AUX で再生)${st.error ? " — " + esc(st.error) : ""}`;
+  $("#bt-out-state").innerHTML = html;
+  const label = $("#m-vol-label");
+  if(label) label.textContent = (st.connected && BT_OUT.selected) ? `音量 (${st.device_name})` : "音量 (AUX)";
+}
+async function btOutSet(addr){
+  try{
+    const r = await post("/api/bluetooth/output", {addr});
+    toast(r.message, !r.ok);
+    await loadBtOutput();
+  }catch(e){ toast(e.message, true); }
+}
+
 /* ---------------- equalizer ---------------- */
+// eq-scope の値は "global" (AUX 全体設定) / "track" (この曲だけ) /
+// "bt:<MAC>" (Bluetooth 出力機器ごとの設定) のいずれか。bt: は
+// updateEqScopeOptions() がペアリング済み端末の一覧から動的に追加する。
 let EQ = null;
+function updateEqScopeOptions(){
+  const sel = $("#eq-scope");
+  if(!sel || document.activeElement === sel) return;
+  const cur = sel.value;
+  const btOpts = (BT_OUT && BT_OUT.candidates || []).map(d =>
+    `<option value="bt:${esc(d.addr)}">Bluetooth: ${esc(d.name || d.addr)}</option>`).join("");
+  sel.innerHTML = `<option value="global">全体設定 (AUX)</option><option value="track">この曲だけ</option>${btOpts}`;
+  if([...sel.options].some(o => o.value === cur)) sel.value = cur;
+}
 async function loadEq(){
-  try{ EQ = await api("/api/music/eq"); renderEq(); }catch(e){}
+  const scope = $("#eq-scope").value;
+  try{
+    if(scope.startsWith("bt:")){
+      const r = await api(`/api/music/eq/bt/${encodeURIComponent(scope.slice(3))}`);
+      EQ = {bands_hz: r.bands_hz, enabled: r.enabled, global: r.bands, track_overrides: {}, current_track: ""};
+    }else{
+      EQ = await api("/api/music/eq");
+    }
+    renderEq();
+  }catch(e){}
+}
+async function eqSetEnabled(v){
+  const enabled = v === "true";
+  const scope = $("#eq-scope").value;
+  try{
+    if(scope.startsWith("bt:")) await putJson(`/api/music/eq/bt/${encodeURIComponent(scope.slice(3))}`, {enabled});
+    else await cfg({music_eq_enabled: enabled});
+    await loadEq();
+  }catch(e){ toast(e.message, true); }
 }
 function renderEq(){
   if(!EQ) return;
   $("#eq-enabled").value = String(EQ.enabled);
   const scope = $("#eq-scope").value;
+  const isBt = scope.startsWith("bt:");
   const track = EQ.current_track;
-  $("#eq-track-name").textContent = scope === "track"
-    ? (track ? `対象の曲: ${track}` : "再生中の曲がありません (先に曲を再生してください)")
-    : "";
+  if(scope === "track"){
+    $("#eq-track-name").textContent = track ? `対象の曲: ${track}` : "再生中の曲がありません (先に曲を再生してください)";
+  }else if(isBt){
+    const d = (BT_OUT && (BT_OUT.candidates || []).find(x => x.addr === scope.slice(3))) || {};
+    $("#eq-track-name").textContent = `対象: ${d.name || scope.slice(3)}`;
+  }else{
+    $("#eq-track-name").textContent = "";
+  }
   const trackBands = (track && EQ.track_overrides[track]) || {};
   $("#eq-bands").innerHTML = EQ.bands_hz.map(hz => {
-    const has = scope === "global" ? (hz in EQ.global) : (hz in trackBands);
-    const v = scope === "global" ? (EQ.global[hz] ?? 0) : (trackBands[hz] ?? EQ.global[hz] ?? 0);
+    const has = scope === "track" ? (hz in trackBands) : (hz in EQ.global);
+    const v = scope === "track" ? (trackBands[hz] ?? EQ.global[hz] ?? 0) : (EQ.global[hz] ?? 0);
     const label = (+hz >= 1000) ? `${(+hz/1000).toFixed(+hz % 1000 ? 1 : 0)}k` : hz;
     return `<div style="display:flex;flex-direction:column;align-items:center;flex:1;min-width:0">
       <span class="faint" style="font-size:9px">${has ? v : 0}</span>
-      <input type="range" min="-20" max="20" step="1" value="${v}"
+      <input type="range" min="-12" max="12" step="1" value="${v}"
         style="writing-mode:vertical-lr;direction:rtl;width:16px;height:90px;padding:0"
         onchange="eqSetBand('${hz}', this.value)" title="${hz} Hz">
       <span class="faint" style="font-size:9px;white-space:nowrap">${label}</span>
@@ -1164,9 +1257,11 @@ async function eqSetBand(hz, val){
   const body = {}; body[hz] = +val;
   try{
     if(scope === "global") await putJson("/api/music/eq/global", body);
-    else{
+    else if(scope === "track"){
       if(!EQ.current_track){ toast("再生中の曲がありません", true); return; }
       await putJson(`/api/music/eq/track/${encodeURIComponent(EQ.current_track)}`, body);
+    }else if(scope.startsWith("bt:")){
+      await putJson(`/api/music/eq/bt/${encodeURIComponent(scope.slice(3))}`, {bands: body});
     }
     await loadEq();
   }catch(e){ toast(e.message, true); }
@@ -1176,7 +1271,8 @@ async function eqReset(){
   const body = {}; EQ.bands_hz.forEach(hz => body[hz] = null);
   try{
     if(scope === "global") await putJson("/api/music/eq/global", body);
-    else if(EQ.current_track) await putJson(`/api/music/eq/track/${encodeURIComponent(EQ.current_track)}`, body);
+    else if(scope === "track"){ if(EQ.current_track) await putJson(`/api/music/eq/track/${encodeURIComponent(EQ.current_track)}`, body); }
+    else if(scope.startsWith("bt:")) await putJson(`/api/music/eq/bt/${encodeURIComponent(scope.slice(3))}`, {bands: body});
     await loadEq();
     toast("リセットしました");
   }catch(e){ toast(e.message, true); }
@@ -2144,7 +2240,8 @@ const GROUPS = [
                   "mode_override","normal_governor","eco_governor"]],
   ["カメラ", ["cam_width","cam_height","cam_eco_width","cam_eco_height","jpeg_quality",
               "live_fps","normal_fps","eco_fps","retention_days","reconnect_seconds",
-              "corrupt_min_area_ratio","corrupt_reboot_threshold","corrupt_disconnect_seconds"]],
+              "corrupt_min_area_ratio","corrupt_tile_repeat_ratio",
+              "corrupt_reboot_threshold","corrupt_disconnect_seconds"]],
   ["動体検知", ["motion_threshold","motion_area_ratio","motion_area_max_ratio","motion_interval",
                 "motion_warmup_seconds","motion_confirm_checks","motion_release_checks",
                 "cam_autofocus","save_cooldown","motion_debug_log"]],
@@ -2158,7 +2255,7 @@ const GROUPS = [
                       "notify_mode_title"]],
   ["音声アナウンス", ["voice_enabled","voice_volume","voice_duck_percent","voice_rate","voice_lang",
                       "voice_time_enabled","voice_time_interval_minutes","voice_time_text",
-                      "voice_chime_enabled","voice_chime_path",
+                      "voice_chime_enabled","voice_chime_volume","voice_chime_path",
                       "voice_error_enabled","voice_error_text",
                       "voice_camera_reboot_enabled","voice_camera_reboot_text",
                       "voice_other_enabled","voice_other_text"]],
@@ -2188,14 +2285,16 @@ const LABELS = {
   retention_days:"静止画の保存日数",
   reconnect_seconds:"再接続の基準間隔 (秒)",
   corrupt_min_area_ratio:"破損 (単色ブロック化) とみなす平坦面積の下限比率 (0-1、低いほど敏感)",
+  corrupt_tile_repeat_ratio:"破損 (同じ柄の繰り返し/モザイク化) とみなす最多重複面積の下限比率 (0-1、低いほど敏感)",
   corrupt_reboot_threshold:"素早い再接続を何回試しても直らなければ、まずカメラを完全に切断するか (それでも直らなければPiを緊急再起動)",
   corrupt_disconnect_seconds:"緊急再起動の前に、カメラを完全に切断しておく秒数",
   music_enabled:"常時再生を有効にする", music_autoplay_on_presence:"人を検知したら自動再生",
   music_volume:"音量 (%)", music_repeat:"繰り返し", music_shuffle:"シャッフル",
   mpg123_buffer_kb:"mpg123 バッファ (KB)",
-  alsa_device:"ALSA デバイス (空欄なら自動検出したアナログ出力を使用。音声アナウンス・Bluetoothと自動的に重なって鳴る)",
-  music_eq_enabled:"イコライザーを有効にする (音楽タブでバンドを調整)",
-  bt_enabled:"Bluetooth 連携を有効にする", bt_poll_seconds:"接続確認の間隔 (秒)",
+  alsa_device:"ALSA デバイス (空欄なら自動検出したアナログ出力を使用。BGM 出力先が AUX のときのみ有効。音声アナウンスと自動的に重なって鳴る)",
+  music_eq_enabled:"イコライザーを有効にする (AUX 用。音楽タブでバンドを調整。Bluetooth 出力先ごとの EQ も音楽タブで別途設定できます)",
+  bt_enabled:"Bluetooth 連携を有効にする (受信・BGM 送信の両方の元栓)",
+  bt_poll_seconds:"接続確認の間隔 (秒)",
   discord_webhook:"Webhook URL", notify_motion:"動体検知を通知する",
   notify_motion_grouped:"複数カメラの検知を1通にまとめる (オフ: カメラごとに送る)",
   notify_system_events:"システムイベント (起動・端末など) を通知する",
@@ -2208,19 +2307,21 @@ const LABELS = {
   notify_mode_title:"モード遷移の文面 ({old} {new} {reason})",
   voice_enabled:"音声アナウンスを有効にする (総元栓、Open JTalk優先/espeak-ngへ自動フォールバック)",
   voice_volume:"音量 (%)",
-  voice_duck_percent:"アナウンス中に音楽の音量を下げる割合 (%、100で下げない。曲と重ねて鳴らせる場合のみ有効)",
+  voice_duck_percent:"アナウンス中に音楽の音量を下げる割合 (%、100で下げない。AUX 出力時のみ — Bluetooth 出力中は音量を下げる代わりに一時停止します)",
   voice_rate:"話す速さの倍率 (0.5〜2.0、1.0が標準)",
   voice_lang:"espeak-ng へフォールバックした時の言語 (通常 ja のまま)",
   voice_time_enabled:"時報を読み上げる", voice_time_interval_minutes:"時報の間隔 (分)",
-  voice_time_text:"時報の文面 ({hour} {minute_part}。{minute_part}は0分のとき空文字、{minute}は常に数値)",
-  voice_chime_enabled:"時報と同時に効果音を重ねて鳴らす (曲と重ねて鳴らせる場合のみ有効)",
+  voice_time_text:"時報の文面。使えるプレースホルダ: {hour} {minute} {minute_part}(0分のとき空文字) "+
+    "{weekday}(月〜日) {hour12} {ampm}(午前/午後) {month} {day} {time}(HH:MM)",
+  voice_chime_enabled:"時報と同時に効果音を重ねて鳴らす (AUXは重ねて再生、Bluetooth出力中は音楽を一時停止してから再生)",
+  voice_chime_volume:"効果音 (チャイム) 自体の音量 (%)。声が効果音に負けて聞き取りにくい場合はこちらを下げてください",
   voice_chime_path:"効果音ファイルの実パス (Pi上の絶対パス、.wav/.mp3。空欄なら内蔵の合成音)",
   voice_error_enabled:"エラー発生時に読み上げる",
-  voice_error_text:"エラー通知の文面 ({message})",
+  voice_error_text:"エラー通知の文面 ({message} {time} が使えます)",
   voice_camera_reboot_enabled:"カメラ破損によるPi再起動時に読み上げる",
-  voice_camera_reboot_text:"カメラ再起動通知の文面 ({message})",
+  voice_camera_reboot_text:"カメラ再起動通知の文面 ({message} {time} が使えます)",
   voice_other_enabled:"その他のシステムイベント (起動・停止・定時処理など) を読み上げる",
-  voice_other_text:"その他システムイベントの文面 ({message})",
+  voice_other_text:"その他システムイベントの文面 ({message} {time} が使えます)",
   netlog_enabled:"アクセス記録を有効にする", adguard_url:"AdGuard Home の URL",
   adguard_user:"ユーザー名", adguard_password:"パスワード",
   netlog_poll_seconds:"取得間隔 (秒)", netlog_retention_days:"記録の保存日数",
