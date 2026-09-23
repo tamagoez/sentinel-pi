@@ -3290,6 +3290,89 @@ signature で大量に繰り返している場合だけをこの経路で扱う�
 ください** — 同じ「破損の種類によっては検知をすり抜ける」不具合に
 戻ります。
 
+### 74. Bluetooth の discoverable/pairable を常時オンにしていたせいで、身に覚えのない端末が勝手にペアリングされていた
+
+#73 で `modules/bt_agent.py` を機能停止した直後、「勝手に謎のデバイスが
+追加されてしまう」という報告があった。原因は bt_agent とは別の場所、
+`install.sh` と `sentinel-guardian.sh` が Bluetooth の discoverable/
+pairable を**常時オン**に保っていたことだった。
+
+- `install.sh` は `/etc/bluetooth/main.conf` に `AlwaysPairable = true`・
+  `DiscoverableTimeout = 0`・`PairableTimeout = 0` を書いていた —
+  「常にペアリング可能・タイムアウトで自動的に閉じることは無い」という
+  設定。
+- `sentinel-guardian.sh` の `check_bluetooth()` は 2 分ごとに
+  `bluetoothctl show` を見て、`Discoverable: yes`/`Pairable: yes`
+  でなければ即座に `on` へ戻していた。
+
+この 2 つが揃うと、`bluetoothd` が再起動されるたび (Guardian 自身の
+自己修復、apt の自動アップグレード、OOM Kill など、この機体では珍しく
+ない、CLAUDE.md #12/#45/#55) に discoverable/pairable がリセットされても
+Guardian が次の周期までに必ず戻し、かつ main.conf 側は一度戻れば二度と
+自分からは閉じない。結果として **この Pi は 24 時間 365 日、近くの
+どんな端末からのペアリング要求も受け付け続けていた**。Bluetooth の
+Secure Simple Pairing は、双方が入出力機能を持たない (NoInputNoOutput)
+組み合わせでは「Just Works」方式で確認なしにペアリングが完了する —
+これは #73 で bt_agent を止めたこととは無関係に、双方の capability
+ネゴシエーション次第でエージェントの有無を問わず起こり得る。この
+組み合わせのもとでは、近くを通っただけのスマホやイヤホンが誤って
+ペアリングを試みる・他人のアプリが自動的にペアリングを試す、といった
+経路で「身に覚えのない端末がいつの間にかペアリング済みになっている」
+ことが起こり得ると判断した。
+
+この節が置き換えるのは以前の設計判断 (#16/#17/#66 あたりで確立された
+「iPhone からのペアリングをいつでも受け付けられるように、Bluetooth は
+常時 discoverable/pairable にしておく」という前提) そのものである。
+当時はこれが自動応答エージェント (bt_agent、当時は
+`scripts/sentinel-bt-agent.sh`) とセットで機能する設計だった — 常時
+開いている窓口へ、エージェントが確認応答を自動で返す、という組み合わせ
+だった。#73 でエージェントを止めた今、常時開いている窓口だけが残り、
+確認する主体が誰もいない状態になっていた。ペアリングは既に「端末タブ
+で `bluetoothctl` を手動実行する」という、人が明示的に行う操作へ
+切り替わっている (#73) ため、**常時開けておく理由自体がもう無い**。
+
+修正は 2 箇所。
+
+1. `install.sh`: `AlwaysPairable = false`・`DiscoverableTimeout = 180`・
+   `PairableTimeout = 180` に変更。`AlwaysPairable=false` により、
+   ランタイムの pairable トグル (設定タブのボタン、または人が
+   `bluetoothctl` で打つ `pairable on`) が実際に意味を持つようになる
+   (以前は次の bluetoothd 再起動で `true` へ強制的に戻されていた)。
+   180 秒の有限タイムアウトにより、on にしたまま閉じ忘れても
+   `bluetoothd` 自身が自動的に `off` へ戻す。さらに、main.conf を
+   書き換えたかどうかに関わらず毎回 `bluetoothctl discoverable off`/
+   `pairable off` を明示的に呼ぶようにした — 過去のバージョン
+   (`AlwaysPairable=true` 時代) からアップグレードした機体では、
+   main.conf の既定値を直しただけではランタイム側の D-Bus プロパティは
+   `on` のまま残ってしまうため。
+2. `sentinel-guardian.sh` の `check_bluetooth()` から、discoverable/
+   pairable を強制的に `on` へ戻す 2 つのブロックを削除した。電源が
+   落ちていた場合に `power on` する自己修復だけは残している (これは
+   #12 の「起動直後の UART アタッチ競合」対策そのもので、discoverable/
+   pairable の常時公開とは無関係)。
+
+**この 2 か所を元に戻さないでください** — 同じ「身に覚えのない端末が
+勝手にペアリングされる」不具合に戻ります。特に `check_bluetooth()` へ
+discoverable/pairable の force-on を書き戻すと、main.conf 側をいくら
+閉じる方向へ直しても、次の Guardian 周期 (最大 2 分後) で無条件に
+また開かれてしまいます。
+
+**この修正は「新しい端末を二度とペアリングできなくする」ものではない**
+— 設定タブの「ペアリングを許可」ボタン (`bluetooth.set_pairable(True)`)
+は変更していない。既定でオフになり、3 分で自動的に閉じるようになった
+だけで、必要なときに開く手段そのものは残っている。
+
+**既にこの脆弱な期間中にペアリングしてしまった、身に覚えのない端末が
+残っている可能性がある。** このスクリプト自身にはペアリング済み端末の
+「これは自分が意図して繋いだものか」を判定する手段が無い (端末の
+名前・MAC アドレスだけでは判断できない) ため、自動削除はしていない。
+設定タブの Bluetooth カードやペアリング済み端末一覧、あるいは端末タブ
+から `bluetoothctl devices` / `bluetoothctl paired-devices` を実行して
+一覧を確認し、覚えのない端末があれば `bluetoothctl remove <MAC>` で
+手動で削除することを推奨する — 特に、音楽タブの「BGM 出力先」
+セレクタ (#73) はペアリング済み端末をそのまま候補として出すため、
+覚えのない端末が紛れ込んでいると選択肢が汚染される。
+
 ## モジュール構成
 
 各モジュールは疎結合で、`core/state.py` の `MODE` を購読するだけです。

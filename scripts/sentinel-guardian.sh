@@ -190,8 +190,8 @@ check_audio() {
 }
 
 # ------------------------------------------------------------------ 5. Bluetooth
-# Keep the adapter powered, discoverable and pairable. bluetoothd restarts
-# reset these, so they're re-checked every run.
+# Keep the adapter powered. bluetoothd restarts can leave it powered off,
+# so that alone is re-checked every run.
 #
 # On the RPi 3B+ the Bluetooth chip hangs off the UART, attached at boot by
 # hciuart.service (raspberrypi-sys-mods). That attach can lose the race
@@ -202,6 +202,22 @@ check_audio() {
 # plain reboot doesn't reliably fix it either, since it's a race, not a
 # one-time fault - so this has to be detected and repaired here rather
 # than just told to the user as "reboot again".
+#
+# **This function used to also force discoverable/pairable back to "on"
+# every cycle** (the reasoning at the time: bluetoothd restarts reset
+# those flags, and an incoming iPhone pairing needed to be able to happen
+# at any moment). Combined with install.sh's old AlwaysPairable=true +
+# DiscoverableTimeout=0/PairableTimeout=0 (main.conf never re-closing the
+# window on its own), this kept the adapter permanently open to Just-Works
+# pairing from *any* nearby device with no confirmation on either side -
+# reported as unknown/unexpected devices ending up paired. Pairing a new
+# device is now a deliberate action (bluetoothctl in the terminal tab, or
+# the Settings tab's pairable toggle, CLAUDE.md #73/#74) that the person
+# doing it turns on themselves and which times out on its own
+# (main.conf's now-finite DiscoverableTimeout/PairableTimeout) - Guardian
+# forcing it back open every 2 minutes defeats that closed-by-default
+# posture entirely. **Do not add the discoverable/pairable force-on
+# checks back here** - that is what let unknown devices pair silently.
 check_bluetooth() {
   command -v bluetoothctl >/dev/null || return 0
   systemctl is-active --quiet bluetooth || return 0
@@ -219,12 +235,6 @@ check_bluetooth() {
 
   if ! grep -qE 'Powered:\s*yes' <<<"$info"; then
     bluetoothctl power on >/dev/null 2>&1 && fixed "powered the Bluetooth adapter back on"
-  fi
-  if ! grep -qE 'Discoverable:\s*yes' <<<"$info"; then
-    bluetoothctl discoverable on >/dev/null 2>&1 && fixed "made Bluetooth discoverable again"
-  fi
-  if ! grep -qE 'Pairable:\s*yes' <<<"$info"; then
-    bluetoothctl pairable on >/dev/null 2>&1 && fixed "made Bluetooth pairable again"
   fi
 }
 

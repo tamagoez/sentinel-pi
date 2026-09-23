@@ -372,11 +372,33 @@ fi
 # device this Pi has paired with many times before. "always" lets an
 # already-known device silently re-pair with no prompt at all, which is
 # the behavior CLAUDE.md #64's report compared this project against
-# (CLAUDE.md #66).
+# (CLAUDE.md #66). This is about devices ALREADY paired reconnecting, not
+# about accepting brand new ones - it stays "always" even though the
+# discoverable/pairable window below is now deliberately narrow.
+#
+# AlwaysPairable/DiscoverableTimeout/PairableTimeout used to be
+# true/0/0 (pairable forever, no timeout) so an already-registered pairing
+# agent (CLAUDE.md #16/#17/#72) could always catch an incoming iPhone
+# pairing attempt. Now that the agent (modules/bt_agent.py) is disabled
+# (CLAUDE.md #73) and Guardian no longer forces discoverable/pairable back
+# on every cycle (see check_bluetooth() below), leaving the adapter
+# permanently pairable serves no purpose and is actively unsafe: BlueZ can
+# complete a Just-Works pairing from *any* nearby device with no
+# confirmation on either side when neither side has input/output
+# capability, which is exactly the "AlwaysPairable=true,
+# DiscoverableTimeout=0" combination this used to set - the report that
+# unknown devices were silently pairing traces straight back to this.
+# AlwaysPairable=false lets the runtime pairable/discoverable toggle (the
+# Settings tab's button, or `bluetoothctl pairable/discoverable on` typed
+# by hand before pairing a new device) actually mean something instead of
+# being overridden back to "on" on the next bluetoothd restart, and the
+# 180-second timeouts mean a forgotten "on" toggle closes itself instead
+# of staying open indefinitely. **Do not set these back to
+# true/0/0** - that is what let unknown devices pair silently.
 if [[ -f /etc/bluetooth/main.conf ]]; then
   cp -n /etc/bluetooth/main.conf /etc/bluetooth/main.conf.sentinel-backup 2>/dev/null || true
   BEFORE_SUM=$(md5sum /etc/bluetooth/main.conf | awk '{print $1}')
-  for kv in "DiscoverableTimeout=0" "PairableTimeout=0" "AlwaysPairable=true" "JustWorksRepairing=always"; do
+  for kv in "DiscoverableTimeout=180" "PairableTimeout=180" "AlwaysPairable=false" "JustWorksRepairing=always"; do
     k="${kv%%=*}"; v="${kv#*=}"
     if grep -qE "^\s*#?\s*$k\s*=" /etc/bluetooth/main.conf; then
       sed -i -E "s|^\s*#?\s*$k\s*=.*|$k = $v|" /etc/bluetooth/main.conf
@@ -399,10 +421,20 @@ if [[ -f /etc/bluetooth/main.conf ]]; then
   # systemd's default start-limit and leave those units "failed".
   if [[ "$BEFORE_SUM" != "$AFTER_SUM" ]] || ! systemctl is-active --quiet bluetooth; then
     systemctl restart bluetooth 2>/dev/null || true
-    ok "bluetoothd set to always-discoverable/pairable (restarted)"
+    ok "bluetoothd configured (pairable/discoverable off by default, restarted)"
   else
     ok "bluetoothd already configured; left running"
   fi
+  # Explicitly close the pairing window on every install.sh/update.sh run,
+  # not just when main.conf changed above - a machine upgraded from a
+  # previous version of this project may still have discoverable/pairable
+  # left on at the runtime (D-Bus) level from the old AlwaysPairable=true
+  # behavior, and turning main.conf's default off does not retroactively
+  # flip an already-on runtime property. Harmless no-op if already off.
+  command -v bluetoothctl >/dev/null && systemctl is-active --quiet bluetooth && {
+    bluetoothctl discoverable off >/dev/null 2>&1 || true
+    bluetoothctl pairable off >/dev/null 2>&1 || true
+  }
 fi
 
 # ---------------------------------------------------------------- 8. Guardian

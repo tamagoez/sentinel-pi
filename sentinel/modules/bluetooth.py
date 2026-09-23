@@ -106,6 +106,13 @@ def disconnect(addr: str = "") -> bool:
 
 
 def set_pairable(on: bool) -> None:
+    """新しい端末を受け入れる窓口を開閉する。既定はオフ — install.sh が
+    main.conf の DiscoverableTimeout/PairableTimeout を 180 秒の有限値に
+    設定しているため、on にしてもそのまま忘れても 3 分で自動的に閉じる。
+    Guardian はこれをもう強制的に on へ戻さない (CLAUDE.md #74) —
+    以前 AlwaysPairable=true + タイムアウト無しと組み合わさって、確認
+    無しの Just Works ペアリングを近くのどんな端末からでも常時受け付けて
+    しまい、身に覚えのない端末が勝手にペアリングされる原因になっていた。"""
     v = "on" if on else "off"
     for cmd in (["bluetoothctl", "discoverable", v],
                 ["bluetoothctl", "pairable", v]):
