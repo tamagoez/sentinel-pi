@@ -20,9 +20,7 @@ from .core import errors as errors_mod
 from .core import state
 from .core.state import MODE
 from .core.supervisor import SUPERVISOR
-from .modules import bluetooth, camera, maintenance, music, netlog, notify, terminal, thermal, voice
-# bt_agent はここでは import しない — 現在 spawn していない (下のコメント参照)。
-# 修正して再度有効化するときは import と SUPERVISOR.spawn の両方を戻すこと。
+from .modules import bluetooth, bt_agent, camera, maintenance, music, netlog, notify, terminal, thermal, voice
 from .web import routes
 
 
@@ -76,13 +74,12 @@ async def lifespan(app: FastAPI):
     SUPERVISOR.spawn("music-download", music.download_loop)
     SUPERVISOR.spawn("bluetooth", bluetooth.loop)
     SUPERVISOR.spawn("bluetooth-output", bluetooth.output_loop)
-    # bt_agent.loop() (D-Bus Agent1 ペアリングエージェント) は spawn しない
-    # — 実機で "Failed to register agent object" の再登録ループが収まらず
-    # 実用にならなかった。修正はせず、いったん機能を止める判断にした
-    # (modules/bt_agent.py の docstring 冒頭を参照)。ペアリングは
-    # 端末タブから `bluetoothctl` を対話的に実行して行う — bluetoothctl
-    # 自身が起動時に自分を agent として登録するため、この用途では
-    # むしろこちらの方が確実に動く。
+    # bt_agent.loop() (D-Bus Agent1 ペアリングエージェント、Web UI の承認
+    # ゲート付き) を spawn する。以前は機能停止していたが、実機で見えて
+    # いた失敗は登録レースではなく dbus-next の戻り値注釈バグそのものと
+    # 判明し (modules/bt_agent.py の docstring を参照)、修正済みのため
+    # 再度有効化した。
+    SUPERVISOR.spawn("bt-agent", bt_agent.loop)
     SUPERVISOR.spawn("netlog", netlog.loop)
     SUPERVISOR.spawn("notify-send", notify.sender_loop)
     SUPERVISOR.spawn("notify-summary", notify.summary_loop)

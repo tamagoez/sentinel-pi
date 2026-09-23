@@ -21,7 +21,7 @@ from ..core import config
 from ..core import errors as errors_mod
 from ..core.state import MODE
 from ..core.supervisor import SUPERVISOR
-from ..modules import bluetooth, camera, diagnostics, hotspot, maintenance, music, netlog, notify, terminal, thermal, voice
+from ..modules import bluetooth, bt_agent, camera, diagnostics, hotspot, maintenance, music, netlog, notify, terminal, thermal, voice
 
 log = logging.getLogger("sentinel.web")
 router = APIRouter()
@@ -122,6 +122,7 @@ def _overview() -> dict:
         "music": music.PLAYER.status(),
         "bluetooth": bluetooth.status(),
         "bluetooth_output": bluetooth.output_status(),
+        "bluetooth_pending": bt_agent.list_pending(),
         "netlog": {"state": netlog.STATE, "summary": netlog.today_summary()[:10]},
         "notify": notify.STATE,
         "voice": voice.STATE,
@@ -694,6 +695,42 @@ async def bluetooth_output_set(request: Request):
     addr = str(body.get("addr") or "")
     ok, message = await asyncio.to_thread(bluetooth.set_output_device, addr)
     return {"ok": ok, "message": message, "status": bluetooth.output_status()}
+
+
+@router.get("/api/bluetooth/pending")
+async def bluetooth_pending(request: Request):
+    """承認待ちのペアリング/接続要求一覧 (modules/bt_agent.py)。
+    _overview() 経由の WebSocket 定期送信にも同じ内容が乗るため、Web UI
+    はこのエンドポイントを追加でポーリングしなくてもよい — 個別に取得
+    したい場面 (承認直後の即時再確認など) のために残してある。"""
+    require(request)
+    return {"pending": bt_agent.list_pending()}
+
+
+@router.post("/api/bluetooth/pending/decide")
+async def bluetooth_pending_decide(request: Request):
+    """承認待ちの要求 1 件に対する人間の判断を反映する。対象が既に
+    タイムアウト/別タブで決着済みなら ok=False を返す (エラーではなく、
+    「もう手遅れでした」を示すだけ)。"""
+    require(request)
+    body = await request.json()
+    req_id = str(body.get("id") or "")
+    allow = bool(body.get("allow"))
+    ok = bt_agent.decide(req_id, allow)
+    return {"ok": ok, "pending": bt_agent.list_pending()}
+
+
+@router.post("/api/bluetooth/remove")
+async def bluetooth_remove(request: Request):
+    """ペアリング済み端末を削除する。承認ゲートで誤って許可してしまった
+    端末や、もう使わない端末を Web UI だけで取り消せるようにするため
+    (CLAUDE.md #74 では bluetoothctl remove を手動で、としか案内できて
+    いなかった)。"""
+    require(request)
+    body = await request.json()
+    addr = str(body.get("addr") or "")
+    ok, message = await asyncio.to_thread(bluetooth.remove_device, addr)
+    return {"ok": ok, "message": message, "devices": await asyncio.to_thread(bluetooth.paired_devices)}
 
 
 @router.post("/api/bluetooth/{action}")

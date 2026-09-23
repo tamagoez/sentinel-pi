@@ -915,6 +915,17 @@ def set_bt_output(addr: str | None, name: str = "") -> None:
         PLAYER.play(pos)
 
 
+def forget_bt_output_profile(addr: str) -> None:
+    """bluetooth.remove_device() が端末を削除したときに、その端末専用の
+    音量/EQ プロファイル (bt_output_profiles[addr]) を消す。消さずに
+    残すと、同じ MAC の端末を再ペアリングしたとき (あるいは別人の端末が
+    たまたま同じ addr 形式の何かに使い回された場合) に前回の値が亡霊の
+    ように復活する。"""
+    profiles = dict(config.get("bt_output_profiles") or {})
+    if profiles.pop(addr, None) is not None:
+        config.update({"bt_output_profiles": profiles})
+
+
 def set_bt_output_volume(addr: str, pct: int) -> None:
     pct = max(0, min(100, int(pct)))
     profiles = dict(config.get("bt_output_profiles") or {})
