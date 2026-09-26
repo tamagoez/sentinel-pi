@@ -40,6 +40,20 @@ STATE_PATH = DATA_ROOT / "state.json"     # 再生位置などの永続スナッ
 RAM_ROOT = Path("/dev/shm") if Path("/dev/shm").is_dir() else DATA_ROOT
 RUNTIME = RAM_ROOT / "sentinel-runtime"
 
+# ローカル (SD カード = 本体) 上の、設定だけの軽量バックアップ先。外部
+# ストレージ (DATA_ROOT) が破損したときのための最後の手段なので、
+# DATA_ROOT 配下には置かない。$APP_DIR (git clone、CLAUDE.md の
+# 「完全に削除して git を再反映」の対象そのもの) 配下にも置かない —
+# 両方が消える再導入シナリオでもこれだけは残る必要があるため
+# (CLAUDE.md #80)。install.sh の STEP 2 が sentinel:sentinel で作成する。
+# **ここでは mkdir しない** — DATA_ROOT/RUNTIME と違い、install.sh 未実行の
+# 開発環境や権限が無い環境で import 時に mkdir が失敗すると (/var/lib
+# 自体が無い、権限が無い等) core.config の import 自体が落ち、本体全体が
+# 起動できなくなる。実際に使う maintenance.py 側で書き込み時に
+# try/except し、失敗しても定時処理自体は止めない (CLAUDE.md 「意図的に
+# していないこと」— 一部機能が使えない状態でも処理を止めない、と同じ方針)。
+LOCAL_BACKUP_ROOT = Path("/var/lib/sentinel/backup")
+
 for _d in (DATA_ROOT, MUSIC_DIR, CAPTURE_ROOT, ARCHIVE_ROOT, NETLOG_ROOT, RUNTIME):
     _d.mkdir(parents=True, exist_ok=True)
 
@@ -160,9 +174,9 @@ DEFAULTS: dict[str, Any] = {
     # --- 音楽 ---
     "music_enabled": True,
     "music_volume": 60,                   # 0-100 (music_volume_boost_enabled が
-                                           # 有効な間だけ 150 まで、Player.set_volume()/
+                                           # 有効な間だけ 300 まで、Player.set_volume()/
                                            # _active_output_profile() 参照)
-    "music_volume_boost_enabled": False,  # AUX 音量の 100% 上限を 150% まで解除する。
+    "music_volume_boost_enabled": False,  # AUX 音量の 100% 上限を 300% まで解除する。
                                            # ヘッドホンでの難聴リスクがあるため既定オフ。
     "music_mute_bgm_on_aux": False,       # AUX (3.5mm) 出力中は BGM を鳴らさない。
                                            # 音声アナウンスはこの設定の影響を受けない。
@@ -412,11 +426,13 @@ _RANGES: dict[str, tuple[float, float]] = {
     "corrupt_reboot_cooldown_seconds": (60, 86400),
     "corrupt_disconnect_seconds": (30, 1800),
     "retention_days": (1, 3650),
-    # 上限は music_volume_boost_enabled が有効な場合の最大値 (150)。
-    # boost が無効な間の実際の上限は Player.set_volume()/
-    # _active_output_profile() がランタイム側で別途 100 に絞る — ここを
-    # 100 のままにすると boost を有効にしても値そのものを保存できない。
-    "music_volume": (0, 150),
+    # 上限は music_volume_boost_enabled が有効な場合の最大値 (300、
+    # music.py の _AUX_VOLUME_BOOST_MAX と同じ値 — mpg123 自身の実用上限
+    # 3.0 倍に基づく、CLAUDE.md #80 参照)。boost が無効な間の実際の上限は
+    # Player.set_volume()/_active_output_profile() がランタイム側で別途
+    # 100 に絞る — ここを 100 のままにすると boost を有効にしても値
+    # そのものを保存できない。
+    "music_volume": (0, 300),
     "mpg123_buffer_kb": (64, 8192),
     "notify_min_interval": (5.0, 3600.0),
     "notify_summary_after": (30.0, 86400.0),

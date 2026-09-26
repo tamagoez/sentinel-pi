@@ -1014,6 +1014,58 @@ async def maintenance_run(request: Request):
     return {"ok": True, "message": "定時処理を開始しました"}
 
 
+# ---------------------------------------------------------------- 設定バックアップ (本体 SD カード)
+# maintenance.backup_settings() が毎日の定時処理で自動的に作る、
+# config.json/state.json だけの軽量な zip (外部ストレージとは別に
+# config.LOCAL_BACKUP_ROOT = /var/lib/sentinel/backup へ置く、CLAUDE.md
+# #80)。ここでは「最新の状態を見る」「今すぐ作る」「ダウンロードする」
+# の 3 つだけを公開する — 一覧・世代選択のような凝った UI は要らない、
+# 「外部ストレージが壊れたときに設定だけ最低限復元できる」という目的に
+# 対して最新の 1 つで十分なため。
+
+@router.get("/api/backup/status")
+async def backup_status(request: Request):
+    require(request)
+    try:
+        files = sorted(config.LOCAL_BACKUP_ROOT.glob("settings-*.zip"))
+    except OSError:
+        files = []
+    latest = files[-1] if files else None
+    return {
+        "ok": True,
+        "count": len(files),
+        "latest_name": latest.name if latest else None,
+        "latest_at": latest.stat().st_mtime if latest else None,
+        "path": str(config.LOCAL_BACKUP_ROOT),
+    }
+
+
+@router.post("/api/backup/run")
+async def backup_run(request: Request):
+    require(request)
+    out = await asyncio.to_thread(maintenance.backup_settings)
+    if not out:
+        raise HTTPException(500, "バックアップの作成に失敗しました (ログを確認してください)")
+    return {"ok": True, "path": out}
+
+
+@router.get("/api/backup/download")
+async def backup_download(request: Request):
+    require(request)
+    try:
+        files = sorted(config.LOCAL_BACKUP_ROOT.glob("settings-*.zip"))
+    except OSError:
+        files = []
+    if not files:
+        raise HTTPException(404, "バックアップがまだ作成されていません")
+    latest = files[-1]
+    # zip は数十 KB 程度の固定内容 (config.json/state.json) で、他プロセスが
+    # 同時に上書きし続けるファイルではない (backup_settings() は tmp へ書いて
+    # から replace() する一度限りの操作) ため、CLAUDE.md #23 の
+    # FileResponse 禁止パターンには当たらない。
+    return FileResponse(latest, filename=latest.name, media_type="application/zip")
+
+
 @router.post("/api/system/reboot")
 async def system_reboot(request: Request):
     require(request)

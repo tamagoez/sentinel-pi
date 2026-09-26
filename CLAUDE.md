@@ -3871,6 +3871,155 @@ Pi が USB/CPU 負荷で不安定になっている状況そのものなので�
 戻さないでください** — 同じ「読み込み終わっても数秒後に読み込み中へ戻る」
 不具合に戻ります。
 
+### 80. AUX 音量上限を 300% へ、スライダーの上限反映漏れを修正、難聴安全性の分離を再点検、外部ストレージ限定の永続化を再点検、本体 SD への軽量な設定バックアップを追加
+
+「もっと音量を上げられるようにしてください。小さいスピーカーなので聞こえ
+ません」「難聴にならないための音量の切り分けが上手くできているか確認して
+ください」「(外部ストレージが壊れた経緯を踏まえ) 完全に削除して git を
+再反映しても大丈夫な仕様になっているか徹底してください」「設定などの
+重すぎない内容を zip で本体側にも保存してください」という、4 つの独立した
+要望があった。
+
+#### AUX 音量上限を 150% から 300% へ
+
+#77 で追加した `music._AUX_VOLUME_BOOST_MAX` (150) では、小さいスピーカー
+では依然として音量不足という報告だった。この値を思いつきの数字で更に
+上げるのではなく、mpg123 自身がすでにこのプロジェクトで採用している
+実用上限に揃えることにした — mpg123 の `-R` リモートプロトコルの `V`
+コマンドは
+[README.remote](https://raw.githubusercontent.com/libsdl-org/mpg123/main/doc/README.remote)
+に "VOLUME/V <percent>: set volume in % (0..100...)" とあるだけで上限は
+明文化されていない。一方、mpg123 自身の `-f` (初期スケール) フラグは
+"values work best between 0.00 and 3.00" (線形ゲイン 3.0 = 300%) を実用上限
+として案内しており、これは #72 がイコライザーの実効レンジ (±12dB) を決めた
+ときにすでに踏襲した基準そのものである。同じファイル内で 2 つ目の「実用上限」
+の根拠を新たに作らず、既存の基準を延長する形で `_AUX_VOLUME_BOOST_MAX = 300`
+とした。`core/config.py` の `_RANGES["music_volume"]` も `(0, 300)` へ広げた。
+**この 300 という値自体は変更しないでください** — 「限界を超えて設定
+できるように」という要望は「安全な上限をどこかに置いた上での解放」を
+意図したもので、上限を無くす/利用者がさらに引き上げられるようにすることは
+意図と異なる (#77 の記述を継承)。
+
+#### スライダーの `max="100"` が上限解除を実質到達不能にしていた
+
+上限を上げても、音楽タブの `#m-vol` (`<input type="range" min="0"
+max="100">`) の HTML 属性が直書きの `100` のままだったため、
+`music_volume_boost_enabled` を有効にしても**スライダーからは 100 までしか
+動かせず**、生の API 呼び出しでしか実際には使えない機能になっていた。
+`Player.status()` に `volume_max` (AUX かつ boost 有効なら
+`_aux_volume_max()` の値、Bluetooth 出力機器または boost 無効なら 100) を
+新設し、これを唯一の判定窓口とした。`renderMusic()` は WebSocket 更新の
+たびに `$("#m-vol").max = s.volume_max ?? 100` でスライダーの `.max`
+プロパティを動的に上げる。**この判定をクライアント側で
+出力先/boost フラグを見て複製しないでください** — サーバー側の
+`_aux_volume_max()`/`_active_output_profile()` (#73/#77) と食い違う余地を
+増やすだけです。
+
+#### 難聴安全性の分離を再点検 (4 経路すべてを確認)
+
+上限を 300 へ上げたことで、既存の分離 (#72/#73/#77) が破れていないかを
+4 つの音量経路すべてで個別に確認した。
+
+- **AUX/BGM** (`music.py` の `music_volume`): `_aux_volume_max()` が
+  `music_volume_boost_enabled` を見て 100 か 300 かを判定し、
+  `Player.set_volume()`/`_active_output_profile()` の両方がこれを経由する
+  唯一の窓口であることを確認。boost を無効にした瞬間、過去に保存された
+  高い値 (例: 280) は消さずに `min(int(config.get("music_volume")),
+  _aux_volume_max())` で読み取り時に安全な上限へ再クランプされることを
+  実際に Python で動かして確認済み (このクランプ自体は #77 からの継承、
+  上限が 150→300 に変わっても壊れていないことの再確認)。
+- **Bluetooth 出力 (BGM を送る側、`bt_output_profiles`)**: この解除の
+  対象外で常に 0-100 のまま — `#77` が明示した意図的な非対称であることを
+  コード上で再確認。
+- **Bluetooth 受信 (電話→Pi、`bluetooth._apply_volume()`)**:
+  `max(0, min(100, int(pct)))`・`round(... * 127 / 100)` のクランプが
+  boost フラグと無関係にハードコードされていることを確認。
+- **音声アナウンス/チャイム** (`voice.py` の `voice_volume`/
+  `voice_chime_volume`): `max(0, min(100, ...))` で完全に独立、
+  `music_volume_boost_enabled` を一切参照しないことを確認。
+
+この一連の点検で見つかった唯一の実害は上記のスライダー `max` の
+到達不能問題で、バックエンド側の安全な境界そのものは (300 へ上げる前も
+上げた後も) 一貫して正しく機能していた。**この 4 経路の分離を、共通の
+音量関数へまとめるような「簡潔化」で崩さないでください** — AUX 直結より
+身体に近い Bluetooth ヘッドホンでの難聴リスクを踏まえた意図的な設計です
+(#77)。
+
+#### 外部ストレージ限定の永続化を再点検 (git 再反映で消えないことの確認)
+
+「この前壊れてしまった」経緯を踏まえ、`sentinel/` 配下の全 `.py` を
+横断的に検査し、`config.DATA_ROOT`/`config.RUNTIME` (tmpfs) 以外の場所へ
+永続データを書いているコードが無いかを確認した。見つかった絶対パス書き込み
+先は、`/dev/shm` (tmpfs、`RAM_ROOT` のフォールバック元)・`/proc`/`/sys`
+(カーネルの読み取り専用な計測値、`thermal.py`)・`/etc/hostapd/hostapd.conf`
+(root 所有の OS 設定、Sentinel のデータではない)・`/dev/v4l/by-id`・
+`/sys/class/video4linux` (カメラのデバイス列挙、`camera.py`) のみで、
+いずれも Sentinel が所有する永続データではない。`web/routes.py` の
+`FILE_ROOTS["root"] = Path("/")` はファイルブラウザの参照範囲 (読み取り/
+閲覧用、web 端末のシェルと同じ到達範囲) であり、書き込み先の設計とは
+無関係。`camera.py`/`maintenance.py`/`core/state.py` の実際の
+書き込み先も個別に確認し、すべて `config.RUNTIME` (意図的に一時的、
+tmpfs) または `config.DATA_ROOT` 配下 (`CAPTURE_ROOT`/`ARCHIVE_ROOT`/
+`STATE_PATH` など、外部ストレージ) のいずれかであることを確認した。
+**結論として、この設計はすでに要求どおり (`APP_ROOT` = git clone を
+完全に削除して再度 `git clone` + `setup.sh`/`update.sh` を実行しても、
+外部ストレージ側のデータは一切失われない) になっている** — 新たな修正は
+不要だった。今後新しいモジュールを追加する際は、この節の検査観点
+(`Path("/...")` の絶対パス書き込みが `DATA_ROOT`/`RUNTIME` 経由になって
+いるか) をそのまま踏襲してください。
+
+#### 本体 (SD カード) 側への軽量な設定バックアップ (新設)
+
+上記の点検で「外部ストレージだけが唯一の永続化先」であることを確認した
+一方、これは裏を返せば**外部ストレージそのものが物理的に壊れれば
+設定も含めて全部失う**ということでもある。「設定などの重すぎない内容を
+zip で本体の方にも保存してください」という要望はまさにこの片方の穴を
+塞ぐためのもので、既存の `/api/config/export` (手動・都度ダウンロード)
+とは別に、**自動で・本体の SD カード側に**残る仕組みを新設した。
+
+- **`config.LOCAL_BACKUP_ROOT = Path("/var/lib/sentinel/backup")`** を
+  新設。`DATA_ROOT` (外部ストレージ、壊れる対象そのもの) にも `APP_ROOT`
+  (git clone、削除・再反映の対象そのもの) にも置かない — 既存の
+  `/var/lib/sentinel/repo-path`/`setup-stage` と同じ「両方が消えても残る
+  OS ローカルな場所」という前提を踏襲している。**`config.py` の起動時
+  `mkdir` ループ (`DATA_ROOT`/`RUNTIME` 等) にはこの新しいパスを
+  加えていない** — install.sh 未実行の開発環境や権限が無い環境で import
+  時に `mkdir` が失敗すると `core.config` の import 自体が落ち、本体全体が
+  起動できなくなるため。ディレクトリの実際の作成・所有権
+  (`sentinel:sentinel`) は `install.sh` の STEP 2 (サービスユーザー作成の
+  直後) が担う。
+- **`maintenance.backup_settings()`** が `config.CONFIG_PATH`/
+  `config.STATE_PATH` (どちらも数十 KB 程度、音楽ライブラリ/カメラ映像/
+  タイムラプス/アクセスログのような重いデータは対象外) だけを zip に
+  まとめ、`settings-<タイムスタンプ>.zip` として `LOCAL_BACKUP_ROOT` へ
+  書く (tmp へ書いてから `replace()` する atomic write、#8 などと同じ
+  パターン)。`_BACKUP_KEEP` (既定 14) を超えた古い世代は削除する。
+  `LOCAL_BACKUP_ROOT.mkdir()` の失敗・zip 書き込みの失敗はいずれも
+  `log.warning()` を残して `None` を返すだけで例外を投げない —
+  「壊れても他の機能は道連れにしない」という CLAUDE.md 全体の段階的
+  劣化方針 (Open JTalk→espeak-ng、LADSPA→off 等) を踏襲し、この機能が
+  使えない環境でも定時処理本体 (動画生成・再起動判定) は止めない。
+- **`run_now()` の `finally` 節から呼ぶ** — 動画生成が失敗した日ほど
+  設定バックアップも欠ける、という本末転倒を避けるため、成否に関わらず
+  毎日必ず試みる。**この呼び出しを `try` 節の中 (成功時だけ) に移さないで
+  ください** — 動画生成の信頼性と設定バックアップの信頼性は本来
+  無関係な話です。
+- **Web UI**: `GET /api/backup/status`・`POST /api/backup/run`・
+  `GET /api/backup/download` (最新の 1 件のみ、世代選択のような凝った UI
+  は「外部ストレージ破損時に設定だけ最低限復元できればよい」という目的
+  には不要と判断) を新設し、設定タブに「設定バックアップ (本体 SD
+  カード)」カードを追加した。`backup_download()` は他プロセスが継続的に
+  上書きし続けるファイルではない (atomic replace 後は静的な zip) ため、
+  `FileResponse` を使っても #23 の `Content-Length` 不一致には当たらない
+  — タイムラプス動画の配信と同じ扱い。
+- **復元手順**: 外部ストレージが壊れて `config.json`/`state.json` を
+  失った場合、`sentinel-logs`/Web UI からこの zip をダウンロードし、
+  新しい外部ストレージ上の `$STORAGE/sentinel/` へ展開すればよい —
+  ファイル名は `config.json`/`state.json` のまま zip に入っているため、
+  展開してそのまま上書き配置するだけで済む。この手順は自動化していない
+  (壊れた外部ストレージそのものの復旧手順は機体ごとに異なり、CLAUDE.md
+  #8/#40 が扱ってきたのと同種の、人が状況を見て判断すべき操作のため)。
+
 ## モジュール構成
 
 各モジュールは疎結合で、`core/state.py` の `MODE` を購読するだけです。
@@ -4043,10 +4192,14 @@ modules/music.py        mpg123 制御、位置復帰、yt-dlp キュー。出力
                          音声アナウンス (begin_voice_interrupt() 経由) は
                          この設定の対象外 (CLAUDE.md #77)。AUX の音量上限は
                          _aux_volume_max() が判定し、music_volume_boost_
-                         enabled が有効な間だけ 100 ではなく 150 まで
+                         enabled が有効な間だけ 100 ではなく 300 まで
                          (mpg123 の `V` コマンド自身が 100 超を許容する
-                         ソフトウェア増幅、ヘッドホンでの難聴リスクがある
-                         ため既定オフ + Web UI 側に確認ダイアログ)。
+                         ソフトウェア増幅、mpg123 自身の -f フラグの実用
+                         上限 3.0 倍に揃えた値、ヘッドホンでの難聴リスクが
+                         あるため既定オフ + Web UI 側に確認ダイアログ、
+                         CLAUDE.md #80)。Player.status() の volume_max が
+                         この値を UI (#m-vol のスライダー上限) へ伝える
+                         唯一の窓口 (CLAUDE.md #80)。
                          Bluetooth 出力側の音量はこの解除の対象外で常に
                          0-100 のまま (CLAUDE.md #77)。
                          カテゴリー (「勉強用」「休憩用」) は MUSIC_DIR
@@ -4126,7 +4279,14 @@ modules/notify.py       Discord (レート制限対応キュー)。notify_motion
                          (CLAUDE.md #20)
 modules/maintenance.py  4 時の定時処理と再起動。emergency_reboot() は
                          camera.py の破損検知エスカレーション専用の緊急
-                         再起動 (タイムラプス生成は省略、CLAUDE.md #22)
+                         再起動 (タイムラプス生成は省略、CLAUDE.md #22)。
+                         backup_settings() は run_now() の finally 節から
+                         毎日必ず呼ばれ、config.json/state.json だけの
+                         軽量な zip を config.LOCAL_BACKUP_ROOT
+                         (/var/lib/sentinel/backup、本体 SD カード側、
+                         DATA_ROOT/APP_ROOT のどちらでもない) へ残す —
+                         外部ストレージが物理的に壊れても設定だけは復元
+                         できるようにするための最後の手段 (CLAUDE.md #80)
 modules/voice.py        Open JTalk 優先/espeak-ng フォールバックの音声
                          アナウンス (時報・エラー・カメラ再起動・その他
                          システムイベント)。mpg123 の音楽ライブラリとは

@@ -533,6 +533,21 @@ try{
         style="width:100%;height:180px;margin-top:8px;resize:vertical;background:var(--bg-deep);border:1px solid var(--line2);color:var(--fg);font:11.5px/1.5 var(--mono);padding:8px"
         placeholder="「診断ログを取得」を押すとここに表示されます"></textarea>
     </div></div>
+    <div class="card"><div class="body">
+      <h3 style="margin-top:0">設定バックアップ (本体 SD カード)</h3>
+      <span class="faint" style="font-size:12px">
+        毎日の定時処理のたびに、設定 (config.json/state.json、音楽ライブラリや
+        映像は含みません) だけの軽量な zip を、外部ストレージとは別に
+        本体の SD カード側 (<code>/var/lib/sentinel/backup</code>) へ自動で
+        残します。外部ストレージが故障して丸ごと読めなくなった場合でも、
+        ここから設定だけは復元できます。
+      </span>
+      <div class="row" style="margin-top:12px">
+        <button onclick="runBackupNow()">今すぐバックアップを作成</button>
+        <a id="backup-dl-link" href="/api/backup/download"><button class="p">最新のバックアップをダウンロード</button></a>
+        <span class="faint" id="backup-status" style="font-size:12px">読み込み中…</span>
+      </div>
+    </div></div>
     <div class="grid g2" id="settings"></div>
   </section>
 
@@ -668,7 +683,7 @@ function go(p){
   if(p==="arc") loadArchive();
   if(p==="fm") loadFiles();
   if(p==="err") loadErrors();
-  if(p==="set"){ loadSettings(); ensureHotspotSsidLoaded(); }
+  if(p==="set"){ loadSettings(); ensureHotspotSsidLoaded(); loadBackupStatus(); }
   if(p==="log") loadLogs();
   if(p==="music") loadMusic();
   if(p==="term" && FIT) setTimeout(()=>FIT.fit(), 60);
@@ -1054,6 +1069,37 @@ async function copyMotionDebugLog(){
   }
 }
 
+/* ---------------- 設定バックアップ (本体 SD カード、CLAUDE.md #80) ---------------- */
+async function loadBackupStatus(){
+  const s = $("#backup-status"), link = $("#backup-dl-link");
+  if(!s) return;
+  try{
+    const r = await api("/api/backup/status");
+    if(r.latest_at){
+      const dt = new Date(r.latest_at*1000);
+      s.textContent = `最新: ${dt.toLocaleString()} (${r.count}件保持中)`;
+      if(link) link.style.display = "";
+    }else{
+      s.textContent = "まだ作成されていません (次回の定時処理、または「今すぐ作成」で作られます)";
+      if(link) link.style.display = "none";
+    }
+  }catch(e){
+    s.textContent = "状態の取得に失敗しました: " + e.message;
+  }
+}
+async function runBackupNow(){
+  const s = $("#backup-status");
+  if(s) s.textContent = "作成中...";
+  try{
+    await api("/api/backup/run", {method:"POST"});
+    toast("設定バックアップを作成しました");
+    await loadBackupStatus();
+  }catch(e){
+    toast("バックアップの作成に失敗しました: " + e.message, true);
+    await loadBackupStatus();
+  }
+}
+
 /* ---------------- cameras ---------------- */
 function renderCams(){
   const cams = DATA.cameras || [];
@@ -1417,6 +1463,12 @@ function renderMusic(full){
   $("#m-pos").textContent = fmtT(s.position || 0);
   $("#m-dur").textContent = fmtT(s.duration || 0);
   $("#m-volv").textContent = (s.volume ?? 0) + "%";
+  // #m-vol の max はサーバー側 (music.Player.status() の volume_max、
+  // AUX+music_volume_boost_enabled なら300、Bluetooth出力機器は常に100)
+  // に合わせて動的に上げる — HTML の max="100" を直書きのままにすると、
+  // 上限解除を有効にしてもスライダーからは 100 までしか動かせず、実質
+  // 到達不能な機能になっていた (CLAUDE.md #80)。
+  const volMax = $("#m-vol"); if(volMax) volMax.max = s.volume_max ?? 100;
   if(document.activeElement !== $("#m-vol")) $("#m-vol").value = s.volume ?? 0;
   $("#m-repeat").value = s.repeat || "all";
   $("#m-shuf").style.borderColor = s.shuffle ? "var(--acc)" : "";
@@ -2420,9 +2472,10 @@ const LABELS = {
   corrupt_disconnect_seconds:"緊急再起動の前に、カメラを完全に切断しておく秒数",
   corrupt_reboot_cooldown_seconds:"カメラ破損による緊急再起動を要求してから、次に再度要求できるようになるまでの最短間隔 (秒、全カメラ共通)。短くすると解消しない破損が続く間は繰り返し再起動されます",
   music_enabled:"常時再生を有効にする", music_autoplay_on_presence:"人を検知したら自動再生",
-  music_volume:"音量 (%、AUX 出力時は「上限を解除する」が有効な間だけ150まで)",
-  music_volume_boost_enabled:"⚠️ AUX (3.5mm) 音量の上限を100%→150%まで解除する。ヘッドホンで使用中に" +
-    "誤って高い値にすると難聴の危険があります。普段はオフのままにし、必要なときだけ有効にしてください",
+  music_volume:"音量 (%、AUX 出力時は「上限を解除する」が有効な間だけ300まで)",
+  music_volume_boost_enabled:"⚠️ AUX (3.5mm) 音量の上限を100%→300%まで解除する。小さいスピーカーで" +
+    "音量が足りないときのための機能です。ヘッドホンで使用中に誤って高い値にすると難聴の危険があります。" +
+    "普段はオフのままにし、必要なときだけ有効にしてください",
   music_mute_bgm_on_aux:"AUX (3.5mm) 出力中は BGM を鳴らさない (音声アナウンスは影響を受けません)",
   music_repeat:"繰り返し", music_shuffle:"シャッフル",
   mpg123_buffer_kb:"mpg123 バッファ (KB)",
@@ -2509,7 +2562,8 @@ async function saveSettings(){
   // 明示的な確認を挟む (既存の importSettings() などと同じ confirm() パターン)。
   if(patch.music_volume_boost_enabled === true && CONF.music_volume_boost_enabled !== true){
     const ok = confirm(
-      "AUX (3.5mm) 音量の上限を100%→150%まで解除します。\n"+
+      "AUX (3.5mm) 音量の上限を100%→300%まで解除します。\n"+
+      "小さいスピーカーで音量が足りない場合のための機能ですが、\n"+
       "ヘッドホンを着けた状態でこの上限を超える音量にすると、難聴の危険があります。\n"+
       "本当に有効にしますか？");
     if(!ok){ loadSettings(); return; }
