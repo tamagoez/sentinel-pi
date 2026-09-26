@@ -2356,7 +2356,8 @@ const GROUPS = [
   ["カメラ", ["cam_width","cam_height","cam_eco_width","cam_eco_height","jpeg_quality",
               "live_fps","normal_fps","eco_fps","retention_days","reconnect_seconds",
               "corrupt_min_area_ratio","corrupt_tile_repeat_ratio",
-              "corrupt_reboot_threshold","corrupt_disconnect_seconds"]],
+              "corrupt_reboot_threshold","corrupt_disconnect_seconds",
+              "corrupt_reboot_cooldown_seconds"]],
   ["動体検知", ["motion_threshold","motion_area_ratio","motion_area_max_ratio","motion_interval",
                 "motion_warmup_seconds","motion_confirm_checks","motion_release_checks",
                 "cam_autofocus","save_cooldown","motion_debug_log"]],
@@ -2404,6 +2405,7 @@ const LABELS = {
   corrupt_tile_repeat_ratio:"破損 (同じ柄の繰り返し/モザイク化) とみなす最多重複面積の下限比率 (0-1、低いほど敏感)",
   corrupt_reboot_threshold:"素早い再接続を何回試しても直らなければ、まずカメラを完全に切断するか (それでも直らなければPiを緊急再起動)",
   corrupt_disconnect_seconds:"緊急再起動の前に、カメラを完全に切断しておく秒数",
+  corrupt_reboot_cooldown_seconds:"カメラ破損による緊急再起動を要求してから、次に再度要求できるようになるまでの最短間隔 (秒、全カメラ共通)。短くすると解消しない破損が続く間は繰り返し再起動されます",
   music_enabled:"常時再生を有効にする", music_autoplay_on_presence:"人を検知したら自動再生",
   music_volume:"音量 (%、AUX 出力時は「上限を解除する」が有効な間だけ150まで)",
   music_volume_boost_enabled:"⚠️ AUX (3.5mm) 音量の上限を100%→150%まで解除する。ヘッドホンで使用中に" +

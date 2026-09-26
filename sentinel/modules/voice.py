@@ -422,6 +422,44 @@ def _speak_sync(text: str, device: str | None, chime: bool = False) -> None:
                 pass
 
 
+def announce_blocking(message: str = "", category: str = "other", **extra) -> bool:
+    """announce() の同期版。キューへ積んで即座に戻るのではなく、実際に
+    読み上げ (合成+再生) が終わるまでブロックしてから戻る。
+
+    Pi を実際に再起動する直前 (maintenance.emergency_reboot()) のように
+    「読み上げが確実に終わってから次の処理へ進みたい」場面のために追加
+    した。announce() はキューへ積むだけで即座に戻り、実際の合成・再生は
+    別タスクの loop() が非同期に処理するため、呼び出し元が「アナウンス
+    した」つもりで先に進んでも、実際にはまだ鳴り始めていない/鳴り終えて
+    いないことがある。緊急再起動が絡む場面はまさに Pi が USB/CPU 負荷で
+    不安定になっている状況そのもので、Open JTalk の合成にも普段より
+    時間がかかりやすい — 固定の数秒だけ待って reboot する実装では、
+    読み上げの途中、あるいは始まる前に電源が落ちることがあった。
+    呼び出し元は `asyncio.to_thread()` 経由で呼ぶこと (このモジュールの
+    他の TTS 合成/再生と同じブロッキング呼び出しのため)。
+
+    voice_enabled とカテゴリ別スイッチ、Bluetooth 接続中のスキップ判定は
+    announce()/loop() と揃えている — この経路だけ判定が緩いと、ミュート
+    設定にしているのに緊急時だけ喋る、という食い違いになる。"""
+    if not config.get("voice_enabled"):
+        return False
+    enabled_key, text_key, default_tpl = _CATEGORY_KEYS.get(category, _CATEGORY_KEYS["other"])
+    if not config.get(enabled_key):
+        return False
+    from . import bluetooth as _bt
+    if _bt.STATE.get("connected"):
+        STATE["skipped"] += 1
+        return False
+    text = _fmt(text_key, default_tpl, {"message": message, **extra})
+    interrupt = music.begin_voice_interrupt()
+    try:
+        _speak_sync(text, _device())
+    finally:
+        if interrupt:
+            music.end_voice_interrupt(interrupt)
+    return not STATE["last_error"]
+
+
 def speak_test(text: str) -> tuple[bool, str]:
     """設定タブの「テスト再生」用。キューを経由せず即座に鳴らす。AUX 出力
     中は voice_duck_percent の設定に従って音量だけ一時的に下げ、

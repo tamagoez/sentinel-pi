@@ -136,6 +136,23 @@ DEFAULTS: dict[str, Any] = {
                                            # しない USB 帯域の逼迫などを想定し、
                                            # Pi 本体の再起動より先に試す
                                            # (CLAUDE.md #57)
+    "corrupt_reboot_cooldown_seconds": 1800,  # カメラ破損による緊急再起動を
+                                           # 実際に要求してから、次にまた
+                                           # 要求できるようになるまでの最短
+                                           # 間隔。カメラごとの上書きではなく
+                                           # 全カメラ共通 (camera.py の loop()
+                                           # が持つ単一のクールダウンをそのまま
+                                           # 設定化したもの) — 複数カメラが
+                                           # ほぼ同時に閾値へ達しても二重に
+                                           # 再起動しないための仕組みと同じ値
+                                           # を使うため。USB 帯域不足のように
+                                           # 短時間では解消しない破損が続く
+                                           # 機体では、既定の固定 10 分では
+                                           # 動作確認・開発作業そのものが
+                                           # 再起動で妨げられるという報告が
+                                           # あり、既定値を 30 分へ延ばした
+                                           # うえで利用者が調整できるように
+                                           # した
     "camera_overrides": {},               # カメラID -> {設定キー: 値, ...}
                                            # 個別カメラだけ上の共有値を上書きする。
                                            # キーが無い/空ならそのカメラは共有値を使う。
@@ -392,6 +409,7 @@ _RANGES: dict[str, tuple[float, float]] = {
     "corrupt_min_area_ratio": (0.02, 0.9),
     "corrupt_tile_repeat_ratio": (0.1, 0.9),
     "corrupt_reboot_threshold": (1, 20),
+    "corrupt_reboot_cooldown_seconds": (60, 86400),
     "corrupt_disconnect_seconds": (30, 1800),
     "retention_days": (1, 3650),
     # 上限は music_volume_boost_enabled が有効な場合の最大値 (150)。
