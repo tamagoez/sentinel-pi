@@ -390,10 +390,31 @@ def _speak_sync(text: str, device: str | None, chime: bool = False) -> None:
     # かき消して聞き取れない場合にどちらも一緒に下げるしかなかった
     # (実際に報告された不具合)。
     chime_percent = max(0, min(100, int(config.get("voice_chime_volume"))))
-    # チャイムは TTS の合成 (open_jtalk/espeak-ng) を待たずに鳴らし始める。
-    # 合成には短い時間がかかるが、鳴らし終わりは finally で必ず回収する
-    # (回収しないと aplay の短命プロセスがゾンビのまま残り続ける)。
-    chime_proc = _play_chime(device, chime_percent) if chime else None
+    # AUX (sysdefault:CARD=<N>、alsa-lib の dmix) は複数ストリームを構造的
+    # に受け付けるため、チャイムと TTS を同じデバイスへ「並行に」開いても
+    # 両方鳴り続ける。しかし Bluetooth 出力 (bluealsa:DEV=...,PROFILE=a2dp)
+    # の A2DP ソース PCM は同時に開けるクライアントが 1 つだけ
+    # (music.py の pause_for_voice()/resume_after_voice() が BGM とアナウンス
+    # を同時に開かせず一時停止で調停しているのと全く同じ制約、CLAUDE.md
+    # #73)。この device に対してチャイムと TTS をどちらも並行に開こうとす
+    # ると、片方がもう片方の PCM を奪い、鳴り始めた直後にチャイムが途切れる
+    # — 実際に報告された「時報の読み上げが始まると効果音が止まる」不具合
+    # そのものである。**デバイス文字列自体は一切変えない** (Bluetooth
+    # 出力中に AUX へ切り替えて鳴らす、ということは絶対にしない) — 変える
+    # のは「同時に開くか、順番に開くか」だけ。
+    is_bt_output = bool(device) and device.startswith("bluealsa:")
+    chime_proc = _play_chime(device, chime_percent) if (chime and not is_bt_output) else None
+    if chime and is_bt_output:
+        # 並行に開けない以上、先にチャイムを最後まで鳴らし切ってから
+        # TTS を始める (順番に鳴らす、重ねない)。**この分岐を外して
+        # Bluetooth でも並行に _play_chime() を呼ぶ実装に戻さないで
+        # ください** — 同じ「チャイムが途切れる」不具合に戻ります。
+        proc = _play_chime(device, chime_percent)
+        if proc is not None:
+            try:
+                proc.wait(timeout=5)
+            except Exception:
+                pass
     try:
         rate = float(config.get("voice_rate"))
         ok = False

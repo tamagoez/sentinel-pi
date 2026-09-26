@@ -989,6 +989,16 @@ def set_bt_output(addr: str | None, name: str = "") -> None:
         PLAYER.bt_output_addr = addr
         PLAYER.bt_output_name = name if addr else ""
         running = PLAYER.proc is not None and PLAYER.proc.poll() is None
+        # music_mute_bgm_on_aux (#77) が AUX 出力中に play() を「実際には
+        # 起動せず即 return」させていた場合、mpg123 は一度も spawn されて
+        # いない (running=False) ため、下の `if running:` 分岐を通らず
+        # 再生が再評価されない。この状態で Bluetooth 出力機器に接続すると
+        # 「Bluetooth に繋いだのに AUX 時代のミュートのまま止まっている」
+        # ことになっていた — ここを直に踏んで気付いた実際の不具合。
+        # suspended_by == "aux_muted" はこの mute 分岐だけが設定する値なので、
+        # これを目印に「AUX ミュートで止まっていたか」を正確に判定できる
+        # (eco モードなどの他の理由での停止とは混同しない)。
+        was_aux_muted = PLAYER.suspended_by == "aux_muted"
         pos = PLAYER.position
     log.info("音楽の出力先を切り替えます: %s", name or addr or "AUX")
     audio.invalidate_pcm_cache()
@@ -999,6 +1009,16 @@ def set_bt_output(addr: str | None, name: str = "") -> None:
         # 呼び出しが _spawn() の中で新しい出力先を自然に使うので、ここで
         # 無理に再生を始めない (eco モード中の切り替えなどを想定)。
         PLAYER.stop(terminate=True, reason="")
+        PLAYER.play(pos)
+    elif addr and was_aux_muted:
+        # AUX ミュートで止まっていたところに Bluetooth 出力先が選ばれた
+        # (=切り替わった) 瞬間だけ、ここで初めて play() を呼んで再評価する。
+        # play() 自身は bt_output_addr が立っているかどうかで mute するか
+        # どうかを判定するので、ここで無条件に「再生を始める」わけではない
+        # — 単に「ミュートし続ける理由がもう無いので、通常の再開判定に
+        # 戻す」だけ。**この分岐を外して `if running:` だけに戻さないで
+        # ください** — 同じ「Bluetooth に繋いでも AUX ミュートのまま
+        # 止まり続ける」不具合に戻ります。
         PLAYER.play(pos)
 
 
