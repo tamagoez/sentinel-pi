@@ -2,14 +2,22 @@
 
 順序:
     1. カメラを停止し、音楽を止めて資源を空ける
-    2. カメラごとのタイムラプスを作り、タイル状に統合する
+    2. カメラごとのタイムラプスを作り、時計/アクセスログの帯と一緒に
+       1 回の ffmpeg 呼び出しでタイル状に統合する (CLAUDE.md 該当節参照)
        - 映像が 1 枚もないカメラの枠は NODATA で埋める
        - 全カメラに映像がない場合も NODATA 画面で動画生成を続行する
-    3. アクセスログをテロップとして下部に重ねる
-    4. 生成物を archive へ置き、再起動する
+    3. 生成物を archive へ置き、再起動する
 
-Pi 3B+ ではソフトウェアエンコードが重いため、まず h264_v4l2m2m
-(ハードウェアエンコーダ) を試し、失敗したら libx264 の ultrafast に落とす。
+エンコーダは常に libx264 (ultrafast) を使う。以前は h264_v4l2m2m
+(ハードウェアエンコーダ) が使えれば優先していたが、Pi 3B+ では
+CBR 指定との組み合わせで固まる既知の不具合があり、しかも速度面の
+利点も実測ではほぼ無かったため廃止した (`_encoder_args()` 参照)。
+
+run_now() は「実行中のまま二度と進まない」状態に陥らないよう、前段の
+停止処理・ビルド全体のどちらにも上限時間を設けている (`_PRESTOP_STEP_
+TIMEOUT`/`_BUILD_TIMEOUT`)。それでも `STATE["running"]` が長時間 True
+のまま固定された場合は、次の呼び出しが `_STALE_RUN_SECONDS` を基準に
+「放棄された実行」とみなして自動的に回収する。
 """
 
 from __future__ import annotations
@@ -30,6 +38,7 @@ log = logging.getLogger("sentinel.maintenance")
 
 STATE = {
     "running": False,
+    "started_at": 0.0,
     "stage": "",
     "progress": 0.0,
     "last_run": 0.0,
@@ -37,6 +46,29 @@ STATE = {
     "last_output": "",
     "next_run": 0.0,
 }
+
+# run_now() が「これ以上待っても進まない」と判断するまでの上限。単発の
+# ffmpeg 呼び出しには _run() 自身のタイムアウトがあるが、それでも
+# 「サブプロセスが SIGKILL に応答しない (D-state で固まった V4L2 デバイス
+# など)」場合は _run() のタイムアウト機構ごと無力化される
+# (_encoder_args() のコメント参照)。この上限は「あり得る最悪の合計」
+# よりまだ十分大きい (小さい tile_w・ultrafast なら通常は数分で終わる)
+# 一方、STATE["running"] が永久に True のまま固定される事態は避ける
+# ためのもの — これが無いと、毎日 4 時の loop() が「すでに実行中です」
+# で永久に空振りし続け、動画生成も再起動も二度と起こらなくなる
+# (CLAUDE.md #59 と同じ「一度詰まると永久に直らない」不具合の別の経路)。
+_STALE_RUN_SECONDS = 2 * 3600
+# music.PLAYER.stop()/camera.shutdown() は通常 1 秒未満で終わる軽い処理
+# だが、万一どこかで詰まった場合に run_now() 全体を無期限に止めないため
+# の上限。
+_PRESTOP_STEP_TIMEOUT = 30.0
+# _build() 全体 (全カメラのクリップ生成 + 帯 + 統合) の上限。ultrafast +
+# 既定の tile 幅であれば通常数分で終わるはずだが、カメラが多い/連写が
+# 激しい日でも余裕を持たせてある。これを超えたら「タイムアウト」として
+# 失敗扱いにし、run_now() の finally で確実に STATE["running"] を戻す —
+# _STALE_RUN_SECONDS による次回の「詰まった実行の回収」を待たずに、
+# その日のうちに再起動判定まで進められるようにするため。
+_BUILD_TIMEOUT = 40 * 60
 
 _FONT_CANDIDATES = [
     "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf",
@@ -136,14 +168,27 @@ def _render_text_png(text: str, path: Path, *, font_size: int,
 
 
 def _encoder_args() -> list[str]:
-    """利用可能なエンコーダを返す。ハードウェアを優先する。"""
-    try:
-        out = subprocess.run(["ffmpeg", "-hide_banner", "-encoders"],
-                             capture_output=True, text=True, timeout=15).stdout
-    except Exception:
-        out = ""
-    if "h264_v4l2m2m" in out:
-        return ["-c:v", "h264_v4l2m2m", "-b:v", "1500k", "-pix_fmt", "yuv420p"]
+    """常に libx264 (ultrafast) を使う。
+
+    以前はハードウェアエンコーダ `h264_v4l2m2m` を検出できれば優先して
+    いたが、Pi 3B+ ではこの選択が「動かない」報告の一因になっていた。
+    `h264_v4l2m2m` は固定ビットレート (CBR) 指定と組み合わさると
+    `VIDIOC_STREAMON failed` で失敗する既知の不具合を持ち、失敗の仕方に
+    よっては V4L2 デバイスをカーネル内で D-state のまま掴んだ状態にし、
+    呼び出し元の ffmpeg プロセスが `SIGKILL` にも応答しなくなることが
+    ある — `subprocess.run(..., timeout=...)` はタイムアウト時に
+    `kill()` を送るだけなので、この状態になると `_run()` のタイムアウト
+    machinery ごと無力化され、定時処理がそのステップで実質的に永久停止
+    する ([Raspberry Pi Forums](https://forums.raspberrypi.com/viewtopic.php?t=330999))。
+    さらに、この「ハードウェア」エンコーダは Pi 3B+ 実測でも 1 コア
+    フル稼働の libx264 (ソフトウェア) と大差ない速度しか出ない
+    ([Raspberry Pi Forums](https://forums.raspberrypi.com/viewtopic.php?t=353958))
+    ため、動かないリスクを取ってまで選ぶ利点が無い。CLAUDE.md 全体の
+    「ドライバ依存の機能はソフトウェア側の確実な実装に置き換える」方針
+    (drawtext→Pillow、asound.conf→sysdefault 等) と同じ判断で、常に
+    libx264 ultrafast だけを使う。**この h264_v4l2m2m の検出・優先を
+    復活させないでください** — 同じ「映像生成がどこかで止まって二度と
+    進まない」不具合に戻ります。"""
     return ["-c:v", "libx264", "-preset", "ultrafast", "-crf", "28",
             "-threads", "2", "-pix_fmt", "yuv420p"]
 
@@ -358,9 +403,23 @@ def _grid_dims(n: int) -> tuple[int, int]:
     return cols, rows
 
 
-def _tile(clips: list[Path], out: Path, width: int, height: int) -> bool:
-    """複数クリップを横並び / グリッドに合成する。"""
-    if len(clips) == 1:
+def _tile(clips: list[Path], out: Path, width: int, height: int,
+         band: Path | None = None) -> bool:
+    """複数クリップを横並び / グリッドに合成し、同じ ffmpeg 呼び出しの
+    中で時刻/アクセスログの帯 (band) も一緒に重ねる。
+
+    以前は「タイルへ合成する (_tile)」と「帯を重ねる (旧
+    _overlay_info_band)」がそれぞれ独立に最終解像度の映像をフル再
+    エンコードしていた — 定時処理 1 回につきタイル映像の全長を 2 回
+    エンコードすることになり、Pi 3B+ のソフトウェアエンコードでは
+    これが生成時間の大きな割合を占めていた。帯を xstack の出力へ
+    そのまま filter_complex でつなげるだけで 1 回のエンコードに減らせる
+    — 「URL 表示が映像に間に合うよう爆速に」という要望への直接の対応
+    でもある (帯の内容自体は _build_info_band() が既に瞬時切り替え・
+    キャッシュ済みの PNG で作っており、ここでの高速化はその帯を映像へ
+    貼り付ける工程の話)。**この 2 回のフルサイズ再エンコードへ戻さない
+    でください** — 同じ「生成に時間が掛かりすぎる」不具合に戻ります。"""
+    if len(clips) == 1 and band is None:
         shutil.copy2(clips[0], out)
         return True
     n = len(clips)
@@ -368,25 +427,39 @@ def _tile(clips: list[Path], out: Path, width: int, height: int) -> bool:
     cmd = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y"]
     for c in clips:
         cmd += ["-i", str(c)]
-    # 足りないタイルは黒で埋める
+    band_idx = None
+    if band is not None:
+        cmd += ["-i", str(band)]
+        band_idx = n
+
     filters = []
-    inputs = []
-    for i in range(n):
-        filters.append(f"[{i}:v]scale={width}:{height},setsar=1[v{i}]")
-        inputs.append(f"[v{i}]")
-    pad = cols * rows - n
-    for j in range(pad):
-        filters.append(f"color=c=0x141618:s={width}x{height}:d=1[p{j}]")
-        inputs.append(f"[p{j}]")
-    layout = "|".join(f"{(i % cols) * width}_{(i // cols) * height}"
-                      for i in range(cols * rows))
-    filters.append(f"{''.join(inputs)}xstack=inputs={cols * rows}:"
-                   f"layout={layout}:fill=0x141618[out]")
-    cmd += ["-filter_complex", ";".join(filters), "-map", "[out]"]
+    if n == 1:
+        filters.append(f"[0:v]scale={width}:{height},setsar=1[tiled]")
+    else:
+        inputs = []
+        for i in range(n):
+            filters.append(f"[{i}:v]scale={width}:{height},setsar=1[v{i}]")
+            inputs.append(f"[v{i}]")
+        pad = cols * rows - n
+        for j in range(pad):
+            # 足りないタイルは黒で埋める
+            filters.append(f"color=c=0x141618:s={width}x{height}:d=1[p{j}]")
+            inputs.append(f"[p{j}]")
+        layout = "|".join(f"{(i % cols) * width}_{(i // cols) * height}"
+                          for i in range(cols * rows))
+        filters.append(f"{''.join(inputs)}xstack=inputs={cols * rows}:"
+                       f"layout={layout}:fill=0x141618[tiled]")
+
+    map_label = "tiled"
+    if band_idx is not None:
+        filters.append(f"[tiled][{band_idx}:v]overlay=x=0:y=H-h[out]")
+        map_label = "out"
+
+    cmd += ["-filter_complex", ";".join(filters), "-map", f"[{map_label}]"]
     cmd += _encoder_args() + [str(out)]
     ok, err = _run(cmd)
     if not ok:
-        log.warning("タイル合成に失敗しました: %s。1台目のみ使用します。", err)
+        log.warning("タイル/帯の合成に失敗しました: %s。1台目のみ使用します。", err)
         shutil.copy2(clips[0], out)
     return True
 
@@ -487,24 +560,6 @@ def _build_info_band(entries: list[tuple[datetime, str]], day_start: datetime,
     return out
 
 
-def _overlay_info_band(src: Path, out: Path, band: Path | None) -> bool:
-    """時計/アクセスログの帯を映像の下部に重ねる。帯の幅は呼び出し側で
-    タイル映像と同じ幅に作ってあるので、スケーリングなしでそのまま
-    重ねるだけでよい。帯が作れなかった場合は元の映像をそのまま使う
-    (処理を止めないという既定方針)。"""
-    if band is None:
-        shutil.copy2(src, out)
-        return True
-    cmd = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
-           "-i", str(src), "-i", str(band),
-           "-filter_complex", "[0:v][1:v]overlay=x=0:y=H-h"] + _encoder_args() + [str(out)]
-    ok, err = _run(cmd)
-    if not ok:
-        log.warning("帯の重畳に失敗しました: %s", err)
-        shutil.copy2(src, out)
-    return True
-
-
 # ---------------------------------------------------------------- 本体
 
 def _build(day: str) -> tuple[bool, str]:
@@ -512,6 +567,18 @@ def _build(day: str) -> tuple[bool, str]:
     tile_h = int(tile_w * 3 / 4)
     outdir = config.ARCHIVE_ROOT / day
     outdir.mkdir(parents=True, exist_ok=True)
+
+    if not _can_render_text():
+        # NODATA ラベル・カメラ名キャプション・時計/URL の帯のすべてが
+        # ここに依存する (CLAUDE.md #10)。Pillow または対応フォントが
+        # 見つからない環境ではこれらが全部揃って静かに消えるだけで、
+        # これまで一切ログに残していなかった — 「動画は生成されるのに
+        # 時計や URL が出ない」という報告を切り分けるための最初の一手が
+        # 無い状態だった。ここで一度だけ警告を出す (build 1 回あたり 1 行、
+        # 実際に描画を試みるたびに毎回出すとログが埋まるため)。
+        log.warning("テキスト描画ができないため、NODATA 表示・カメラ名・"
+                   "時計/URL の帯を省略します (python3-pil / "
+                   "fonts-dejavu-core が入っているか確認してください)")
 
     cam_ids = sorted(camera.WORKERS.keys())
     if not cam_ids:
@@ -542,21 +609,19 @@ def _build(day: str) -> tuple[bool, str]:
             _make_nodata_clip(clip, "NODATA", target, tile_w, tile_h)
             clips = [clip]
 
-        STATE["stage"] = "全カメラを統合中"
-        STATE["progress"] = 0.65
-        tiled = tmp / "tiled.mp4"
-        _tile(clips, tiled, tile_w, tile_h)
-
-        STATE["stage"] = "時刻・アクセスログの帯を重畳中"
-        STATE["progress"] = 0.85
-        final = outdir / f"{day}_daily.mp4"
         band = None
         if config.get("ticker_enabled"):
+            STATE["stage"] = "時刻・アクセスログの帯を生成中"
+            STATE["progress"] = 0.65
             cols, rows = _grid_dims(len(clips))
             entries = netlog.ticker_entries(day)[:2000]
             band = _build_info_band(entries, day_start, day_span, target,
                                     tile_w * cols, tmp, fps)
-        _overlay_info_band(tiled, final, band)
+
+        STATE["stage"] = "全カメラと帯を統合中"
+        STATE["progress"] = 0.8
+        final = outdir / f"{day}_daily.mp4"
+        _tile(clips, final, tile_w, tile_h, band)
 
     if not final.is_file():
         return False, "動画が生成されませんでした"
@@ -565,11 +630,37 @@ def _build(day: str) -> tuple[bool, str]:
     return True, f"{final.name} ({size_mb:.1f} MB) — {detail}"
 
 
+def _kill_stray_ffmpeg() -> None:
+    """スタックした前回実行の後始末。この Pi で ffmpeg を使う処理は
+    定時処理 (このモジュール) 以外に存在しないため、`pkill -f ffmpeg`
+    で無差別に片付けても他機能を巻き込む心配がない。プロセスが無い/
+    `pkill` が無い場合も含めて best-effort — 失敗しても run_now() 側の
+    処理自体は続行する。"""
+    try:
+        subprocess.run(["pkill", "-9", "-f", "ffmpeg"], timeout=10)
+    except Exception:
+        pass
+
+
 async def run_now(*, reboot: bool | None = None) -> dict:
     """定時処理を実行する。手動起動にも使える。"""
     if STATE["running"]:
-        return {"ok": False, "message": "すでに実行中です"}
-    STATE.update(running=True, stage="準備中", progress=0.0, last_result="")
+        age = time.time() - STATE.get("started_at", 0.0)
+        if age < _STALE_RUN_SECONDS:
+            return {"ok": False, "message": "すでに実行中です"}
+        # 前回の実行が _STALE_RUN_SECONDS を超えてなお「実行中」のまま
+        # 固定されている。どこかのサブプロセスが SIGKILL にも応答せず
+        # 固まった (V4L2 デバイスが D-state で掴まれた場合など、
+        # _encoder_args() のコメント参照) 可能性が高い。ここで永久に
+        # 諦めて次の日も再度スキップし続けるより、居座っている ffmpeg を
+        # 掃除してから新しい実行を始める方が、CLAUDE.md 全体の「諦めた
+        # ままにしない」方針 (#22 の再起動クールダウンなど) に沿っている。
+        log.warning("前回の定時処理が %.0f 秒間「実行中」のまま固まっているため、"
+                   "放棄されたとみなして新たに実行します", age)
+        await asyncio.to_thread(_kill_stray_ffmpeg)
+
+    STATE.update(running=True, started_at=time.time(), stage="準備中",
+                progress=0.0, last_result="")
     day = (datetime.now() - timedelta(hours=2)).strftime("%Y-%m-%d")
     started = time.time()
     notify.system_event("定時処理を開始しました", f"対象日: {day}", level="info")
@@ -577,12 +668,32 @@ async def run_now(*, reboot: bool | None = None) -> dict:
 
     try:
         STATE["stage"] = "カメラと音楽を停止中"
-        await asyncio.to_thread(music.PLAYER.persist, force=True)
-        await asyncio.to_thread(music.PLAYER.stop, terminate=True, reason="maintenance")
-        await asyncio.to_thread(camera.shutdown)
+        # 通常は 1 秒未満で終わる軽い処理だが、万一どこかで詰まった場合に
+        # run_now() 全体を無期限に止めないよう上限を掛ける。
+        # asyncio.to_thread が包むスレッド自体は取り消せない (asyncio の
+        # 既知の制約) ため、詰まった場合そのスレッドは残ってしまうが、
+        # run_now() のこのコルーチンは先へ進める — 「二度と完了しない」
+        # 状態だけは避けるための限定的な保険。
+        for fn, kwargs, label in (
+            (music.PLAYER.persist, {"force": True}, "音楽の位置保存"),
+            (music.PLAYER.stop, {"terminate": True, "reason": "maintenance"}, "音楽の停止"),
+            (camera.shutdown, {}, "カメラの停止"),
+        ):
+            try:
+                await asyncio.wait_for(asyncio.to_thread(fn, **kwargs),
+                                       timeout=_PRESTOP_STEP_TIMEOUT)
+            except asyncio.TimeoutError:
+                log.warning("定時処理の前処理 (%s) が %.0f 秒経っても終わらないため、"
+                           "スキップして続行します", label, _PRESTOP_STEP_TIMEOUT)
         await asyncio.sleep(1.0)
 
-        ok, detail = await asyncio.to_thread(_build, day)
+        try:
+            ok, detail = await asyncio.wait_for(asyncio.to_thread(_build, day),
+                                                timeout=_BUILD_TIMEOUT)
+        except asyncio.TimeoutError:
+            ok, detail = False, f"タイムアウト ({_BUILD_TIMEOUT}秒経過)"
+            log.error("定時処理の動画生成が %d 秒を超えたためタイムアウトさせました",
+                     _BUILD_TIMEOUT)
         STATE.update(last_result="成功" if ok else "失敗", last_output=detail,
                      progress=1.0, stage="完了", last_run=time.time())
         notify.system_event(
@@ -649,14 +760,37 @@ async def emergency_reboot(cid: str, reason: str) -> None:
 
 
 def _reboot() -> None:
-    for cmd in (["sudo", "-n", "/sbin/reboot"], ["systemctl", "reboot"],
+    """再起動を試みる。3 つのコマンドを順に試すが、**戻り値を確認しない
+    まま最初の 1 回で `return` していたため、`sudo -n /sbin/reboot` が
+    (sudoers のズレ・sudo が PATH に無い等の理由で) 非ゼロ終了しても
+    「成功した」と誤認してそのまま抜けていた** — `subprocess.run()` は
+    `check=True` を渡さない限り非ゼロ終了でも例外を投げないため、この
+    関数の `try/except` は何も捕まえず、後続のフォールバックも一切
+    試されないまま、ログにも一切残らず静かに再起動が起きない、という
+    不具合になっていた (`core/state.py`/`modules/hotspot.py` の同種の
+    sudo 呼び出しはどちらも `returncode` を確認しており、この関数だけが
+    それを欠いていた)。**この確認を省略した実装に戻さないでください**
+    — 同じ「定時処理は完了ログが出るのに Pi が再起動しない」不具合に
+    戻ります。2 番目のフォールバックも `sudo -n` を欠いていたため
+    (`/etc/sudoers.d/sentinel` が許可しているのは `sudo -n systemctl
+    reboot` であり、素の `systemctl reboot` ではない)、非 root ユーザー
+    からは最初から失敗する運命だった箇所も合わせて直した。"""
+    for cmd in (["sudo", "-n", "/sbin/reboot"],
+                ["sudo", "-n", "systemctl", "reboot"],
                 ["/sbin/reboot"]):
         try:
-            subprocess.run(cmd, timeout=20)
-            return
-        except Exception:
+            r = subprocess.run(cmd, timeout=20, capture_output=True, text=True)
+        except Exception as exc:
+            log.warning("再起動コマンド %s の実行に失敗しました: %s", cmd, exc)
             continue
-    log.error("再起動コマンドを実行できませんでした。sudoers の設定を確認してください。")
+        if r.returncode == 0:
+            log.info("再起動コマンド %s を実行しました", cmd)
+            return
+        tail = (r.stderr or r.stdout or "").strip()
+        log.warning("再起動コマンド %s が非ゼロ終了 (code=%s) でした: %s",
+                   cmd, r.returncode, tail)
+    log.error("再起動コマンドをすべて試しましたが、いずれも失敗しました。"
+             "sudoers (/etc/sudoers.d/sentinel) の設定を確認してください。")
 
 
 def _next_time() -> float:
