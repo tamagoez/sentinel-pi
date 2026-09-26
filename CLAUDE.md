@@ -3631,6 +3631,209 @@ core`/`fonts-noto-cjk` を導入済みのはずなので、実機でこの警告
 不具合の修正ではなく、CLAUDE.md #45 の教訓 (事実が出揃うまでコードを
 書かない) に沿った、次回同じ報告が来たときの切り分け材料**である。
 
+### 77. UART のボーレートが原因の Bluetooth ブツブツ音、A2DP のドレイン待ち不足、AUX の BGM 排他と音量上限を直した
+
+「Bluetooth を接続することはできるが、突然 10 秒ほどブツブツ言い続ける」
+「時報などが AUX から鳴ったり、再生し切る前に BGM に乗っ取られたりする」
+「接続管理がしにくいので専用の Web UI が欲しい」「AUX 接続時は BGM を
+鳴らさないようにしたい」「AUX の音量を 100% の上限を超えて設定したい
+(ヘッドホンでの難聴リスクに注意)」「`Bluetooth: Unexpected continuation
+frame (len 0)` が常に出る」という報告があった。
+
+#### ブツブツ音とログスパムの原因: Pi 3B+ の UART ボーレート
+
+`Bluetooth: Unexpected continuation frame (len 0)` は Pi 3/3B+ 特有の
+既知の問題で、この機体固有の不具合ではない。Pi 3 系の Bluetooth チップは
+USB ではなく UART (`/dev/serial1`) で SoC と繋がっており、`hciuart.service`
+(raspberrypi-sys-mods 提供の `/usr/bin/btuart`、CLAUDE.md #47/#51/#55 で
+既に扱ってきたのと同じユニット) が起動時に `hciattach ... bcm43xx
+<baud> <flow>` でこれをアタッチする。ソフトウェア側は `flow` (CTS/RTS
+ハードウェアフロー制御) を要求するが、Pi 3(B+) の基板にはこの制御線が
+実際には配線されていない、という公式に知られたハードウェア側の制約が
+ある。CPU/USB に負荷が掛かっている間 (この機体はカメラと、Ethernet と
+共有する USB ハブを常時使っている — CLAUDE.md 冒頭の制約表そのもの)、
+フロー制御が効かないため UART のバイトが取りこぼされ、カーネルはこれを
+"Unexpected continuation frame" として報告し続ける。取りこぼしが音声
+データの途中で起きると、A2DP のパケットが欠けたまま再生されるため、
+接続直後の数秒〜10秒ほど音が途切れる — [Arch Linux フォーラムの報告](https://bbs.archlinux.org/viewtopic.php?id=248696)
+は、まさに同じ「接続直後に約10秒ブツブツ言う」症状を報告しており、
+[Raspberry Pi フォーラム](https://forums.raspberrypi.com/viewtopic.php?t=189044)
+と[この gist](https://gist.github.com/e-minguez/fda85d1d20d1f6dadfd4c071c50fcaae)
+がどちらも同じ対策 (ボーレートを下げる) を案内している。
+
+対策は、既定 (3000000 または 921600) より低いボーレート (コミュニティで
+安全とされる 460800) で `noflow` (どうせ配線されていないフロー制御は
+最初から要求しない) を使うことである。この取りこぼし耐性はボーレートが
+低いほど上がる — 転送速度そのものを落として、フロー制御の欠如を
+埋め合わせる形になる。
+
+`bootstrap.sh` は `/usr/bin/btuart` (raspberrypi-sys-mods が管理する
+OS 側のスクリプト) を直接書き換えず、`hciuart.service` への systemd
+override (`/etc/systemd/system/hciuart.service.d/override.conf`) として
+`ExecStart` を上書きする。これは CLAUDE.md #40 の Syncthing の判断
+(DietPi/Raspberry Pi OS が生成する ExecStart を直接書き換えると、
+パッケージの再導入・更新で静かに元へ戻る) と全く同じ理由による —
+`raspberrypi-sys-mods` の更新のたびに書き直しが必要になる実装は避けた。
+**この override を外して `/usr/bin/btuart` の直接編集に戻さないで
+ください** — パッケージ更新で静かに元のボーレートへ戻り、同じ
+ブツブツ音・ログスパムに戻ります。冪等 (現在の override 内容が同じなら
+何もしない) なので `update.sh` の再実行だけで反映される。**もし実機で
+460800 でもまだ問題が起きる場合は、この値自体をさらに下げてください
+(230400 など) — override 自体を取り除くと問題が無制限に戻ります。**
+
+#### BGM が声を「乗っ取る」: A2DP のドレイン待ち不足
+
+Bluetooth 出力中の音声アナウンス (#73 の `pause_for_voice()`/
+`resume_after_voice()`) は、TTS の再生プロセスが終了した直後に BGM の
+一時停止を解除していたが、A2DP はエンコード (SBC/AAC) + 無線送信の
+ぶんだけ、ALSA レベルのドレイン完了より後ろに実際の音の再生が続く
+(一般に 100〜300ms 程度)。プロセスの終了だけを基準に BGM を再開すると、
+まだ鳴り終わっていないアナウンスの最後の一瞬に BGM が被って聞こえる —
+「再生し切る前に BGM に乗っ取られる」という報告と一致する。
+`music.py` の `resume_after_voice()` に `_BT_VOICE_DRAIN_SEC` (0.4 秒、
+上記の遅延より確実に長く取った値) の待機を追加した。**この待機を外して
+プロセス終了直後に即座に再開する実装に戻さないでください** — 同じ
+「BGM が声の終わりに被る」不具合に戻ります。AUX 側の
+`duck_volume_for_voice()`/`resume_volume_after_voice()` (音量を下げる
+だけで曲は止めない) にはこの待機は要らない — ALSA の dmix 経由で鳴って
+いる音楽自体は途切れておらず、単に元の音量へ戻すだけの操作だからである。
+
+「音量設定が混線しているかも知れない」という懸念についても
+`bluetooth._apply_volume()`/`_active_output_profile()`/
+`bt_output_profiles` を読み直したが、#72/#73 の刷新後の設計は既に
+出力先ごとに完全に独立している (AUX = `music_volume`、Bluetooth 受信 =
+`bluealsa-cli`、Bluetooth 送信 (BGM) = `bt_output_profiles[addr]`) ため、
+新たな混線バグは見つからなかった。「時報が AUX から鳴る」という報告も
+`voice.py` の `_device()`/`begin_voice_interrupt()` の呼び出し順序を
+追跡した限り競合状態は存在せず、UART 不安定による一時的な Bluetooth
+切断中に AUX へフォールバックしていた (=正しい段階的劣化の動作) 可能性
+が高いと判断した — 上記の UART 修正がこの症状も間接的に緩和するはずで
+ある。
+
+#### AUX 接続時は BGM を鳴らさない設定
+
+`music_mute_bgm_on_aux` (既定 False) を追加した。有効かつ現在の出力先が
+AUX (`bt_output_addr` が falsy) のとき、`Player.play()` は実際に mpg123
+を起動する前に static に `playing=False`/`suspended_by="aux_muted"` を
+設定して即座に return する — 呼び出し元がどこであっても (自動再生、
+手動再生ボタン、人検知トリガーのどれでも) この 1 か所を通れば必ず効く、
+既存の choke-point パターン (例: eco/Bluetooth 退避の `suspended_by`
+判定) と同じ設計である。**音声アナウンスはこの設定の影響を受けない** —
+`begin_voice_interrupt()`/`end_voice_interrupt()` は BGM が鳴っているか
+どうかに関わらず常に動作し、`voice.py` 側はこの設定を一切参照しない。
+「AUX では BGM を鳴らさないが、時報やエラー通知は聞きたい」という
+要望に対応するための意図的な非対称である。
+
+#### AUX 音量の上限解除 (ヘッドホンでの難聴リスクに厳重な注意)
+
+**この機能は安全性が直接関わる。** ユーザー自身が「ヘッドホンで起こって
+しまうと難聴になってしまうので細心の注意を払ってください」と明示的に
+要求しており、この警告は今後もこの機能全体の設計を制約する。
+
+mpg123 のリモートプロトコルの `V <percent>` コマンドは、
+`doc/README.remote` の記載どおり 100 を超える値もソフトウェア側の
+増幅として受け付ける。`music_volume_boost_enabled` (既定 False) を
+追加し、有効な間だけ AUX の音量上限を 100 から 150 へ引き上げる
+(`_aux_volume_max()`)。**この上限 (150) 自体を利用者が変更できる設定に
+してはならない** — 「限界を超えて設定できるように」という要望は
+「安全な上限をどこかに置いた上での解放」を意図したものであり、上限を
+無くすことや上限自体を可変にすることではない。
+
+- **Bluetooth ヘッドホン側はこの解除の対象外**で、常に 0-100 に固定
+  したまま。ヘッドホンでの難聴リスクは AUX 直結よりもむしろ身体に近い
+  Bluetooth ヘッドホンの方が高く、ユーザーが明示的に要求したのは AUX の
+  上限解除のみだった。`Player.set_volume()`/`_active_output_profile()`
+  はどちらも出力先で分岐し、Bluetooth 側の分岐だけ引き続きハードコード
+  で `min(100, ...)` する。
+- **`config._RANGES["music_volume"]` を `(0, 150)` に広げた** (保存できる
+  値の上限)。実際に再生に使われる値は `Player.set_volume()`/
+  `_active_output_profile()` がランタイム側で `_aux_volume_max()` に
+  よって別途絞る — `music_volume_boost_enabled` がオフの間は、保存済み
+  の値が仮に 140 のように残っていても、再生には常に 100 が使われる
+  (`min(int(config.get("music_volume")), _aux_volume_max())`)。boost を
+  オフに戻した瞬間から安全な上限が効くのが目的で、「次に音量を変更する
+  まで危険な値のまま」では安全策として不十分である。
+- **Web UI の設定タブに、この設定を有効化 (オフ→オン) するときだけ**
+  `confirm()` の確認ダイアログを挟む (`saveSettings()`)。「ヘッドホンを
+  着けた状態でこの上限を超える音量にすると、難聴の危険があります」と
+  明示した上で、キャンセルすれば保存自体を中断する。設定ラベル自体にも
+  ⚠️ 付きで同じ警告を書いている。**この確認ダイアログとラベルの警告文を
+  外さないでください** — 誤操作でヘッドホン使用中に意図せず 150% まで
+  音量が上がる事故を防ぐための、要求そのものに含まれる安全設計である。
+
+#### 専用の Bluetooth 管理ページ
+
+「接続管理がしにくい」という報告を受け、これまで設定タブに埋め込んで
+いた Bluetooth カード (`#bt-card`、ペアリング・承認待ち一覧・ローカル名・
+ペアリング済み端末の削除など、#73/#75 で追加した機能一式) を、単独の
+ナビゲーションタブ (`Bluetooth`、`PAGES` に `["bt","Bluetooth"]` を追加)
+へ移動した。カードの内部実装 (`renderBluetooth()` など) は変更していない
+— 表示先の `<section>` を移しただけで、ID もロジックも変えていないため、
+既存の WebSocket 定期更新経由のレンダリングはそのまま動作する。設定タブ
+には移動先を示す短い案内リンクだけを残した。BGM の出力先選択・出力先
+ごとの音量/EQ (`#bt-out-select` などの音楽タブのカード) は意図して
+**移動していない** — これは「BGM をどこで鳴らすか」という音楽再生の
+設定であり、「Bluetooth 自体の接続・ペアリングをどう管理するか」とは
+別の関心事のため、新しい Bluetooth タブには音楽タブへの案内リンクだけを
+置いている。
+
+### 78. カメラ破損による緊急再起動が短時間で繰り返され、テストに支障が出ていた。再起動前の音声通知も実際には鳴り終わる前に電源が落ちていた
+
+「カメラの不調で再起動を繰り返してしまい、テストに支障が出ている」
+「再起動する前に音声通知するようにしてほしい」という報告があった。
+
+#### 再起動の間隔が短すぎる
+
+`camera.py` の `loop()` は、破損検知の緊急再起動要求 (#22) を複数カメラが
+ほぼ同時に出しても二重に再起動しないよう `last_reboot_attempt` からの
+クールダウンを見ているが、この値は**固定 600 秒 (10 分)** のハードコード
+だった。USB 帯域の逼迫のように短時間では解消しない破損が続く機体では、
+#60 の中間段階 (カメラの完全切断) を挟んでもなお解消しなければこの
+10 分クールダウンだけを頼りに緊急再起動が繰り返され、実機での動作確認・
+開発作業そのものが 10 分おきの再起動で妨げられていた。
+
+`corrupt_reboot_cooldown_seconds` (既定 1800 秒=30分、`core/config.py`
+の `DEFAULTS`/`_RANGES` に追加、範囲 60〜86400 秒) を新設し、
+`camera.py` の `loop()` がこの設定値をハードコードの 600.0 の代わりに
+使うようにした。**カメラごとの上書き (`CAMERA_OVERRIDE_KEYS`) には
+入れていない** — `last_reboot_attempt` は全カメラで共有する単一の
+スカラ変数であり (#22 が「複数カメラが同時に閾値へ達しても二重に
+再起動しない」ために意図してそうしている)、カメラ単位の上書きにしても
+実際のクールダウン判定はグローバルな 1 本のままなので意味を持たない。
+Web UI には「カメラ」グループの一般設定として追加した (カメラ個別設定
+UI ではない)。**この設定を経由せず再びハードコードの固定値に戻さない
+でください** — 同じ「短い間隔で再起動が繰り返されテストに支障が出る」
+報告に戻ります。
+
+#### 再起動前の音声通知が、実際には鳴り終える前に電源を落としていた
+
+`maintenance.emergency_reboot()`/`run_now()` はどちらも既に
+`voice.announce()` で再起動前にアナウンスを送っていたが、これは
+**キューへ積んで即座に戻るだけの非同期 API**で、実際の TTS 合成・再生は
+別タスクの `voice.loop()` が後から処理する。呼び出し元はこの直後に
+音楽/カメラの停止処理を数秒かけて行い、最後に固定 4 秒だけ `sleep` して
+から `_reboot()` を呼んでいた。この 4 秒は Discord への通知送信を
+待つためのものであり (`run_now()` と共通の既存コメントのとおり)、音声
+アナウンスの完了を保証するものではない。緊急再起動が絡む場面はまさに
+Pi が USB/CPU 負荷で不安定になっている状況そのものなので、Open JTalk の
+合成にも普段より時間がかかりやすく、実機では「アナウンスの途中、あるいは
+始まる前に電源が落ちる」ことが起こり得た。
+
+`voice.py` に `announce_blocking()` を新設した。`announce()` と同じ
+`voice_enabled`/カテゴリ別スイッチ/Bluetooth 接続中スキップの判定を
+共有しつつ、キューを経由せず `_speak_sync()` を直接呼んで**実際に鳴り
+終わるまでブロックして戻る** (`speak_test_time()` が `_speak_sync()` を
+直接呼ぶのと同じパターン)。`emergency_reboot()`/`run_now()` の両方の
+再起動前アナウンスを、`asyncio.to_thread(voice.announce_blocking, ...)`
+経由の呼び出しに変更した — ブロッキング呼び出しなので、他の TTS 呼び出し
+(`voice.loop()` 自身も `_speak_sync()` を `asyncio.to_thread()` 越しに
+呼んでいる) と同じ規約に揃えている。**この `announce_blocking()` を
+経由せず `announce()` のキュー投入だけで再起動前の待ち時間を確保する
+実装に戻さないでください** — 同じ「読み上げの途中/始まる前に電源が
+落ちる」不具合に戻ります。Discord 通知用の 4 秒 `sleep` はそのまま残して
+いる — こちらは音声とは無関係な、ネットワーク越しの Webhook 送信を待つ
+ための別の待機である。
+
 ## モジュール構成
 
 各モジュールは疎結合で、`core/state.py` の `MODE` を購読するだけです。
@@ -3748,7 +3951,13 @@ modules/camera.py       カメラ (別プロセス)。動体検知 -> MODE.repor
                          しなければ corrupt_reboot_request を書き、
                          ON_CORRUPT_REBOOT フック経由で Pi 再起動を要求する
                          (実際の再起動は maintenance.emergency_reboot() に
-                         委譲、CLAUDE.md #22/#60)
+                         委譲、CLAUDE.md #22/#60)。この要求から次に再度
+                         要求できるまでの最短間隔は
+                         corrupt_reboot_cooldown_seconds (既定 1800 秒、
+                         全カメラ共通の単一クールダウン、CAMERA_OVERRIDE_
+                         KEYS には入れない) — 短時間で繰り返し Pi が
+                         再起動されテストが妨げられる不具合の対策
+                         (CLAUDE.md #78)
 modules/music.py        mpg123 制御、位置復帰、yt-dlp キュー。出力先は
                          Player.bt_output_addr が立っていれば
                          bluealsa:DEV=<MAC>,PROFILE=a2dp (Bluetooth 出力、
@@ -3787,6 +3996,22 @@ modules/music.py        mpg123 制御、位置復帰、yt-dlp キュー。出力
                          Bluetooth 出力中は pause_for_voice() で一時停止
                          する (bluealsa の A2DP ソース PCM は同時に開ける
                          クライアントが 1 つだけのため、CLAUDE.md #73)。
+                         resume_after_voice() は再開前に _BT_VOICE_DRAIN_SEC
+                         (0.4 秒) 待つ — A2DP のエンコード+無線送信ぶんの
+                         遅延は ALSA のドレイン完了より後ろに残るため、
+                         プロセス終了直後に再開すると声の終わりに BGM が
+                         被る (CLAUDE.md #77)。music_mute_bgm_on_aux が
+                         有効かつ出力先が AUX のときは play() が
+                         suspended_by="aux_muted" で即座に return する —
+                         音声アナウンス (begin_voice_interrupt() 経由) は
+                         この設定の対象外 (CLAUDE.md #77)。AUX の音量上限は
+                         _aux_volume_max() が判定し、music_volume_boost_
+                         enabled が有効な間だけ 100 ではなく 150 まで
+                         (mpg123 の `V` コマンド自身が 100 超を許容する
+                         ソフトウェア増幅、ヘッドホンでの難聴リスクがある
+                         ため既定オフ + Web UI 側に確認ダイアログ)。
+                         Bluetooth 出力側の音量はこの解除の対象外で常に
+                         0-100 のまま (CLAUDE.md #77)。
                          カテゴリー (「勉強用」「休憩用」) は MUSIC_DIR
                          直下のサブフォルダそのもの。music_category_filter
                          で再生対象を絞り込み、move_track()/
@@ -3902,7 +4127,15 @@ modules/voice.py        Open JTalk 優先/espeak-ng フォールバックの音�
                          speak_test_time() は time_signal_loop() と同じ
                          _time_values()・チャイム条件で、壁時計の境界を
                          待たずに今すぐ 1 回だけテスト再生する
-                         (CLAUDE.md #71/#73)
+                         (CLAUDE.md #71/#73)。announce_blocking() は
+                         announce() の同期版 — キューへ積んで即座に戻る
+                         announce() とは違い、_speak_sync() を直接呼んで
+                         実際に鳴り終わるまでブロックする。
+                         maintenance.py の再起動前アナウンス (asyncio.
+                         to_thread() 経由で呼ぶ) が使う — キュー経由の
+                         announce() では、直後に固定秒数だけ待って
+                         reboot するだけの実装だと読み上げの途中/始まる
+                         前に電源が落ちることがあった (CLAUDE.md #78)
 
 web/routes.py           全 HTTP / WebSocket エンドポイント。latest.jpg の
                          ように他プロセスが継続的に上書きするファイルは
@@ -3940,7 +4173,11 @@ web/static/index.html   単一ファイル SPA。イベントページのタイ�
                          加えペアリング済み端末ごとの "bt:<MAC>" を動的に
                          追加する — AUX 全体設定・曲ごとの上書き・
                          Bluetooth 出力機器ごとの設定を同じ UI で切り替える
-                         (CLAUDE.md #73)
+                         (CLAUDE.md #73)。Bluetooth 自体の接続・ペアリング・
+                         端末管理は専用の "bt" タブ (#p-bt、旧設定タブの
+                         #bt-card をそのまま移設) に分離している — 設定
+                         タブには移動先を示す案内リンクだけが残る
+                         (CLAUDE.md #77)
 ```
 
 ### モジュールを追加するとき

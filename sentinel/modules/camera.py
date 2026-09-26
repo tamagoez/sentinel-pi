@@ -1026,7 +1026,14 @@ async def loop() -> None:
         # した後は last_reboot_attempt からのクールダウンを置く。もし
         # 何らかの理由で実際には再起動されなかった場合 (sudoers の設定
         # 漏れなど) でも、このクールダウンが明ければ再度要求されるので、
-        # 永久に諦めたままにはならない。
+        # 永久に諦めたままにはならない。以前はこのクールダウンが固定 600
+        # 秒 (10 分) だったが、USB 帯域不足のように短時間では解消しない
+        # 破損が続く機体では 10 分おきに Pi が再起動を繰り返し、実機での
+        # 動作確認・開発作業そのものが妨げられるという報告があった。
+        # corrupt_reboot_cooldown_seconds (既定 1800 秒=30分) として設定
+        # 可能にし、テスト中はこれを長く設定できるようにしている。
+        # **この設定を経由せず固定値に戻さないでください** — 同じ「短い
+        # 間隔で再起動が繰り返されテストに支障が出る」報告に戻ります。
         for cid in list(WORKERS):
             req_path = rt(cid) / "corrupt_reboot_request"
             try:
@@ -1037,7 +1044,8 @@ async def loop() -> None:
             if ts <= seen_reboot_request.get(cid, 0.0):
                 continue
             seen_reboot_request[cid] = ts
-            if now - last_reboot_attempt < 600.0:
+            cooldown = float(config.get("corrupt_reboot_cooldown_seconds"))
+            if now - last_reboot_attempt < cooldown:
                 continue
             last_reboot_attempt = now
             if ON_CORRUPT_REBOOT is not None:

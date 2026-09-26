@@ -715,7 +715,14 @@ async def run_now(*, reboot: bool | None = None) -> dict:
     do_reboot = config.get("reboot_after_maintenance") if reboot is None else reboot
     if do_reboot:
         notify.system_event("再起動します", level="warn")
-        voice.announce("定時処理が完了しました。Piを再起動します", "other")
+        # emergency_reboot() と同じ理由で announce_blocking() を使う —
+        # announce() はキューへ積むだけで戻るため、直後に固定秒数だけ待つ
+        # 実装では読み上げの途中/始まる前に再起動してしまうことがある。
+        try:
+            await asyncio.to_thread(
+                voice.announce_blocking, "定時処理が完了しました。Piを再起動します", "other")
+        except Exception:
+            log.exception("再起動前の音声アナウンスに失敗しました (再起動は続行します)")
         await asyncio.sleep(4)     # 通知が飛ぶのを待つ
         await asyncio.to_thread(_reboot)
     else:
@@ -747,7 +754,18 @@ async def emergency_reboot(cid: str, reason: str) -> None:
     notify.system_event(
         "カメラの破損が繰り返し解消しないため、Pi を再起動します",
         f"カメラ: {cid}\n{reason}", level="error")
-    voice.announce(f"カメラ {cid} の破損が解消しないため、Piを再起動します", "camera_reboot")
+    # voice.announce() はキューへ積むだけで即座に戻り、実際の合成・再生は
+    # 別タスクの voice.loop() が非同期に処理する。この直後に停止処理へ
+    # 進んで数秒待つだけの実装では、Open JTalk の合成が (Pi が既に USB/
+    # CPU 負荷で不安定な状況ではなおさら) 数秒を超えることがあり、読み上げ
+    # の途中、あるいは始まる前に電源が落ちてしまっていた。
+    # announce_blocking() で実際に鳴り終えるまで待ってから次へ進む。
+    try:
+        await asyncio.to_thread(
+            voice.announce_blocking,
+            f"カメラ {cid} の破損が解消しないため、Piを再起動します", "camera_reboot")
+    except Exception:
+        log.exception("緊急再起動前の音声アナウンスに失敗しました (再起動は続行します)")
     try:
         await asyncio.to_thread(music.PLAYER.persist, force=True)
         await asyncio.to_thread(music.PLAYER.stop, terminate=True, reason="corrupt-reboot")

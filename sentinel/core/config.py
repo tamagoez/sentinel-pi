@@ -136,13 +136,36 @@ DEFAULTS: dict[str, Any] = {
                                            # しない USB 帯域の逼迫などを想定し、
                                            # Pi 本体の再起動より先に試す
                                            # (CLAUDE.md #57)
+    "corrupt_reboot_cooldown_seconds": 1800,  # カメラ破損による緊急再起動を
+                                           # 実際に要求してから、次にまた
+                                           # 要求できるようになるまでの最短
+                                           # 間隔。カメラごとの上書きではなく
+                                           # 全カメラ共通 (camera.py の loop()
+                                           # が持つ単一のクールダウンをそのまま
+                                           # 設定化したもの) — 複数カメラが
+                                           # ほぼ同時に閾値へ達しても二重に
+                                           # 再起動しないための仕組みと同じ値
+                                           # を使うため。USB 帯域不足のように
+                                           # 短時間では解消しない破損が続く
+                                           # 機体では、既定の固定 10 分では
+                                           # 動作確認・開発作業そのものが
+                                           # 再起動で妨げられるという報告が
+                                           # あり、既定値を 30 分へ延ばした
+                                           # うえで利用者が調整できるように
+                                           # した
     "camera_overrides": {},               # カメラID -> {設定キー: 値, ...}
                                            # 個別カメラだけ上の共有値を上書きする。
                                            # キーが無い/空ならそのカメラは共有値を使う。
 
     # --- 音楽 ---
     "music_enabled": True,
-    "music_volume": 60,                   # 0-100
+    "music_volume": 60,                   # 0-100 (music_volume_boost_enabled が
+                                           # 有効な間だけ 150 まで、Player.set_volume()/
+                                           # _active_output_profile() 参照)
+    "music_volume_boost_enabled": False,  # AUX 音量の 100% 上限を 150% まで解除する。
+                                           # ヘッドホンでの難聴リスクがあるため既定オフ。
+    "music_mute_bgm_on_aux": False,       # AUX (3.5mm) 出力中は BGM を鳴らさない。
+                                           # 音声アナウンスはこの設定の影響を受けない。
     "music_shuffle": True,
     "music_repeat": "all",                # all | one | off
     "music_category_filter": "",          # 空なら全曲。music.MUSIC_DIR 直下の
@@ -386,9 +409,14 @@ _RANGES: dict[str, tuple[float, float]] = {
     "corrupt_min_area_ratio": (0.02, 0.9),
     "corrupt_tile_repeat_ratio": (0.1, 0.9),
     "corrupt_reboot_threshold": (1, 20),
+    "corrupt_reboot_cooldown_seconds": (60, 86400),
     "corrupt_disconnect_seconds": (30, 1800),
     "retention_days": (1, 3650),
-    "music_volume": (0, 100),
+    # 上限は music_volume_boost_enabled が有効な場合の最大値 (150)。
+    # boost が無効な間の実際の上限は Player.set_volume()/
+    # _active_output_profile() がランタイム側で別途 100 に絞る — ここを
+    # 100 のままにすると boost を有効にしても値そのものを保存できない。
+    "music_volume": (0, 150),
     "mpg123_buffer_kb": (64, 8192),
     "notify_min_interval": (5.0, 3600.0),
     "notify_summary_after": (30.0, 86400.0),
