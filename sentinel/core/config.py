@@ -142,7 +142,13 @@ DEFAULTS: dict[str, Any] = {
 
     # --- 音楽 ---
     "music_enabled": True,
-    "music_volume": 60,                   # 0-100
+    "music_volume": 60,                   # 0-100 (music_volume_boost_enabled が
+                                           # 有効な間だけ 150 まで、Player.set_volume()/
+                                           # _active_output_profile() 参照)
+    "music_volume_boost_enabled": False,  # AUX 音量の 100% 上限を 150% まで解除する。
+                                           # ヘッドホンでの難聴リスクがあるため既定オフ。
+    "music_mute_bgm_on_aux": False,       # AUX (3.5mm) 出力中は BGM を鳴らさない。
+                                           # 音声アナウンスはこの設定の影響を受けない。
     "music_shuffle": True,
     "music_repeat": "all",                # all | one | off
     "music_category_filter": "",          # 空なら全曲。music.MUSIC_DIR 直下の
@@ -388,7 +394,11 @@ _RANGES: dict[str, tuple[float, float]] = {
     "corrupt_reboot_threshold": (1, 20),
     "corrupt_disconnect_seconds": (30, 1800),
     "retention_days": (1, 3650),
-    "music_volume": (0, 100),
+    # 上限は music_volume_boost_enabled が有効な場合の最大値 (150)。
+    # boost が無効な間の実際の上限は Player.set_volume()/
+    # _active_output_profile() がランタイム側で別途 100 に絞る — ここを
+    # 100 のままにすると boost を有効にしても値そのものを保存できない。
+    "music_volume": (0, 150),
     "mpg123_buffer_kb": (64, 8192),
     "notify_min_interval": (5.0, 3600.0),
     "notify_summary_after": (30.0, 86400.0),

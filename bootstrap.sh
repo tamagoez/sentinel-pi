@@ -149,6 +149,51 @@ else
   w "$SETHW not found; enable Bluetooth manually via dietpi-config."
 fi
 
+# The Pi 3B+'s Bluetooth chip talks to the SoC over UART, and the stock
+# hciuart.service (via /usr/bin/btuart, shipped by raspberrypi-sys-mods)
+# attaches it at a baud rate this wiring cannot reliably sustain under load.
+# The Pi 3 family does not have CTS/RTS hardware flow control actually wired
+# to the BT chip despite `flow` being requested in software (a documented
+# GPIO-pin constraint), so under any CPU/USB load (this project keeps both
+# busy - cameras plus a USB hub shared with Ethernet, see CLAUDE.md's
+# hardware table) bytes get dropped mid-frame. The kernel reports this as
+# endless "Bluetooth: Unexpected continuation frame (len 0)" log spam, and
+# it is audible as several seconds of stuttering/crackling right after a
+# connection is made - this is a long-documented Pi 3(B+) UART issue, not
+# something specific to this project
+# (https://bbs.archlinux.org/viewtopic.php?id=248696 reports the exact same
+# ~10-second stutter cycle; https://forums.raspberrypi.com/viewtopic.php?t=189044
+# and https://gist.github.com/e-minguez/fda85d1d20d1f6dadfd4c071c50fcaae
+# document the same fix below). A lower baud rate tolerates the dropped-byte
+# rate much better than the stock 3000000/921600. This is applied as a
+# systemd override rather than editing /usr/bin/btuart directly, so it
+# survives raspberrypi-sys-mods package updates silently reverting a direct
+# edit (the same reasoning as this project's decision never to edit
+# DietPi/Raspberry-Pi-OS-shipped ExecStart lines directly, CLAUDE.md's
+# Syncthing section). **If real-hardware testing ever shows this baud rate
+# itself causes new problems, lower it further (460800 is already the
+# community-recommended safe value, but some units may need 230400) rather
+# than removing the override outright** - removing it reintroduces the
+# unbounded stutter/log-spam this exists to fix.
+if systemctl list-unit-files hciuart.service &>/dev/null; then
+  BTUART_OVERRIDE_DIR="/etc/systemd/system/hciuart.service.d"
+  BTUART_OVERRIDE="$BTUART_OVERRIDE_DIR/override.conf"
+  mkdir -p "$BTUART_OVERRIDE_DIR"
+  NEW_BTUART_OVERRIDE='[Service]
+ExecStart=
+ExecStart=/usr/bin/hciattach /dev/serial1 bcm43xx 460800 noflow'
+  if [[ "$(cat "$BTUART_OVERRIDE" 2>/dev/null)" != "$NEW_BTUART_OVERRIDE" ]]; then
+    printf '%s\n' "$NEW_BTUART_OVERRIDE" > "$BTUART_OVERRIDE"
+    systemctl daemon-reload
+    systemctl restart hciuart.service 2>/dev/null || true
+    ok "Bluetooth UART baud rate lowered to 460800 (hciuart.service override) to fix connection stutter/log spam"
+  else
+    ok "Bluetooth UART baud rate override already in place"
+  fi
+else
+  w "hciuart.service not found; skipping the UART baud-rate override (not a UART-attached Bluetooth chip)"
+fi
+
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -qq
 # bluez-alsa-utils: bluealsad itself (run in both -p a2dp-sink, receiving

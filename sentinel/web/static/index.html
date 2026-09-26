@@ -336,10 +336,9 @@ try{
         <div class="hint faint" style="font-size:11px;margin-top:6px">
           Bluetooth のヘッドホン/スピーカーを選ぶと、繋がっている間はそちらへ
           BGM と時報が流れます (未接続の間は自動で AUX (3.5mm) に戻ります)。
-          選ぶと解除するまで自動で接続を試み続けます。端末は先に端末タブの
-          <code>bluetoothctl</code> でペアリング・信頼設定を済ませておいてください
-          (<code>pair &lt;MAC&gt;</code> → <code>trust &lt;MAC&gt;</code>)。
-          音量・イコライザーは出力先ごとに別々に覚えます。
+          選ぶと解除するまで自動で接続を試み続けます。端末のペアリング・
+          管理は <a onclick="go('bt')" style="cursor:pointer">Bluetooth タブ</a>
+          で行います。音量・イコライザーは出力先ごとに別々に覚えます。
         </div>
       </div></div>
 
@@ -388,6 +387,19 @@ try{
         <span class="hint faint" style="font-size:11px">選んだカテゴリーの曲だけを再生対象にします。「すべて」で解除。</span>
       </div>
       <div class="list" id="playlist"></div></div>
+  </section>
+
+  <!-- ================= bluetooth ================= -->
+  <section class="page" id="p-bt">
+    <div class="grid g2">
+      <div class="card"><h3>Bluetooth</h3><div class="body" id="bt-card"></div></div>
+    </div>
+    <div class="faint" style="font-size:11px;margin-top:10px">
+      BGM の出力先切り替え・出力先ごとの音量・イコライザーは
+      <a onclick="go('music')" style="cursor:pointer">音楽タブ</a> の
+      「BGM 出力先」カードで設定します。ここは Bluetooth 自体の接続・
+      ペアリング・端末の管理だけを行います。
+    </div>
   </section>
 
   <!-- ================= network ================= -->
@@ -482,8 +494,12 @@ try{
       <button class="d" onclick="doReboot()">今すぐ再起動</button>
       <span class="faint" id="set-msg"></span>
     </div>
+    <div class="faint" style="font-size:11px;margin-bottom:12px">
+      Bluetooth の接続・ペアリング・端末管理は
+      <a onclick="go('bt')" style="cursor:pointer">Bluetooth タブ</a>
+      へ移動しました。
+    </div>
     <div class="grid g2" style="margin-bottom:12px">
-      <div class="card"><h3>Bluetooth</h3><div class="body" id="bt-card"></div></div>
       <div class="card"><h3>WiFi ホットスポット</h3><div class="body" id="hotspot-card">
         <div class="row"><b>SSID (表示名)</b></div>
         <div class="row" style="margin-top:6px">
@@ -608,7 +624,7 @@ const fmtUp = s => { const d=Math.floor(s/86400), h=Math.floor(s%86400/3600), m=
 
 const PAGES = [
   ["dash","ダッシュボード"], ["cam","カメラ"], ["ev","イベント"],
-  ["music","音楽"], ["net","ネットワーク"], ["arc","アーカイブ"],
+  ["music","音楽"], ["bt","Bluetooth"], ["net","ネットワーク"], ["arc","アーカイブ"],
   ["fm","ファイル"],
   ["term","端末"], ["err","エラー"], ["set","設定"], ["log","ログ"],
 ];
@@ -1379,7 +1395,8 @@ function renderMusic(full){
   const s = (DATA.music && Object.keys(DATA.music).length) ? DATA.music : (MUSIC.status || {});
   $("#m-track").textContent = s.track || "(曲がありません)";
   const susp = s.suspended_by ? ({eco:"エコモードのため停止中", bluetooth:"Bluetooth 接続のため退避中",
-    maintenance:"定時処理のため停止中", manual:"手動停止", shutdown:"停止"})[s.suspended_by] || s.suspended_by : "";
+    maintenance:"定時処理のため停止中", manual:"手動停止", shutdown:"停止",
+    aux_muted:"「AUX では BGM を鳴らさない」設定のため停止中"})[s.suspended_by] || s.suspended_by : "";
   $("#m-state").textContent = susp || (s.playing ? "再生中" : "停止中") +
     (s.total ? ` · ${(s.index??0)+1} / ${s.total}` : "") + (s.error ? ` · ${s.error}` : "");
   const pct = s.duration ? Math.min(100, s.position/s.duration*100) : 0;
@@ -2343,7 +2360,8 @@ const GROUPS = [
   ["動体検知", ["motion_threshold","motion_area_ratio","motion_area_max_ratio","motion_interval",
                 "motion_warmup_seconds","motion_confirm_checks","motion_release_checks",
                 "cam_autofocus","save_cooldown","motion_debug_log"]],
-  ["音楽", ["music_enabled","music_autoplay_on_presence","music_volume","music_repeat",
+  ["音楽", ["music_enabled","music_autoplay_on_presence","music_volume",
+            "music_volume_boost_enabled","music_mute_bgm_on_aux","music_repeat",
             "music_shuffle","mpg123_buffer_kb","alsa_device",
             "music_eq_enabled"]],
   ["Bluetooth", ["bt_enabled","bt_poll_seconds"]],
@@ -2387,7 +2405,11 @@ const LABELS = {
   corrupt_reboot_threshold:"素早い再接続を何回試しても直らなければ、まずカメラを完全に切断するか (それでも直らなければPiを緊急再起動)",
   corrupt_disconnect_seconds:"緊急再起動の前に、カメラを完全に切断しておく秒数",
   music_enabled:"常時再生を有効にする", music_autoplay_on_presence:"人を検知したら自動再生",
-  music_volume:"音量 (%)", music_repeat:"繰り返し", music_shuffle:"シャッフル",
+  music_volume:"音量 (%、AUX 出力時は「上限を解除する」が有効な間だけ150まで)",
+  music_volume_boost_enabled:"⚠️ AUX (3.5mm) 音量の上限を100%→150%まで解除する。ヘッドホンで使用中に" +
+    "誤って高い値にすると難聴の危険があります。普段はオフのままにし、必要なときだけ有効にしてください",
+  music_mute_bgm_on_aux:"AUX (3.5mm) 出力中は BGM を鳴らさない (音声アナウンスは影響を受けません)",
+  music_repeat:"繰り返し", music_shuffle:"シャッフル",
   mpg123_buffer_kb:"mpg123 バッファ (KB)",
   alsa_device:"ALSA デバイス (空欄なら自動検出したアナログ出力を使用。BGM 出力先が AUX のときのみ有効。音声アナウンスと自動的に重なって鳴る)",
   music_eq_enabled:"イコライザーを有効にする (AUX 用。音楽タブでバンドを調整。Bluetooth 出力先ごとの EQ も音楽タブで別途設定できます)",
@@ -2467,6 +2489,16 @@ async function saveSettings(){
     if(v === "true") v = true; else if(v === "false") v = false;
     patch[el.dataset.k] = v;
   });
+  // AUX 音量上限の解除は、ヘッドホン使用中に誤って高い音量へ設定してしまうと
+  // 難聴の危険がある。オフ→オンへの変更のときだけ、誤操作防止のため
+  // 明示的な確認を挟む (既存の importSettings() などと同じ confirm() パターン)。
+  if(patch.music_volume_boost_enabled === true && CONF.music_volume_boost_enabled !== true){
+    const ok = confirm(
+      "AUX (3.5mm) 音量の上限を100%→150%まで解除します。\n"+
+      "ヘッドホンを着けた状態でこの上限を超える音量にすると、難聴の危険があります。\n"+
+      "本当に有効にしますか？");
+    if(!ok){ loadSettings(); return; }
+  }
   try{
     const r = await api("/api/config", {method:"PUT", headers:{"Content-Type":"application/json"},
       body: JSON.stringify(patch)});

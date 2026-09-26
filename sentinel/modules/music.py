@@ -171,6 +171,26 @@ def resolve_eq_bands(track_name: str | None, base_bands: dict | None = None) -> 
     return out
 
 
+# AUX (3.5mm) 音量の通常上限。Bluetooth 出力機器ごとの音量
+# (bt_output_profiles) はこの機能の対象外 — 常に 0-100 のまま
+# (ユーザーが明示的に要求したのは AUX の上限解除のみで、Bluetooth
+# ヘッドホンの音量はこれまでどおり安全側に固定しておく)。
+_AUX_VOLUME_MAX = 100
+# music_volume_boost_enabled が有効なときの上限。mpg123 の `V` コマンドは
+# 100 を超える値も受け付ける (ソフトウェア側の増幅、ドキュメントに明記)
+# が、無制限に許すと歪み・ヘッドホン使用時の難聴リスクが跳ね上がるため、
+# 上限そのものは動かさず 150 に固定している。**この上限自体を利用者が
+# 変更できる設定にしないでください** — 「限界を超えて設定できるように」
+# という要望自体が「安全な上限をどこかに置いた上での解放」を意図した
+# ものであり、上限を無くす/利用者が更に引き上げられるようにすることは
+# 意図と異なる。
+_AUX_VOLUME_BOOST_MAX = 150
+
+
+def _aux_volume_max() -> int:
+    return _AUX_VOLUME_BOOST_MAX if config.get("music_volume_boost_enabled") else _AUX_VOLUME_MAX
+
+
 def _active_output_profile() -> dict:
     """現在の実効出力 (AUX か、選択中の Bluetooth 出力機器) に対応する
     音量/EQ 設定を返す。`PLAYER.bt_output_addr` が立っていれば
@@ -185,8 +205,14 @@ def _active_output_profile() -> dict:
     出力先に関わらず共通の補正として resolve_eq_bands() 側で重ねる。"""
     addr = PLAYER.bt_output_addr
     if not addr:
+        # ここでも上限を再度掛ける — music_volume_boost_enabled を後から
+        # オフに戻したときに、保存済みの値 (例: 140) がそのまま再生に使わ
+        # れ続けることのないようにするため。オフに戻した瞬間から安全な
+        # 上限が効くのが本来の目的で、「次に音量を変更するまでは危険な
+        # 値のまま」では安全策として不十分。
+        vol = min(int(config.get("music_volume")), _aux_volume_max())
         return {
-            "volume": int(config.get("music_volume")),
+            "volume": vol,
             "eq_enabled": bool(config.get("music_eq_enabled")),
             "eq_bands": dict(config.get("music_eq_bands") or {}),
         }
@@ -486,6 +512,21 @@ class Player:
         self._last_sent_eq = gains
 
     def play(self, seek: float = 0.0) -> None:
+        # music_mute_bgm_on_aux: 実効出力先が AUX (Bluetooth 出力機器が
+        # 選択されていない) のときだけ BGM の再生そのものを止める設定。
+        # ここ 1 箇所だけで判定すれば、on_mode_change()・resume_from_
+        # bluetooth()・_advance_and_play() (曲送り)・set_bt_output() の
+        # どこ経由で play() が呼ばれても一貫して効く — 呼び出し元ごとに
+        # 複製すると、どこか 1 箇所だけ更新し忘れて「設定したのに AUX で
+        # 鳴ってしまう」不整合が起きやすい。音声アナウンス (voice.py) は
+        # この Player を一切経由しない別プロセスなので、この設定の影響を
+        # 受けない (「BGM だけ鳴らさない、アナウンスは鳴らす」という要望
+        # どおりに、そもそも分岐を足す必要が無い)。
+        if not self.bt_output_addr and config.get("music_mute_bgm_on_aux"):
+            with self._lock:
+                self.playing = False
+                self.suspended_by = "aux_muted"
+            return
         with self._lock:
             path = self.current_path()
             if path is None:
@@ -578,12 +619,18 @@ class Player:
         self._send(f"J {int(max(0, seconds))}s")
 
     def set_volume(self, percent: int) -> None:
-        percent = max(0, min(100, int(percent)))
+        percent = int(percent)
         # 出力先ごとに別の場所へ保存する — Bluetooth 出力中に音量を
         # 動かしても AUX 側の music_volume には触れない (逆も同様)。
+        # Bluetooth ヘッドホン側は music_volume_boost_enabled の影響を
+        # 受けない — 常に 0-100 に固定する (ヘッドホンでの難聴リスクは
+        # AUX 直結よりも身体に近い Bluetooth ヘッドホンの方がむしろ高い
+        # ため、ユーザーが明示的に要求したのは AUX の上限解除のみ)。
         if self.bt_output_addr:
+            percent = max(0, min(100, percent))
             set_bt_output_volume(self.bt_output_addr, percent)
         else:
+            percent = max(0, min(_aux_volume_max(), percent))
             config.update({"music_volume": percent})
         self._send(f"V {percent}")
 
@@ -835,6 +882,12 @@ def resume_volume_after_voice() -> None:
     _pre_duck_volume = None
 
 
+# resume_after_voice() が BGM を再開する前に置く猶予。A2DP のエンコード
+# (SBC/AAC 等) + 無線送信ぶんの遅延は典型的に 100〜300ms 程度とされる
+# ため、それより確実に長く取ってある。
+_BT_VOICE_DRAIN_SEC = 0.4
+
+
 def pause_for_voice() -> bool:
     """Bluetooth 出力専用の、duck_volume_for_voice() に相当する経路。
     bluealsa の A2DP ソース PCM は同時に開けるクライアントが 1 つだけ
@@ -854,8 +907,26 @@ def pause_for_voice() -> bool:
 
 
 def resume_after_voice() -> None:
-    """pause_for_voice() が True を返したときだけ呼ぶこと。"""
+    """pause_for_voice() が True を返したときだけ呼ぶこと。
+
+    `aplay`/mpg123 の単発再生プロセスは `snd_pcm_drain()` を呼んでから
+    終了するため、ALSA のローカルバッファ上は「送り終えた」と見なして
+    良いはずだが、bluealsa の A2DP ソース側にはさらに符号化 (SBC/AAC 等)
+    + 無線送信のぶんの追加バッファ/遅延があり、これは ALSA の drain には
+    含まれない。そのため呼び出し元プロセスが終了した時点でも、実際には
+    ヘッドホンで鳴っている音声アナウンスの末尾がまだ Bluetooth のパイプ
+    ライン内を流れている途中のことがある。ここで即座に "P" (再開) を
+    送ると、その残りとBGMの再生開始が耳で聞こえる形で重なり、
+    「アナウンスが最後まで再生し切る前にBGMに乗っ取られる」という報告
+    どおりの体験になる。A2DP の典型的なエンコード+送信遅延
+    (100〜300ms 程度) より確実に長い猶予を置いてから再開することで、
+    この重なりを避ける。AUX 側 (duck_volume_for_voice()) は同じ mpg123
+    プロセスが dmix 経由でそのまま重ねて鳴らすだけで、別プロセスの
+    ドレインを待つ必要が無いためこの遅延は不要 — Bluetooth の一時停止
+    経路だけの対処。**この待ちを外さないでください** — 同じ「BGM に
+    乗っ取られる」不具合に戻ります。"""
     if PLAYER.proc is not None:
+        time.sleep(_BT_VOICE_DRAIN_SEC)
         PLAYER._send("P")
 
 
