@@ -28,6 +28,7 @@ import shutil
 import subprocess
 import tempfile
 import time
+import zipfile
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -69,6 +70,11 @@ _PRESTOP_STEP_TIMEOUT = 30.0
 # _STALE_RUN_SECONDS による次回の「詰まった実行の回収」を待たずに、
 # その日のうちに再起動判定まで進められるようにするため。
 _BUILD_TIMEOUT = 40 * 60
+
+# 設定バックアップ (config.LOCAL_BACKUP_ROOT) を何世代残すか。1 日 1 回
+# しか作らないので 14 世代でも 2 週間分、かつ zip 自体が config.json/
+# state.json だけ (通常数十 KB) なので合計サイズも無視できる。
+_BACKUP_KEEP = 14
 
 _FONT_CANDIDATES = [
     "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf",
@@ -642,6 +648,69 @@ def _kill_stray_ffmpeg() -> None:
         pass
 
 
+def backup_settings() -> str | None:
+    """設定 (config.json/state.json) だけを本体 (SD カード) 側の
+    config.LOCAL_BACKUP_ROOT へ zip で退避する。外部ストレージ
+    (config.DATA_ROOT) が exFAT/NTFS のマウント不整合や物理故障で丸ごと
+    読めなくなっても (CLAUDE.md #8/#40 で扱ってきたのと同種の障害)、
+    設定だけは Pi 本体から復元できるようにするための最後の手段
+    (CLAUDE.md #80)。
+
+    音楽ライブラリ・カメラ映像・タイムラプス・アクセスログのような重い
+    データは対象外 — 「設定などの重すぎない内容を」という要求どおり、
+    ここでは config.json (全設定 + カメラ/Bluetooth 上書き設定を内包) と
+    state.json (再生位置などの小さな永続状態) の 2 ファイルだけを積む。
+    どちらも数十 KB 程度で、日次で残しても SD カードの摩耗を気にする
+    必要が無い規模 (CLAUDE.md #3 の「高頻度の書き込みは避ける」原則は
+    1 日 1 回のこの処理には当てはまらない)。
+
+    失敗しても None を返すだけで例外を投げない — install.sh 未実行の
+    開発環境や、何らかの理由で LOCAL_BACKUP_ROOT に書けない環境でも、
+    定時処理本体 (動画生成・再起動判定) を止めないための方針
+    (config.LOCAL_BACKUP_ROOT 自体のコメントと同じ考え方)。"""
+    try:
+        config.LOCAL_BACKUP_ROOT.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        log.warning("設定バックアップ先 (%s) を作成できません: %s — "
+                   "install.sh の再実行 (STEP 2) を確認してください",
+                   config.LOCAL_BACKUP_ROOT, exc)
+        return None
+
+    targets = [p for p in (config.CONFIG_PATH, config.STATE_PATH) if p.is_file()]
+    if not targets:
+        log.warning("設定バックアップの対象ファイルが見つかりません "
+                   "(%s)", config.CONFIG_PATH)
+        return None
+
+    stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    out = config.LOCAL_BACKUP_ROOT / f"settings-{stamp}.zip"
+    tmp = out.with_suffix(".zip.tmp")
+    try:
+        with zipfile.ZipFile(tmp, "w", zipfile.ZIP_DEFLATED) as zf:
+            for p in targets:
+                zf.write(p, arcname=p.name)
+        tmp.replace(out)
+    except OSError as exc:
+        log.warning("設定バックアップの書き込みに失敗しました: %s", exc)
+        tmp.unlink(missing_ok=True)
+        return None
+
+    # 古い世代を掃除する。日付付きのファイル名なので単純な文字列 sort が
+    # そのまま時刻順になる — camera.py の corrupt_frames 系と同じ
+    # 「多く残しすぎない」だけの軽いローテーションで、失敗しても
+    # (書き込みディレクトリが読み取り専用になった等) 今回のバックアップ
+    # 自体は既に完了しているため best-effort とする。
+    try:
+        existing = sorted(config.LOCAL_BACKUP_ROOT.glob("settings-*.zip"))
+        for old in existing[:-_BACKUP_KEEP]:
+            old.unlink(missing_ok=True)
+    except OSError as exc:
+        log.warning("古い設定バックアップの削除に失敗しました: %s", exc)
+
+    log.info("設定バックアップを作成しました: %s", out)
+    return str(out)
+
+
 async def run_now(*, reboot: bool | None = None) -> dict:
     """定時処理を実行する。手動起動にも使える。"""
     if STATE["running"]:
@@ -710,6 +779,14 @@ async def run_now(*, reboot: bool | None = None) -> dict:
         voice.announce("定時処理で例外が発生しました", "error")
         ok, detail = False, str(exc)
     finally:
+        # 動画生成の成否に関わらず、設定バックアップは毎日必ず試みる —
+        # 外部ストレージの障害と定時処理の失敗は無関係な話であり、
+        # ここを try 節の中 (成功時だけ) に置くと、動画生成が失敗する日ほど
+        # バックアップも欠ける、という本末転倒になる。
+        try:
+            await asyncio.to_thread(backup_settings)
+        except Exception:
+            log.exception("設定バックアップの実行中に例外が発生しました")
         STATE["running"] = False
 
     do_reboot = config.get("reboot_after_maintenance") if reboot is None else reboot

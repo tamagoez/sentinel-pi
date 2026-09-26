@@ -107,6 +107,17 @@ for g in video audio bluetooth plugdev systemd-journal; do
 done
 ok "$SVC_USER added to video/audio/bluetooth/plugdev/systemd-journal"
 
+# Local (SD card) home for the lightweight settings backup (CLAUDE.md #80).
+# Deliberately NOT under $STORAGE (external drive) - the whole point is a
+# fallback that survives external storage corruption - and NOT under
+# $APP_DIR (git checkout) either, since the app itself gets wiped and
+# re-cloned from git on a redeploy. /var/lib/sentinel is the same
+# OS-local, survives-both pattern already used for repo-path/setup-stage.
+# Owned by $SVC_USER (not root) because maintenance.py writes here directly
+# from the sentinel.service process, not via a root-only script.
+mkdir -p /var/lib/sentinel/backup
+chown "$SVC_USER:$SVC_USER" /var/lib/sentinel/backup
+
 # 'reboot' and one narrowly-scoped script are granted via sudo. Any other
 # root action is done by the operator inside the web terminal via 'su -';
 # the app never sees a root password, so there is no password-handling
