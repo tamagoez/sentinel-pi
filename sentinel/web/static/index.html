@@ -793,6 +793,14 @@ function render(){
 
 /* ---------------- bluetooth ---------------- */
 let BT_VOL_ADDR = null;
+// 直近に確定した音量 (0-100)。renderBluetooth() は WebSocket 更新のたびに
+// (数秒おき、間引きなし) #bt-card の innerHTML を丸ごと再構築するため、
+// このキャッシュを使わずスライダーを毎回「値なし (既定 50)」・表示を
+// 固定文字列 "-" のテンプレートで書くと、fetchBtVolume()/btSetVolume() が
+// 一度反映した直後の次の再描画でその値が巻き戻ってしまう —
+// btDevicesListInnerHtml() (CLAUDE.md #79) と全く同じ「読み込み中に戻る」
+// 系の不具合で、今回は音量スライダー側で発生した (CLAUDE.md #81)。
+let BT_VOL_LAST = null;
 let BT_LOCAL_NAME = "";
 let BT_LOCAL_NAME_LOADED = false;
 function renderBluetooth(){
@@ -812,8 +820,9 @@ function renderBluetooth(){
       </div>
       <div class="row" style="margin-top:8px">
         <span class="faint" style="font-size:11px;width:44px">音量</span>
-        <input type="range" min="0" max="100" id="bt-vol" style="flex:1;padding:0" onchange="btSetVolume(this.value)">
-        <span id="bt-vol-v" class="faint" style="width:34px;text-align:right">-</span>
+        <input type="range" min="0" max="100" id="bt-vol" style="flex:1;padding:0"
+          value="${BT_VOL_LAST ?? 100}" onchange="btSetVolume(this.value)">
+        <span id="bt-vol-v" class="faint" style="width:34px;text-align:right">${BT_VOL_LAST != null ? BT_VOL_LAST + "%" : "-"}</span>
       </div>
       <div class="faint" style="font-size:10.5px;margin-top:4px">この端末の音量として保存し、次回接続時にも自動適用します。</div>
       <button style="margin-top:10px" onclick="btDisconnect()">切断</button>`;
@@ -862,9 +871,11 @@ function renderBluetooth(){
   if(b.available && (Date.now() - BT_DEVICES_LOADED_AT > 5000)) loadBtDevices();
   if(b.connected && BT_VOL_ADDR !== b.device_addr){
     BT_VOL_ADDR = b.device_addr;
+    BT_VOL_LAST = null;  // 別端末に切り替わった直後は前の値を引き継がない
     fetchBtVolume(b.device_addr);
   }else if(!b.connected){
     BT_VOL_ADDR = null;
+    BT_VOL_LAST = null;
   }
 }
 async function loadBtLocalName(){
@@ -889,6 +900,7 @@ async function fetchBtVolume(addr){
     const r = await api("/api/bluetooth/devices");
     const d = (r.devices || []).find(x => x.addr === addr);
     const v = (d && d.volume != null) ? d.volume : 100;
+    BT_VOL_LAST = v;
     const el = $("#bt-vol"); if(el) el.value = v;
     const lv = $("#bt-vol-v"); if(lv) lv.textContent = v + "%";
   }catch(e){}
@@ -912,6 +924,7 @@ async function btSetAlias(){
 }
 async function btSetVolume(v){
   const addr = (DATA.bluetooth || {}).device_addr;
+  BT_VOL_LAST = +v;
   const lv = $("#bt-vol-v"); if(lv) lv.textContent = v + "%";
   if(!addr) return;
   try{ await post("/api/bluetooth/volume", {addr, volume: +v}); }
