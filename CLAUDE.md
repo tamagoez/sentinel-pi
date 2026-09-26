@@ -3834,6 +3834,43 @@ Pi が USB/CPU 負荷で不安定になっている状況そのものなので�
 いる — こちらは音声とは無関係な、ネットワーク越しの Webhook 送信を待つ
 ための別の待機である。
 
+### 79. Bluetooth タブの「ペアリング済み端末」一覧が、読み込み終わっても数秒後に「読み込み中」へ戻る
+
+「ペアリング端末が読み込み終わっても1秒後に読み込み中になってしまいます」
+という報告があった。
+
+原因は `renderBluetooth()` の `devicesHtml` テンプレートが、呼ばれるたび
+に `#bt-devices-list` の内容を無条件で `読み込み中…` という固定文字列へ
+書き換えていたことである。`renderBluetooth()` は `applyOverview()` 側
+(WebSocket の定期更新、数秒おき) から**間引きなしで毎回**呼ばれる —
+一方で実際に一覧を再取得する `loadBtDevices()` は 5 秒間隔で間引かれて
+いる (`BT_DEVICES_LOADED_AT` によるスロットル)。つまり:
+
+1. `loadBtDevices()` が取得を完了し、`renderBtDevices()` が
+   `#bt-devices-list` を正しい一覧で埋める。
+2. その直後 (5 秒以内) に次の WebSocket 更新が来て `renderBluetooth()`
+   が呼ばれ、`card.innerHTML = ... + devicesHtml` によって
+   `#bt-devices-list` ごと丸ごと「読み込み中…」に**巻き戻される**。
+3. スロットルが効いている間 (次の 5 秒間隔まで) は `loadBtDevices()` が
+   呼ばれないため、この「読み込み中」のまま何もしない時間が続く。
+
+`loadBtDevices()` 自体の間引き (5 秒ごと、CLAUDE.md #75 の実装) は
+「不要な `/api/bluetooth/devices` 呼び出しを減らす」という目的では正しい
+判断だが、`renderBluetooth()` 側の**表示**をこの取得間隔と無関係に毎回
+リセットしていたのが問題だった。
+
+`btDevicesListInnerHtml()` を新設し、`BT_DEVICES` (キャッシュ済みの一覧)
+から一覧本体の HTML を組み立てる処理を `renderBtDevices()` から切り出した
+うえで、`renderBluetooth()` の `devicesHtml` テンプレートもこの関数を
+使うよう変更した。`BT_DEVICES_LOADED_AT === 0` (まだ一度も取得していない)
+のときだけ「読み込み中…」を返し、それ以外はキャッシュ済みの内容 (0 件
+なら「ペアリング済み端末はありません」) をそのまま返す。これにより
+`renderBluetooth()` が何度呼ばれても、既に取得済みの一覧が固定文字列で
+巻き戻されることはなくなる。**この共有ヘルパーを経由せず、
+`renderBluetooth()` 側で再び固定の「読み込み中…」を書くテンプレートに
+戻さないでください** — 同じ「読み込み終わっても数秒後に読み込み中へ戻る」
+不具合に戻ります。
+
 ## モジュール構成
 
 各モジュールは疎結合で、`core/state.py` の `MODE` を購読するだけです。
@@ -4177,7 +4214,13 @@ web/static/index.html   単一ファイル SPA。イベントページのタイ�
                          端末管理は専用の "bt" タブ (#p-bt、旧設定タブの
                          #bt-card をそのまま移設) に分離している — 設定
                          タブには移動先を示す案内リンクだけが残る
-                         (CLAUDE.md #77)
+                         (CLAUDE.md #77)。ペアリング済み端末一覧の HTML は
+                         btDevicesListInnerHtml() で組み立て、
+                         renderBluetooth() (WebSocket 更新のたび呼ばれる)
+                         と renderBtDevices() (実際の再取得時だけ呼ばれる)
+                         の両方がこれを使う — 前者だけが固定の「読み込み
+                         中…」を書くと、取得済みの一覧が次の更新で巻き
+                         戻ってしまう (CLAUDE.md #79)
 ```
 
 ### モジュールを追加するとき

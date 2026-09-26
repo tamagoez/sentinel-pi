@@ -824,10 +824,16 @@ function renderBluetooth(){
       <button onclick="btSetLocalName()">変更</button>
     </div>
     <div class="faint" style="font-size:10.5px;margin-bottom:10px">相手端末から見える、この Pi 自身の Bluetooth 名です (接続相手の表示名とは別)。</div>` : "";
+  // btDevicesListInnerHtml() はキャッシュ済みの BT_DEVICES から組み立てる
+  // (renderBtDevices() と共有) — ここで固定の「読み込み中…」を毎回書くと、
+  // renderBluetooth() は WebSocket 更新のたびに (数秒おき、間引きなしで)
+  // 呼ばれるため、一覧が読み込み済みでも次の呼び出しで即座に「読み込み中」
+  // へ巻き戻ってしまう。**この行を固定文字列に戻さないでください** —
+  // 「読み込み終わっても数秒後に読み込み中に戻る」不具合に戻ります。
   const devicesHtml = b.available ? `
     <div style="margin-top:14px;padding-top:10px;border-top:1px solid var(--line)">
       <div style="font-size:13px;margin-bottom:6px">ペアリング済み端末</div>
-      <div id="bt-devices-list"><span class="faint">読み込み中…</span></div>
+      <div id="bt-devices-list">${btDevicesListInnerHtml()}</div>
     </div>` : "";
   card.innerHTML = localHtml + html + devicesHtml;
   if(b.available && !BT_LOCAL_NAME_LOADED){
@@ -951,20 +957,27 @@ async function loadBtDevices(){
     renderBtDevices();
   }catch(e){}
 }
-function renderBtDevices(){
-  const el = $("#bt-devices-list");
-  if(!el) return;
-  if(BT_DEVICES.length === 0){
-    el.innerHTML = `<span class="faint">ペアリング済み端末はありません</span>`;
-    return;
-  }
+function btDevicesListInnerHtml(){
+  // renderBluetooth() (WebSocket 更新のたびに呼ばれる、間引きなし) と
+  // renderBtDevices() (実際に /api/bluetooth/devices を取得したときだけ
+  // 呼ばれる) の両方がこの同じ HTML を使う。BT_DEVICES_LOADED_AT が 0 の
+  // ままなら「一度も取得していない」ので読み込み中と表示する — 取得済み
+  // なら (0 件でも) そのまま結果を表示し、renderBluetooth() の再描画で
+  // 内容が巻き戻らないようにする。
+  if(BT_DEVICES_LOADED_AT === 0) return `<span class="faint">読み込み中…</span>`;
+  if(BT_DEVICES.length === 0) return `<span class="faint">ペアリング済み端末はありません</span>`;
   const curAddr = (DATA.bluetooth || {}).connected ? (DATA.bluetooth || {}).device_addr : "";
-  el.innerHTML = BT_DEVICES.map(d => `
+  return BT_DEVICES.map(d => `
     <div class="row" style="margin-bottom:6px;align-items:center">
       <i class="dot ${d.addr === curAddr ? "ok" : ""}" style="flex:0"></i>
       <span style="flex:1">${esc(d.name || d.addr)} <span class="faint" style="font-size:11px">(${esc(d.addr)})</span></span>
       <button onclick="btRemoveDevice('${esc(d.addr)}')">削除</button>
     </div>`).join("");
+}
+function renderBtDevices(){
+  const el = $("#bt-devices-list");
+  if(!el) return;
+  el.innerHTML = btDevicesListInnerHtml();
 }
 async function btRemoveDevice(addr){
   if(!confirm(`${addr} を削除しますか? (再度使うには承認からやり直しが必要です)`)) return;
